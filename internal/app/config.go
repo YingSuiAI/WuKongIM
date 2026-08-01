@@ -82,6 +82,8 @@ type Config struct {
 type APIConfig struct {
 	// ListenAddr is the HTTP API listen address. An empty value disables the API service.
 	ListenAddr string
+	// ServiceToken authenticates mutating service API calls such as /user/token.
+	ServiceToken string
 	// ExternalTCPAddr is the published WKProto TCP gateway address returned by bench capacity discovery.
 	ExternalTCPAddr string
 	// ExternalWSAddr is the published WebSocket gateway address returned by bench capacity discovery.

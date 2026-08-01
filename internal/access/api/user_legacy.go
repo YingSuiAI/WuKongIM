@@ -21,7 +21,7 @@ func (s *Server) registerUserRoutes() {
 	if s == nil || s.engine == nil {
 		return
 	}
-	s.engine.POST("/user/token", s.handleUpdateToken)
+	s.engine.POST("/user/token", s.requireServiceToken, s.handleUpdateToken)
 	s.engine.POST("/user/device_quit", s.handleDeviceQuit)
 	s.engine.POST("/user/onlinestatus", s.handleOnlineStatus)
 	s.engine.POST("/user/systemuids_add", s.handleSystemUIDsAdd)

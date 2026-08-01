@@ -16,11 +16,12 @@ import (
 
 func TestUpdateTokenMapsCompatibleRequestToUsecaseCommand(t *testing.T) {
 	users := &recordingUserUsecase{}
-	srv := New(Options{Users: users})
+	srv := New(Options{Users: users, ServiceToken: "service-secret"})
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/user/token", bytes.NewBufferString(`{"uid":"u1","token":"t1","device_flag":0,"device_level":1}`))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer service-secret")
 
 	srv.Handler().ServeHTTP(rec, req)
 
@@ -55,11 +56,12 @@ func TestUpdateTokenReturnsCompatibleErrorEnvelopes(t *testing.T) {
 		{name: "usecase error", users: &recordingUserUsecase{err: errors.New("uid不能为空！")}, body: `{"uid":"","token":"t1","device_flag":0,"device_level":1}`, want: `{"msg":"uid不能为空！","status":400}`},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			srv := New(Options{Users: tt.users})
+			srv := New(Options{Users: tt.users, ServiceToken: "service-secret"})
 
 			rec := httptest.NewRecorder()
 			req := httptest.NewRequest(http.MethodPost, "/user/token", bytes.NewBufferString(tt.body))
 			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Authorization", "Bearer service-secret")
 
 			srv.Handler().ServeHTTP(rec, req)
 

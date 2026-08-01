@@ -972,6 +972,7 @@ func (a *App) wireAPI() {
 		legacyRouteNodes := legacyRouteNodeAddresses(a.cfg.NodeID, a.cfg.Cluster.Control.Voters, legacyRouteExternal, legacyRouteIntranet)
 		a.api = accessapi.New(accessapi.Options{
 			ListenAddr:               a.cfg.API.ListenAddr,
+			ServiceToken:             a.cfg.API.ServiceToken,
 			Readyz:                   a.readyzReport,
 			Maintenance:              a.restoreMaintenance.Load,
 			BenchEnabled:             a.cfg.Bench.APIEnabled,

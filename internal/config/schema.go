@@ -137,6 +137,7 @@ var schemaFields = []fieldSpec{
 	{TOMLPath: "channel.large_group_subscriber_threshold", EnvKey: "WK_CHANNEL_LARGE_GROUP_SUBSCRIBER_THRESHOLD", Kind: kindInt, Group: "channel", Label: "Large group subscriber threshold"},
 
 	{TOMLPath: "api.listen_addr", EnvKey: "WK_API_LISTEN_ADDR", Kind: kindString, Group: "api", Label: "API listen address"},
+	{TOMLPath: "api.service_token", EnvKey: "WK_API_SERVICE_TOKEN", Kind: kindString, Group: "api", Label: "API service token", Sensitive: true},
 	{TOMLPath: "api.external_tcp_addr", EnvKey: "WK_EXTERNAL_TCPADDR", Kind: kindString, Group: "api", Label: "External TCP address"},
 	{TOMLPath: "api.external_ws_addr", EnvKey: "WK_EXTERNAL_WSADDR", Kind: kindString, Group: "api", Label: "External WebSocket address", DiagnosticSensitive: true},
 	{TOMLPath: "api.external_wss_addr", EnvKey: "WK_EXTERNAL_WSSADDR", Kind: kindString, Group: "api", Label: "External secure WebSocket address", DiagnosticSensitive: true},
@@ -331,6 +332,7 @@ func supportedConfigKeysForBuilder() []string {
 		"WK_CLUSTER_COMMIT_COORDINATOR_MAX_BYTES",
 		"WK_CLUSTER_COMMIT_COORDINATOR_SHARDS",
 		"WK_API_LISTEN_ADDR",
+		"WK_API_SERVICE_TOKEN",
 		"WK_MANAGER_LISTEN_ADDR",
 		"WK_MANAGER_AUTH_ON",
 		"WK_MANAGER_JWT_SECRET",

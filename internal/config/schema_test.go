@@ -19,6 +19,7 @@ func TestSchemaFieldsExposeDiagnosticSensitivity(t *testing.T) {
 		{path: "node.id"},
 		{path: "manager.users", sensitive: true, diagnosticSensitive: true},
 		{path: "bench.api_token", sensitive: true, diagnosticSensitive: true},
+		{path: "api.service_token", sensitive: true, diagnosticSensitive: true},
 		{path: "api.external_ws_addr", diagnosticSensitive: true},
 		{path: "api.external_wss_addr", diagnosticSensitive: true},
 		{path: "prometheus.query_base_url", diagnosticSensitive: true},
