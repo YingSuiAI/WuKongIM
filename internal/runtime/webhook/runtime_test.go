@@ -2,8 +2,15 @@ package webhook
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -107,6 +114,70 @@ func TestRuntimeRetriesThenDrops(t *testing.T) {
 	waitUntil(t, time.Second, func() bool { return observer.hasResult(EventMsgNotify, "retry_exhausted") })
 	if got := sender.calls.Load(); got != 2 {
 		t.Fatalf("sender calls = %d, want 2", got)
+	}
+}
+
+func TestRuntimeRetryReusesSignedRequestID(t *testing.T) {
+	const secret = "retry-signing-secret"
+	const body = `[{"message_id":1}]`
+	type attempt struct {
+		timestamp string
+		requestID string
+		signature string
+	}
+	attempts := make([]attempt, 0, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		payload, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("ReadAll() error = %v", err)
+		}
+		if string(payload) != body {
+			t.Fatalf("body = %q, want %q", payload, body)
+		}
+		attempts = append(attempts, attempt{
+			timestamp: r.Header.Get("X-WuKongIM-Timestamp"),
+			requestID: r.Header.Get("X-WuKongIM-Request-ID"),
+			signature: r.Header.Get("X-WuKongIM-Signature"),
+		})
+		if len(attempts) == 1 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	sender := NewHTTPSender(HTTPSenderOptions{Addr: server.URL, Timeout: time.Second, SigningSecret: secret})
+	rt, err := New(RuntimeOptions{
+		Sender:              sender,
+		QueueSize:           1,
+		Workers:             1,
+		NotifyBatchMaxItems: 1,
+		OnlineBatchMaxItems: 1,
+		OfflineUIDBatchSize: 1,
+		RequestTimeout:      time.Second,
+		RetryMaxAttempts:    2,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	rt.sendWithRetry(context.Background(), EventMsgNotify, []byte(body), 1)
+	if len(attempts) != 2 {
+		t.Fatalf("attempt count = %d, want 2", len(attempts))
+	}
+	if attempts[0].requestID == "" || attempts[0].requestID != attempts[1].requestID {
+		t.Fatalf("request IDs = %q, %q, want same non-empty ID", attempts[0].requestID, attempts[1].requestID)
+	}
+	for _, got := range attempts {
+		if !strings.HasPrefix(got.signature, "sha256=") {
+			t.Fatalf("signature = %q, want sha256= prefix", got.signature)
+		}
+		mac := hmac.New(sha256.New, []byte(secret))
+		_, _ = mac.Write([]byte(got.timestamp + "\n" + got.requestID + "\n" + body))
+		want := "sha256=" + hex.EncodeToString(mac.Sum(nil))
+		if got.signature != want {
+			t.Fatalf("signature = %q, want %q", got.signature, want)
+		}
 	}
 }
 
@@ -409,8 +480,9 @@ type recordingSender struct {
 
 func (s *recordingSender) Send(_ context.Context, req SendRequest) error {
 	s.requests <- SendRequest{
-		Event: req.Event,
-		Body:  append([]byte(nil), req.Body...),
+		Event:     req.Event,
+		RequestID: req.RequestID,
+		Body:      append([]byte(nil), req.Body...),
 	}
 	return nil
 }

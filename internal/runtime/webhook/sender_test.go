@@ -2,9 +2,13 @@ package webhook
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -50,6 +54,43 @@ func TestHTTPSenderPostsEventQueryAndBody(t *testing.T) {
 	}
 	if gotBody != `[{"message_id":1}]` {
 		t.Fatalf("body = %q", gotBody)
+	}
+}
+
+func TestHTTPSenderSignsExactRawBody(t *testing.T) {
+	const secret = "signing-secret"
+	const body = `{"message":"exact"}`
+	var gotTimestamp, gotRequestID, gotSignature string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotTimestamp = r.Header.Get("X-WuKongIM-Timestamp")
+		gotRequestID = r.Header.Get("X-WuKongIM-Request-ID")
+		gotSignature = r.Header.Get("X-WuKongIM-Signature")
+		data, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("ReadAll() error = %v", err)
+		}
+		if string(data) != body {
+			t.Fatalf("body = %q, want exact raw body %q", data, body)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	sender := NewHTTPSender(HTTPSenderOptions{Addr: server.URL, Timeout: time.Second, SigningSecret: secret})
+	if err := sender.Send(context.Background(), SendRequest{Event: EventMsgNotify, Body: []byte(body)}); err != nil {
+		t.Fatalf("Send() error = %v", err)
+	}
+	if gotTimestamp == "" || gotRequestID == "" {
+		t.Fatalf("signing headers timestamp=%q requestID=%q, want non-empty", gotTimestamp, gotRequestID)
+	}
+	if !strings.HasPrefix(gotSignature, "sha256=") {
+		t.Fatalf("signature = %q, want sha256= prefix", gotSignature)
+	}
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write([]byte(gotTimestamp + "\n" + gotRequestID + "\n" + body))
+	want := "sha256=" + hex.EncodeToString(mac.Sum(nil))
+	if gotSignature != want {
+		t.Fatalf("signature = %q, want %q", gotSignature, want)
 	}
 }
 

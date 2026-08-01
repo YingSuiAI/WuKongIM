@@ -44,8 +44,9 @@ func (a *App) wireWebhook() error {
 		return nil
 	}
 	sender := runtimewebhook.NewHTTPSender(runtimewebhook.HTTPSenderOptions{
-		Addr:    a.cfg.Webhook.HTTPAddr,
-		Timeout: a.cfg.Webhook.RequestTimeout,
+		Addr:          a.cfg.Webhook.HTTPAddr,
+		Timeout:       a.cfg.Webhook.RequestTimeout,
+		SigningSecret: a.cfg.Webhook.SigningSecret,
 	})
 	runtime, err := runtimewebhook.New(runtimewebhook.RuntimeOptions{
 		Sender:              sender,

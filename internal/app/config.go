@@ -390,6 +390,8 @@ type WebhookConfig struct {
 	Enabled bool
 	// HTTPAddr receives JSON webhook POST requests as {HTTPAddr}?event=<event>.
 	HTTPAddr string
+	// SigningSecret authenticates webhook requests with HMAC-SHA256 when configured.
+	SigningSecret string
 	// FocusEvents limits delivered event names. Empty means all supported webhook events are delivered.
 	FocusEvents []string
 	// QueueSize bounds accepted webhook events waiting in memory before worker execution.
@@ -457,6 +459,9 @@ func defaultWebhookConfig(cfg WebhookConfig) WebhookConfig {
 func validateWebhookConfig(cfg WebhookConfig) error {
 	if cfg.Enabled && cfg.HTTPAddr == "" {
 		return fmt.Errorf("%w: webhook HTTPAddr is required when webhook is enabled", ErrInvalidConfig)
+	}
+	if cfg.HTTPAddr != "" && strings.TrimSpace(cfg.SigningSecret) == "" {
+		return fmt.Errorf("%w: webhook SigningSecret is required when webhook HTTPAddr is configured", ErrInvalidConfig)
 	}
 	if cfg.QueueSize < 0 {
 		return fmt.Errorf("%w: webhook QueueSize must be >= 0", ErrInvalidConfig)

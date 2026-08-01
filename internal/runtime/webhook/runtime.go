@@ -340,6 +340,11 @@ func (r *Runtime) sendWithRetry(ctx context.Context, event string, body []byte, 
 	if attempts <= 0 {
 		attempts = 1
 	}
+	requestID, err := newRequestID()
+	if err != nil {
+		r.observeSend(event, resultError, items, 0, 0, err)
+		return
+	}
 	for attempt := 1; attempt <= attempts; attempt++ {
 		if err := ctx.Err(); err != nil {
 			r.observeSend(event, contextResult(err), items, attempt, 0, err)
@@ -351,7 +356,7 @@ func (r *Runtime) sendWithRetry(ctx context.Context, event string, body []byte, 
 			attemptCtx, cancel = context.WithTimeout(ctx, r.opts.RequestTimeout)
 		}
 		started := time.Now()
-		err := r.sender.Send(attemptCtx, SendRequest{Event: event, Body: body})
+		err := r.sender.Send(attemptCtx, SendRequest{Event: event, RequestID: requestID, Body: body})
 		cancel()
 		duration := time.Since(started)
 		if err == nil {

@@ -180,6 +180,8 @@ recipient_authority_dispatch_concurrency = 0
 
 [webhook]
 http_addr = ""
+# Required when http_addr is configured.
+signing_secret = ""
 focus_events = []
 queue_size = 1024
 workers = 16

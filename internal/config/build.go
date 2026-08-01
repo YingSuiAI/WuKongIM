@@ -1200,6 +1200,7 @@ func buildConfig(values map[string]string) (app.Config, error) {
 		cfg.Delivery.RecipientWorkerConcurrency = concurrency
 	}
 	cfg.Webhook.HTTPAddr = configValue(values, "WK_WEBHOOK_HTTP_ADDR")
+	cfg.Webhook.SigningSecret = configValue(values, "WK_WEBHOOK_SIGNING_SECRET")
 	if raw := configValue(values, "WK_WEBHOOK_FOCUS_EVENTS"); raw != "" {
 		focusEvents, err := parseStringList("WK_WEBHOOK_FOCUS_EVENTS", raw)
 		if err != nil {

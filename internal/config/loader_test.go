@@ -364,6 +364,8 @@ func TestLoadBuildsRedactedStartupConfigSnapshot(t *testing.T) {
 		"WK_CLUSTER_JOIN_TOKEN=join-secret",
 		"WK_MANAGER_JWT_SECRET=jwt-secret",
 		`WK_MANAGER_USERS=[{"username":"admin","password":"plain"}]`,
+		"WK_WEBHOOK_HTTP_ADDR=http://127.0.0.1:18080/webhook",
+		"WK_WEBHOOK_SIGNING_SECRET=webhook-secret",
 	}})
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
@@ -373,12 +375,12 @@ func TestLoadBuildsRedactedStartupConfigSnapshot(t *testing.T) {
 		t.Fatalf("snapshot metadata = %#v", snapshot)
 	}
 	text := snapshotText(snapshot)
-	for _, forbidden := range []string{"join-secret", "jwt-secret", "plain", "/tmp/wukongim-node"} {
+	for _, forbidden := range []string{"join-secret", "jwt-secret", "plain", "webhook-secret", "/tmp/wukongim-node"} {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("snapshot leaked %q: %s", forbidden, text)
 		}
 	}
-	for _, want := range []string{"WK_NODE_ID=1", "WK_CLUSTER_JOIN_TOKEN=******", "WK_MANAGER_JWT_SECRET=******", "WK_MANAGER_USERS=******"} {
+	for _, want := range []string{"WK_NODE_ID=1", "WK_CLUSTER_JOIN_TOKEN=******", "WK_MANAGER_JWT_SECRET=******", "WK_MANAGER_USERS=******", "WK_WEBHOOK_SIGNING_SECRET=******"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("snapshot text %q missing %q", text, want)
 		}

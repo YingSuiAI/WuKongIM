@@ -23,6 +23,7 @@ func TestSchemaFieldsExposeDiagnosticSensitivity(t *testing.T) {
 		{path: "api.external_wss_addr", diagnosticSensitive: true},
 		{path: "prometheus.query_base_url", diagnosticSensitive: true},
 		{path: "webhook.http_addr", diagnosticSensitive: true},
+		{path: "webhook.signing_secret", sensitive: true, diagnosticSensitive: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.path, func(t *testing.T) {

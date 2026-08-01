@@ -229,6 +229,7 @@ var schemaFields = []fieldSpec{
 	{TOMLPath: "delivery.recipient_worker_concurrency", EnvKey: "WK_DELIVERY_RECIPIENT_WORKER_CONCURRENCY", Kind: kindInt, Group: "delivery", Label: "Delivery recipient worker concurrency"},
 
 	{TOMLPath: "webhook.http_addr", EnvKey: "WK_WEBHOOK_HTTP_ADDR", Kind: kindString, Group: "webhook", Label: "Webhook HTTP address", DiagnosticSensitive: true},
+	{TOMLPath: "webhook.signing_secret", EnvKey: "WK_WEBHOOK_SIGNING_SECRET", Kind: kindString, Group: "webhook", Label: "Webhook signing secret", Sensitive: true},
 	{TOMLPath: "webhook.focus_events", EnvKey: "WK_WEBHOOK_FOCUS_EVENTS", Kind: kindStringList, Group: "webhook", Label: "Webhook focus events"},
 	{TOMLPath: "webhook.queue_size", EnvKey: "WK_WEBHOOK_QUEUE_SIZE", Kind: kindInt, Group: "webhook", Label: "Webhook queue size"},
 	{TOMLPath: "webhook.workers", EnvKey: "WK_WEBHOOK_WORKERS", Kind: kindInt, Group: "webhook", Label: "Webhook workers"},
@@ -410,6 +411,7 @@ func supportedConfigKeysForBuilder() []string {
 		"WK_DELIVERY_EVENT_QUEUE_SIZE",
 		"WK_DELIVERY_RECIPIENT_WORKER_CONCURRENCY",
 		"WK_WEBHOOK_HTTP_ADDR",
+		"WK_WEBHOOK_SIGNING_SECRET",
 		"WK_WEBHOOK_FOCUS_EVENTS",
 		"WK_WEBHOOK_QUEUE_SIZE",
 		"WK_WEBHOOK_WORKERS",
