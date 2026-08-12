@@ -487,18 +487,16 @@ func generatedFinishEventID(channelIndex int, streamIndex int) string {
 }
 
 func generatedAgentRunDeltaPayload(eventID, runID, conversationID, clientMsgNo, fromUID string, messageSequence uint64, eventKey string, authoritySequence, authorizationFence uint64, occurredAt time.Time, textDelta string) map[string]any {
-	digest := strings.Repeat("a", 64)
-	return generatedAgentRunPayload(eventID, runID, conversationID, clientMsgNo, fromUID, messageSequence, eventKey, "delta", authoritySequence, authorizationFence, occurredAt, digest, map[string]any{"text_delta": textDelta})
+	return generatedAgentRunPayload(eventID, runID, conversationID, clientMsgNo, fromUID, messageSequence, eventKey, "delta", authoritySequence, authorizationFence, occurredAt, map[string]any{"text_delta": textDelta})
 }
 
 func generatedAgentRunFinishPayload(eventID, runID, conversationID, clientMsgNo, fromUID string, messageSequence, authoritySequence, authorizationFence uint64, occurredAt time.Time) map[string]any {
-	digest := strings.Repeat("b", 64)
-	return generatedAgentRunPayload(eventID, runID, conversationID, clientMsgNo, fromUID, messageSequence, "main", "finish", authoritySequence, authorizationFence, occurredAt, digest, map[string]any{"snapshot": map[string]any{
-		"state": "succeeded", "authority_sequence": authoritySequence, "text": "", "complete": true, "projection_digest_sha256": digest,
+	return generatedAgentRunPayload(eventID, runID, conversationID, clientMsgNo, fromUID, messageSequence, "main", "finish", authoritySequence, authorizationFence, occurredAt, map[string]any{"snapshot": map[string]any{
+		"state": "succeeded", "authority_sequence": authoritySequence, "text": "", "complete": true,
 	}})
 }
 
-func generatedAgentRunPayload(eventID, runID, conversationID, clientMsgNo, fromUID string, messageSequence uint64, eventKey, eventType string, authoritySequence, authorizationFence uint64, occurredAt time.Time, digest string, variant map[string]any) map[string]any {
+func generatedAgentRunPayload(eventID, runID, conversationID, clientMsgNo, fromUID string, messageSequence uint64, eventKey, eventType string, authoritySequence, authorizationFence uint64, occurredAt time.Time, variant map[string]any) map[string]any {
 	payload := map[string]any{
 		"event_id": eventID, "run_id": runID,
 		"base_message": map[string]any{
@@ -507,7 +505,7 @@ func generatedAgentRunPayload(eventID, runID, conversationID, clientMsgNo, fromU
 			"message_sequence": messageSequence, "source_principal_id": generatedContractUUID(fromUID, 3),
 		},
 		"event_key": eventKey, "event_type": eventType, "authority_sequence": authoritySequence,
-		"projection_digest_sha256": digest, "authorization_fence": authorizationFence, "occurred_at": occurredAt.Format(time.RFC3339Nano),
+		"authorization_fence": authorizationFence, "occurred_at": occurredAt.Format(time.RFC3339Nano),
 	}
 	for key, value := range variant {
 		payload[key] = value

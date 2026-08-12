@@ -811,7 +811,6 @@ func reduceMessageEventDelta(existing []byte, payload []byte) []byte {
 	var delta struct {
 		TextDelta         string `json:"text_delta"`
 		AuthoritySequence uint64 `json:"authority_sequence"`
-		ProjectionDigest  string `json:"projection_digest_sha256"`
 	}
 	if err := json.Unmarshal(payload, &delta); err != nil || delta.TextDelta == "" {
 		return cloneBytes(payload)
@@ -826,7 +825,6 @@ func reduceMessageEventDelta(existing []byte, payload []byte) []byte {
 	}
 	current["text"] = text + delta.TextDelta
 	current["authority_sequence"] = delta.AuthoritySequence
-	current["projection_digest_sha256"] = delta.ProjectionDigest
 	out, err := json.Marshal(current)
 	if err != nil {
 		return cloneBytes(payload)

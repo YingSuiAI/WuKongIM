@@ -40,6 +40,9 @@ type realtimeMessageEventPayload struct {
 	ChannelType int64           `json:"channel_type"`
 	MessageID   uint64          `json:"message_id"`
 	ClientMsgNo string          `json:"client_msg_no"`
+	RunID       string          `json:"run_id"`
+	EventType   string          `json:"event_type"`
+	EventKey    string          `json:"event_key"`
 	MsgEventSeq uint64          `json:"msg_event_seq"`
 	Payload     json.RawMessage `json:"payload"`
 }
@@ -129,7 +132,8 @@ func (f *messageEventAPIFacade) pushMessageEventPage(ctx context.Context, event 
 func marshalRealtimeMessageEvent(event messageusecase.MessageEventAppend, result messageusecase.MessageEventAppendResult) ([]byte, error) {
 	return json.Marshal(realtimeMessageEventPayload{
 		ChannelID: result.ChannelID, ChannelType: result.ChannelType, MessageID: result.MessageID,
-		ClientMsgNo: result.ClientMsgNo, MsgEventSeq: result.MsgEventSeq,
+		ClientMsgNo: result.ClientMsgNo, RunID: result.RunID, EventType: event.EventType,
+		EventKey: result.EventKey, MsgEventSeq: result.MsgEventSeq,
 		Payload: append(json.RawMessage(nil), event.Payload...),
 	})
 }

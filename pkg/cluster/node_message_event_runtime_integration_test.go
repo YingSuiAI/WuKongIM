@@ -932,11 +932,11 @@ func TestClusterGetMessageEventStatesBatchRoutesEachMessage(t *testing.T) {
 }
 
 func messageEventDeltaForIntegrationTest(text string, authoritySequence uint64) []byte {
-	return []byte(fmt.Sprintf(`{"text_delta":%q,"authority_sequence":%d,"projection_digest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`, text, authoritySequence))
+	return []byte(fmt.Sprintf(`{"text_delta":%q,"authority_sequence":%d}`, text, authoritySequence))
 }
 
 func messageEventFinishForIntegrationTest(text string, authoritySequence uint64) []byte {
-	return []byte(fmt.Sprintf(`{"snapshot":{"state":"succeeded","complete":true,"text":%q,"authority_sequence":%d,"projection_digest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}`, text, authoritySequence))
+	return []byte(fmt.Sprintf(`{"snapshot":{"state":"succeeded","complete":true,"text":%q,"authority_sequence":%d}}`, text, authoritySequence))
 }
 
 type countingResultProposer struct {

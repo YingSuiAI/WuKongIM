@@ -80,7 +80,7 @@ func TestMessageEventSeparatesAuthorityAndTransportSequences(t *testing.T) {
 			ChannelID: "g1", ChannelType: 2, ClientMsgNo: "cmn-dual-seq", RunID: "run-1",
 			AuthorizationFence: "7", AuthoritySequence: authority,
 			EventID: fmt.Sprintf("evt-%d", authority), EventKey: "main", EventType: EventTypeDelta,
-			Payload: []byte(fmt.Sprintf(`{"text_delta":"%d","authority_sequence":%d,"projection_digest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`, index+1, authority)),
+			Payload: []byte(fmt.Sprintf(`{"text_delta":"%d","authority_sequence":%d}`, index+1, authority)),
 		})
 		if err != nil {
 			t.Fatalf("AppendMessageEvent(%d): %v", authority, err)
@@ -358,7 +358,7 @@ func TestMessageEventAppendFailedFinishProjectsSnapshotErrorCode(t *testing.T) {
 	result, err := shard.AppendMessageEvent(ctx, MessageEventAppend{
 		ChannelID: "g1", ChannelType: 2, ClientMsgNo: "cmn-failed", RunID: "run-1", AuthorizationFence: "1", AuthoritySequence: 1,
 		EventID: "evt-failed", EventKey: "main", EventType: EventTypeFinish,
-		Payload: []byte(`{"snapshot":{"state":"failed","complete":true,"text":"partial","authority_sequence":1,"projection_digest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","public_error_code":"model_unavailable"}}`),
+		Payload: []byte(`{"snapshot":{"state":"failed","complete":true,"text":"partial","authority_sequence":1,"public_error_code":"model_unavailable"}}`),
 	})
 	if err != nil {
 		t.Fatalf("AppendMessageEvent(failed finish): %v", err)
@@ -366,7 +366,7 @@ func TestMessageEventAppendFailedFinishProjectsSnapshotErrorCode(t *testing.T) {
 	if result.Status != EventStatusClosed || result.State.Error != "model_unavailable" {
 		t.Fatalf("failed finish result = %#v, want closed with snapshot public_error_code", result)
 	}
-	if !jsonEqualForTest(string(result.State.SnapshotPayload), `{"state":"failed","complete":true,"text":"partial","authority_sequence":1,"projection_digest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","public_error_code":"model_unavailable"}`) {
+	if !jsonEqualForTest(string(result.State.SnapshotPayload), `{"state":"failed","complete":true,"text":"partial","authority_sequence":1,"public_error_code":"model_unavailable"}`) {
 		t.Fatalf("failed finish snapshot = %s", result.State.SnapshotPayload)
 	}
 }
@@ -513,11 +513,11 @@ func jsonEqualForTest(left, right string) bool {
 }
 
 func messageEventDeltaPayloadForTest(text string, authoritySequence uint64) []byte {
-	return []byte(fmt.Sprintf(`{"text_delta":%q,"authority_sequence":%d,"projection_digest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`, text, authoritySequence))
+	return []byte(fmt.Sprintf(`{"text_delta":%q,"authority_sequence":%d}`, text, authoritySequence))
 }
 
 func messageEventSnapshotForTest(text string, authoritySequence uint64, complete bool) []byte {
-	return []byte(fmt.Sprintf(`{"state":%q,"complete":%t,"text":%q,"authority_sequence":%d,"projection_digest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`,
+	return []byte(fmt.Sprintf(`{"state":%q,"complete":%t,"text":%q,"authority_sequence":%d}`,
 		map[bool]string{false: "running", true: "succeeded"}[complete], complete, text, authoritySequence))
 }
 

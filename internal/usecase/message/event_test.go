@@ -31,7 +31,7 @@ func TestAppendMessageEventNormalizesPersonChannelAndClonesPayload(t *testing.T)
 		EventStore: store,
 		Now:        func() time.Time { return time.UnixMilli(1700000000123) },
 	})
-	payload := []byte(`{"event_id":"evt-1","run_id":"run-1","base_message":{"conversation_id":"019c0000-0000-7000-8000-000000000001","message_id":"019c0000-0000-7000-8000-000000000002","client_msg_id":"cmn-1","committed_message_ref":"agent-run.019c0000-0000-7000-8000-000000000003","message_sequence":1,"source_principal_id":"u1"},"event_key":"main","event_type":"delta","authority_sequence":1,"text_delta":"hi","projection_digest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","authorization_fence":1,"occurred_at":"2023-11-14T22:13:20Z"}`)
+	payload := []byte(`{"event_id":"evt-1","run_id":"run-1","base_message":{"conversation_id":"019c0000-0000-7000-8000-000000000001","message_id":"019c0000-0000-7000-8000-000000000002","client_msg_id":"cmn-1","committed_message_ref":"agent-run.019c0000-0000-7000-8000-000000000003","message_sequence":1,"source_principal_id":"u1"},"event_key":"main","event_type":"delta","authority_sequence":1,"text_delta":"hi","authorization_fence":1,"occurred_at":"2023-11-14T22:13:20Z"}`)
 
 	result, err := app.AppendMessageEvent(context.Background(), MessageEventAppend{
 		ChannelID:   " u2 ",
@@ -128,15 +128,13 @@ func validAgentRunEventPayload(eventID, runID, clientMsgNo, fromUID, eventType, 
 			"message_sequence": 1, "source_principal_id": fromUID,
 		},
 		"event_key": eventKey, "event_type": eventType, "authority_sequence": sequence,
-		"projection_digest_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-		"authorization_fence":      1, "occurred_at": "2023-11-14T22:13:20Z",
+		"authorization_fence": 1, "occurred_at": "2023-11-14T22:13:20Z",
 	}
 	if eventType == EventTypeDelta {
 		body["text_delta"] = "hi"
 	} else {
 		body["snapshot"] = map[string]any{
 			"state": "running", "authority_sequence": sequence, "text": "", "complete": false,
-			"projection_digest_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		}
 	}
 	out, _ := json.Marshal(body)

@@ -27,7 +27,6 @@ const (
 	messageEventRunID        = "run-e2e-1"
 	messageEventFence        = uint64(1)
 	messageEventOccurredAt   = int64(1700000000000)
-	messageEventDigest       = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 )
 
 type messageEventEnvelope struct {
@@ -263,16 +262,14 @@ func postMessageEvent(t *testing.T, ctx context.Context, node suite.StartedNode,
 			"message_sequence": 1, "source_principal_id": anchor.FromUID,
 		},
 		"event_key": eventKey, "event_type": eventType, "authority_sequence": authoritySequence,
-		"projection_digest_sha256": messageEventDigest,
-		"authorization_fence":      messageEventFence,
-		"occurred_at":              "2023-11-14T22:13:20Z",
+		"authorization_fence": messageEventFence,
+		"occurred_at":         "2023-11-14T22:13:20Z",
 	}
 	if eventType == "delta" {
 		payload["text_delta"] = text
 	} else {
 		payload["snapshot"] = map[string]any{
 			"state": state, "authority_sequence": authoritySequence, "text": text, "complete": eventType == "finish",
-			"projection_digest_sha256": messageEventDigest,
 		}
 	}
 	body := map[string]any{
@@ -297,9 +294,8 @@ func postMessageEventError(ctx context.Context, node suite.StartedNode, anchor m
 			"conversation_id": "019c0000-0000-7000-8000-000000000001", "message_id": "019c0000-0000-7000-8000-000000000002",
 			"client_msg_id": anchor.ClientMsgNo, "committed_message_ref": "agent-run.e2e", "message_sequence": 1, "source_principal_id": anchor.FromUID,
 		},
-		"event_key": "main", "event_type": eventType, "authority_sequence": authoritySequence,
-		"projection_digest_sha256": messageEventDigest, "authorization_fence": messageEventFence, "occurred_at": "2023-11-14T22:13:20Z",
-		"snapshot": map[string]any{"state": "succeeded", "authority_sequence": authoritySequence, "text": "hello ", "complete": true, "projection_digest_sha256": messageEventDigest},
+		"event_key": "main", "event_type": eventType, "authority_sequence": authoritySequence, "authorization_fence": messageEventFence, "occurred_at": "2023-11-14T22:13:20Z",
+		"snapshot": map[string]any{"state": "succeeded", "authority_sequence": authoritySequence, "text": "hello ", "complete": true},
 	}
 	body := map[string]any{
 		"channel_id": anchor.ChannelID, "channel_type": frame.ChannelTypeGroup, "from_uid": anchor.FromUID,

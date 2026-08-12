@@ -3,7 +3,6 @@ package message
 import (
 	"context"
 	"encoding/json"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -127,7 +126,6 @@ type agentRunMessageEventPayload struct {
 	EventKey           string          `json:"event_key"`
 	EventType          string          `json:"event_type"`
 	AuthoritySequence  uint64          `json:"authority_sequence"`
-	ProjectionDigest   string          `json:"projection_digest_sha256"`
 	AuthorizationFence uint64          `json:"authorization_fence"`
 	OccurredAt         string          `json:"occurred_at"`
 	TextDelta          *string         `json:"text_delta"`
@@ -147,11 +145,8 @@ type agentRunMessageEventSnapshot struct {
 	AuthoritySequence uint64 `json:"authority_sequence"`
 	Text              string `json:"text"`
 	Complete          bool   `json:"complete"`
-	ProjectionDigest  string `json:"projection_digest_sha256"`
 	PublicErrorCode   string `json:"public_error_code"`
 }
-
-var projectionDigestPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 func validateAgentRunMessageEventPayload(event MessageEventAppend) error {
 	var payload agentRunMessageEventPayload
@@ -172,7 +167,7 @@ func validateAgentRunMessageEventPayload(event MessageEventAppend) error {
 		return ErrMessageEventAnchorMismatch
 	}
 	if payload.BaseMessage.ConversationID == "" || payload.BaseMessage.MessageID == "" || payload.BaseMessage.SourcePrincipalID == "" ||
-		!projectionDigestPattern.MatchString(payload.ProjectionDigest) || payload.OccurredAt == "" ||
+		payload.OccurredAt == "" ||
 		payload.BaseMessage.CommittedRef == "" || payload.BaseMessage.MessageSequence == 0 {
 		return ErrMessageEventAnchorMismatch
 	}
@@ -192,8 +187,7 @@ func validateAgentRunMessageEventPayload(event MessageEventAppend) error {
 	}
 	var snapshot agentRunMessageEventSnapshot
 	if json.Unmarshal(payload.Snapshot, &snapshot) != nil || snapshot.State == "" ||
-		snapshot.AuthoritySequence != event.AuthoritySequence || !projectionDigestPattern.MatchString(snapshot.ProjectionDigest) ||
-		snapshot.ProjectionDigest != payload.ProjectionDigest {
+		snapshot.AuthoritySequence != event.AuthoritySequence {
 		return ErrMessageEventAnchorMismatch
 	}
 	terminal := snapshot.State == "succeeded" || snapshot.State == "failed" || snapshot.State == "cancelled" || snapshot.State == "timed_out"

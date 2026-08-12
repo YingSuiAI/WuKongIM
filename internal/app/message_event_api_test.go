@@ -19,7 +19,7 @@ func TestRealtimeMessageEventCarriesTypedReducerFields(t *testing.T) {
 		Payload:   payload,
 	}, messageusecase.MessageEventAppendResult{
 		ChannelID: "u1@agent-a", ChannelType: 11, MessageID: 9001, ClientMsgNo: "client-msg-9001",
-		EventKey: "main", MsgEventSeq: 2,
+		RunID: "run-1", EventKey: "main", MsgEventSeq: 2,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -27,6 +27,9 @@ func TestRealtimeMessageEventCarriesTypedReducerFields(t *testing.T) {
 	var envelope struct {
 		ChannelID   string `json:"channel_id"`
 		MessageID   uint64 `json:"message_id"`
+		RunID       string `json:"run_id"`
+		EventType   string `json:"event_type"`
+		EventKey    string `json:"event_key"`
 		MsgEventSeq uint64 `json:"msg_event_seq"`
 		Payload     struct {
 			RunID             string `json:"run_id"`
@@ -39,7 +42,8 @@ func TestRealtimeMessageEventCarriesTypedReducerFields(t *testing.T) {
 	if err := json.Unmarshal(got, &envelope); err != nil {
 		t.Fatal(err)
 	}
-	if envelope.ChannelID != "u1@agent-a" || envelope.MessageID != 9001 || envelope.MsgEventSeq != 2 ||
+	if envelope.ChannelID != "u1@agent-a" || envelope.MessageID != 9001 || envelope.RunID != "run-1" ||
+		envelope.EventType != "delta" || envelope.EventKey != "main" || envelope.MsgEventSeq != 2 ||
 		envelope.Payload.RunID != "run-1" || envelope.Payload.EventType != "delta" || envelope.Payload.EventKey != "main" ||
 		envelope.Payload.AuthoritySequence != 7 || envelope.Payload.TextDelta != "hello" {
 		t.Fatalf("production EVENT data = %s", got)
@@ -196,6 +200,6 @@ func validMessageEventAppend() messageusecase.MessageEventAppend {
 		ChannelID: "u1@agent", ChannelType: 11, FromUID: "u1", MessageID: 9, ClientMsgNo: "cmn-1",
 		RunID: "run-1", AuthorizationFence: "1", AuthoritySequence: 1,
 		EventID: "evt-1", EventKey: "main", EventType: messageusecase.EventTypeDelta,
-		Payload: []byte(`{"event_id":"evt-1","run_id":"run-1","base_message":{"conversation_id":"019c0000-0000-7000-8000-000000000001","message_id":"019c0000-0000-7000-8000-000000000002","client_msg_id":"cmn-1","committed_message_ref":"agent-run.test","message_sequence":1,"source_principal_id":"u1"},"event_key":"main","event_type":"delta","authority_sequence":1,"text_delta":"hi","projection_digest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","authorization_fence":1,"occurred_at":"2023-11-14T22:13:20Z"}`),
+		Payload: []byte(`{"event_id":"evt-1","run_id":"run-1","base_message":{"conversation_id":"019c0000-0000-7000-8000-000000000001","message_id":"019c0000-0000-7000-8000-000000000002","client_msg_id":"cmn-1","committed_message_ref":"agent-run.test","message_sequence":1,"source_principal_id":"u1"},"event_key":"main","event_type":"delta","authority_sequence":1,"text_delta":"hi","authorization_fence":1,"occurred_at":"2023-11-14T22:13:20Z"}`),
 	}
 }
