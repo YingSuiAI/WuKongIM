@@ -5,7 +5,9 @@ import (
 	"errors"
 	"time"
 
+	channelmembers "github.com/WuKongIM/WuKongIM/internal/contracts/channelmembers"
 	metadb "github.com/WuKongIM/WuKongIM/pkg/db/meta"
+	runtimechannelid "github.com/WuKongIM/WuKongIM/pkg/protocol/channelid"
 )
 
 const (
@@ -67,6 +69,9 @@ type Options struct {
 	Hydrator HeadHydrator
 	// MembershipMutations owns ordinary per-user badge, hide, and activation state.
 	MembershipMutations MembershipMutationStore
+	// MembershipAuthority revalidates non-person live candidates before any
+	// Channel-head hydration and repairs strictly older stale projections.
+	MembershipAuthority channelmembers.LiveMembershipAuthority
 	// Now returns the current time for mutation timestamps.
 	Now func() time.Time
 	// TombstonesRetainedSince reports the oldest deletion coverage still guaranteed.
@@ -79,6 +84,7 @@ type App struct {
 	directory               DirectoryStore
 	hydrator                HeadHydrator
 	memberships             MembershipMutationStore
+	membershipAuthority     channelmembers.LiveMembershipAuthority
 	now                     func() time.Time
 	tombstonesRetainedSince func() int64
 }
@@ -95,6 +101,7 @@ func New(opts Options) *App {
 		directory:               opts.Directory,
 		hydrator:                opts.Hydrator,
 		memberships:             opts.MembershipMutations,
+		membershipAuthority:     opts.MembershipAuthority,
 		now:                     opts.Now,
 		tombstonesRetainedSince: opts.TombstonesRetainedSince,
 	}
@@ -139,6 +146,10 @@ func (a *App) listMembershipDirectory(ctx context.Context, req ListRequest) (Lis
 		}
 		live = append(live, row)
 	}
+	if len(live) == 0 {
+		return result, nil
+	}
+	live = a.confirmLiveMemberships(ctx, req.UID, live, &result)
 	if len(live) == 0 {
 		return result, nil
 	}
@@ -210,6 +221,10 @@ func (a *App) Retry(ctx context.Context, req RetryRequest) (ListResult, error) {
 	if len(live) == 0 {
 		return result, nil
 	}
+	live = a.confirmLiveMemberships(ctx, req.UID, live, &result)
+	if len(live) == 0 {
+		return result, nil
+	}
 	hydrated, err := a.hydrator.HydrateConversationHeads(ctx, req.UID, live)
 	if err != nil {
 		return ListResult{}, err
@@ -237,6 +252,68 @@ func (a *App) Retry(ctx context.Context, req RetryRequest) (ListResult, error) {
 		}
 	}
 	return result, nil
+}
+
+func (a *App) confirmLiveMemberships(ctx context.Context, uid string, rows []metadb.UserChannelMembership, result *ListResult) []metadb.UserChannelMembership {
+	allowedByIndex := make([]bool, len(rows))
+	candidates := make([]channelmembers.LiveMembership, 0, len(rows))
+	candidateIndexes := make([]int, 0, len(rows))
+	for index, row := range rows {
+		key := ConversationKey{ChannelID: row.ChannelID, ChannelType: row.ChannelType}
+		if row.ChannelType == 1 {
+			left, right, err := runtimechannelid.DecodePersonChannel(row.ChannelID)
+			if err != nil || (left != uid && right != uid) || runtimechannelid.EncodePersonChannel(left, right) != row.ChannelID {
+				result.Deletes = append(result.Deletes, key)
+				continue
+			}
+			allowedByIndex[index] = true
+			continue
+		}
+		candidateIndexes = append(candidateIndexes, index)
+		candidates = append(candidates, channelmembers.LiveMembership{
+			UID: uid, ChannelID: row.ChannelID, ChannelType: row.ChannelType, SourceVersion: row.SourceVersion,
+		})
+	}
+	if len(candidates) > 0 && a.membershipAuthority == nil {
+		for _, index := range candidateIndexes {
+			row := rows[index]
+			result.Unresolved = append(result.Unresolved, ConversationKey{ChannelID: row.ChannelID, ChannelType: row.ChannelType})
+		}
+	} else if len(candidates) > 0 {
+		facts := a.membershipAuthority.AuthorizeLiveMemberships(ctx, candidates)
+		if len(facts) != len(candidates) {
+			for _, index := range candidateIndexes {
+				row := rows[index]
+				result.Unresolved = append(result.Unresolved, ConversationKey{ChannelID: row.ChannelID, ChannelType: row.ChannelType})
+			}
+		} else {
+			for candidateIndex, fact := range facts {
+				rowIndex := candidateIndexes[candidateIndex]
+				row := rows[rowIndex]
+				candidate := candidates[candidateIndex]
+				key := ConversationKey{ChannelID: row.ChannelID, ChannelType: row.ChannelType}
+				if fact.Err != nil {
+					result.Unresolved = append(result.Unresolved, key)
+					continue
+				}
+				if fact.ChannelFound && fact.Subscriber && !fact.Disband {
+					allowedByIndex[rowIndex] = true
+					continue
+				}
+				if !fact.Subscriber && fact.SubscriberMutationVersion > row.SourceVersion {
+					_ = a.membershipAuthority.TombstoneRevokedMembership(ctx, candidate, fact.SubscriberMutationVersion, a.now().UnixNano())
+				}
+				result.Deletes = append(result.Deletes, key)
+			}
+		}
+	}
+	allowed := make([]metadb.UserChannelMembership, 0, len(rows))
+	for index, row := range rows {
+		if allowedByIndex[index] {
+			allowed = append(allowed, row)
+		}
+	}
+	return allowed
 }
 
 func conversationFromMembership(row metadb.UserChannelMembership, head HydrationResult) (Conversation, bool) {

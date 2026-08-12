@@ -47,6 +47,7 @@ import (
 	"github.com/WuKongIM/WuKongIM/pkg/gateway/session"
 	goruntimeregistry "github.com/WuKongIM/WuKongIM/pkg/goroutine"
 	"github.com/WuKongIM/WuKongIM/pkg/protocol/frame"
+	slotproxy "github.com/WuKongIM/WuKongIM/pkg/slot/proxy"
 	"github.com/WuKongIM/WuKongIM/pkg/wklog"
 	"github.com/bwmarrin/snowflake"
 )
@@ -2474,6 +2475,8 @@ func TestManagerServerListsRecentConversationsFromConversationUsecase(t *testing
 				ReadSeq: 4, ActivatedAt: 200000000000, UpdatedAt: 200000000000,
 			}},
 		},
+		channelPages: map[uint32][]metadb.Channel{1: {{ChannelID: "g1", ChannelType: 2, SubscriberMutationVersion: 1}}},
+		systemUIDs:   []string{"u1"},
 		conversationMessages: map[metadb.ChannelKey][]channelruntime.Message{
 			{ChannelID: "g1", ChannelType: 2}: {{
 				MessageID: 99, MessageSeq: 7, ClientMsgNo: "c7",
@@ -6051,6 +6054,69 @@ func (f *fakeManagerCluster) ContainsChannelSubscriberAuthoritative(_ context.Co
 
 func (f *fakeManagerCluster) HasChannelSubscribersAuthoritative(context.Context, string, int64) (bool, error) {
 	return len(f.systemUIDs) > 0, nil
+}
+
+func (f *fakeManagerCluster) ReadPermissionMetadataBatchAuthoritative(ctx context.Context, reads []slotproxy.PermissionMetadataRead) []slotproxy.PermissionMetadataReadResult {
+	results := make([]slotproxy.PermissionMetadataReadResult, len(reads))
+	for index, read := range reads {
+		switch read.Kind {
+		case slotproxy.PermissionMetadataReadChannel:
+			channel, err := f.GetChannelMetadataAuthoritative(ctx, read.ChannelID, read.ChannelType)
+			if errors.Is(err, metadb.ErrNotFound) {
+				continue
+			}
+			results[index].Channel = channel
+			results[index].Found = err == nil
+			results[index].Err = err
+		case slotproxy.PermissionMetadataReadSubscriberContains:
+			results[index].Value, results[index].Err = f.ContainsChannelSubscriberAuthoritative(ctx, read.ChannelID, read.ChannelType, read.UID)
+		case slotproxy.PermissionMetadataReadSubscriberHasAny:
+			results[index].Value, results[index].Err = f.HasChannelSubscribersAuthoritative(ctx, read.ChannelID, read.ChannelType)
+		default:
+			results[index].Err = metadb.ErrInvalidArgument
+		}
+	}
+	return results
+}
+
+func (f *fakeManagerCluster) TombstoneUserChannelMemberships(_ context.Context, channelID string, channelType int64, uids []string, sourceVersion uint64, updatedAt int64) error {
+	for _, uid := range uids {
+		rows := f.membershipPages[uid]
+		for index := range rows {
+			if rows[index].ChannelID == channelID && rows[index].ChannelType == channelType && sourceVersion > rows[index].SourceVersion {
+				rows[index].Tombstone = true
+				rows[index].SourceVersion = sourceVersion
+				rows[index].UpdatedAt = updatedAt
+			}
+		}
+		f.membershipPages[uid] = rows
+	}
+	return nil
+}
+
+func (f *fakeManagerCluster) UpsertUserChannelMemberships(_ context.Context, channelID string, channelType int64, uids []string, committedTail, sourceVersion uint64, updatedAt int64) error {
+	for _, uid := range uids {
+		rows := f.membershipPages[uid]
+		found := false
+		for index := range rows {
+			if rows[index].ChannelID == channelID && rows[index].ChannelType == channelType {
+				found = true
+				if sourceVersion > rows[index].SourceVersion {
+					rows[index].Tombstone = false
+					rows[index].SourceVersion = sourceVersion
+					rows[index].UpdatedAt = updatedAt
+				}
+			}
+		}
+		if !found {
+			rows = append(rows, metadb.UserChannelMembership{
+				UID: uid, ChannelID: channelID, ChannelType: channelType,
+				JoinSeq: committedTail + 1, SourceVersion: sourceVersion, UpdatedAt: updatedAt,
+			})
+		}
+		f.membershipPages[uid] = rows
+	}
+	return nil
 }
 
 func (f *fakeManagerCluster) ListUserChannelMembershipPage(_ context.Context, uid string, _ metadb.UserChannelMembershipCursor, limit int) ([]metadb.UserChannelMembership, metadb.UserChannelMembershipCursor, bool, error) {

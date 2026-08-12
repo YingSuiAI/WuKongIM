@@ -15,6 +15,13 @@ List(uid, opaque membership cursor, candidate limit, completed coverage)
   -> scan one UID-owned membership page ordered by
        (activated_at desc, channel_id asc, channel_type asc)
   -> emit tombstoned memberships as deletes without Channel reads
+  -> validate canonical person memberships contain uid; delete malformed rows
+  -> for every non-person live candidate, authoritatively batch-read Channel
+     metadata plus subscriber membership before any Channel-head hydration
+     -> authority errors become unresolved
+     -> revoked rows become deletes; when the authoritative subscriber mutation
+        version is newer than source_version, best-effort tombstone with that
+        exact version (repair failure remains a delete)
   -> hydrate all live candidates in one aligned batch
        (cluster groups the reads by exact Channel Leader)
   -> classify each candidate as conversation, omitted, delete, or unresolved

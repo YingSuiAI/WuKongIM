@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"testing"
 
+	channelmembers "github.com/WuKongIM/WuKongIM/internal/contracts/channelmembers"
 	"github.com/WuKongIM/WuKongIM/internal/runtime/channelappend"
 	messageusecase "github.com/WuKongIM/WuKongIM/internal/usecase/message"
 	clusterpkg "github.com/WuKongIM/WuKongIM/pkg/cluster"
@@ -30,6 +31,29 @@ func TestChannelMetadataStoreProjectsUserMemberships(t *testing.T) {
 	}
 	if got, want := node.membershipDeletes, []membershipDeleteNodeCall{{channelID: "g1", channelType: 2, uids: []string{"u1"}, sourceVersion: 8, updatedAt: 456}}; !equalMembershipDeleteNodeCalls(got, want) {
 		t.Fatalf("membership deletes = %#v, want %#v", got, want)
+	}
+}
+
+func TestChannelMetadataStoreAuthorizesAndRepairsLiveMembershipWithOneBatch(t *testing.T) {
+	node := &recordingChannelMetadataNode{permissionBatchResults: []slotproxy.PermissionMetadataReadResult{
+		{Channel: metadb.Channel{ChannelID: "g1", ChannelType: 2, SubscriberMutationVersion: 8}, Found: true},
+		{Value: false},
+	}}
+	store := NewChannelMetadataStore(node, nil)
+	candidate := channelmembers.LiveMembership{UID: "u1", ChannelID: "g1", ChannelType: 2, SourceVersion: 5}
+
+	results := store.AuthorizeLiveMemberships(context.Background(), []channelmembers.LiveMembership{candidate})
+	if len(results) != 1 || !results[0].ChannelFound || results[0].Subscriber || results[0].SubscriberMutationVersion != 8 || results[0].Err != nil {
+		t.Fatalf("results = %+v", results)
+	}
+	if len(node.permissionBatchReads) != 2 || node.permissionBatchReads[0].Kind != slotproxy.PermissionMetadataReadChannel || node.permissionBatchReads[1].Kind != slotproxy.PermissionMetadataReadSubscriberContains {
+		t.Fatalf("permission batch reads = %+v, want aligned channel+subscriber", node.permissionBatchReads)
+	}
+	if err := store.TombstoneRevokedMembership(context.Background(), candidate, 8, 123); err != nil {
+		t.Fatalf("TombstoneRevokedMembership(): %v", err)
+	}
+	if got, want := node.membershipDeletes, []membershipDeleteNodeCall{{channelID: "g1", channelType: 2, uids: []string{"u1"}, sourceVersion: 8, updatedAt: 123}}; !equalMembershipDeleteNodeCalls(got, want) {
+		t.Fatalf("membership deletes = %+v, want %+v", got, want)
 	}
 }
 

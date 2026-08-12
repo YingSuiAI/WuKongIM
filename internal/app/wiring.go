@@ -312,6 +312,13 @@ func (a *App) wireConversations(conversationReadStore *clusterinfra.Conversation
 				Hydrator:            conversationReadStore,
 				MembershipMutations: conversationReadStore,
 			}
+			if channelNode, ok := a.cluster.(clusterinfra.ChannelMetadataNode); ok {
+				_, hasBatch := channelNode.(clusterinfra.AuthoritativePermissionBatchNode)
+				_, hasRepair := channelNode.(clusterinfra.ChannelMembershipNode)
+				if hasBatch && hasRepair {
+					options.MembershipAuthority = clusterinfra.NewChannelMetadataStore(channelNode, a.ensureChannelAppendMetadataCache())
+				}
+			}
 			a.conversations = conversationusecase.New(options)
 		}
 	}
@@ -726,6 +733,9 @@ func (a *App) wireMessages() {
 			messageOpts.PermissionStore = channelStore
 			if _, ok := channelNode.(clusterinfra.AuthoritativePermissionBatchNode); ok {
 				messageOpts.PermissionBatchStore = channelStore
+				if _, ok := channelNode.(clusterinfra.ChannelMembershipNode); ok {
+					messageOpts.MembershipAuthority = channelStore
+				}
 			}
 			messageOpts.ChannelState = channelStore
 			if _, ok := a.cluster.(clusterinfra.PersonDirectoryNode); ok {

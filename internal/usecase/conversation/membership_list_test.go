@@ -2,10 +2,12 @@ package conversation
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"testing"
 	"time"
 
+	channelmembers "github.com/WuKongIM/WuKongIM/internal/contracts/channelmembers"
 	metadb "github.com/WuKongIM/WuKongIM/pkg/db/meta"
 )
 
@@ -27,7 +29,7 @@ func TestListBuildsConversationsFromMembershipPage(t *testing.T) {
 		{Key: ConversationKey{ChannelID: "inactive-empty", ChannelType: 2}, Outcome: HydrationNoVisibleMessage, LastCommittedSeq: 29},
 		{Key: ConversationKey{ChannelID: "retry", ChannelType: 2}, Outcome: HydrationRetryable},
 	}}
-	app := New(Options{Directory: directory, Hydrator: hydrator})
+	app := New(Options{Directory: directory, Hydrator: hydrator, MembershipAuthority: allowConversationMembershipAuthority()})
 
 	result, err := app.List(context.Background(), ListRequest{UID: "u1", Limit: 5})
 	if err != nil {
@@ -66,7 +68,7 @@ func TestListAllowsEmptyNonterminalMembershipPage(t *testing.T) {
 		},
 		Hydrator: &membershipHeadHydrator{results: []HydrationResult{{
 			Key: ConversationKey{ChannelID: "inactive", ChannelType: 2}, Outcome: HydrationNoVisibleMessage,
-		}}},
+		}}}, MembershipAuthority: allowConversationMembershipAuthority(),
 	})
 	result, err := app.List(context.Background(), ListRequest{UID: "u1", Limit: 1})
 	if err != nil {
@@ -103,7 +105,7 @@ func TestRetryHydratesOnlyRequestedLiveMembershipsAndReturnsDeletes(t *testing.T
 		{Key: ConversationKey{ChannelID: "visible", ChannelType: 2}, Outcome: HydrationOK, LastCommittedSeq: 3, LastMessage: &LastMessage{MessageSeq: 3}},
 		{Key: ConversationKey{ChannelID: "retryable", ChannelType: 2}, Outcome: HydrationRetryable},
 	}}
-	app := New(Options{Hydrator: hydrator, MembershipMutations: store})
+	app := New(Options{Hydrator: hydrator, MembershipMutations: store, MembershipAuthority: allowConversationMembershipAuthority()})
 
 	result, err := app.Retry(context.Background(), RetryRequest{UID: "u1", Keys: []ConversationKey{
 		{ChannelID: "visible", ChannelType: 2},
@@ -128,6 +130,47 @@ func TestRetryHydratesOnlyRequestedLiveMembershipsAndReturnsDeletes(t *testing.T
 	}
 }
 
+func TestListRejectsRevokedMembershipBeforeHeadReadAndRepairsWithAuthoritativeFence(t *testing.T) {
+	directory := &membershipDirectoryStore{rows: []metadb.UserChannelMembership{{
+		UID: "u1", ChannelID: "g1", ChannelType: 2, SourceVersion: 4,
+	}}, done: true}
+	hydrator := &membershipHeadHydrator{}
+	authority := &recordingConversationMembershipAuthority{results: []channelmembers.LiveMembershipAuthorityResult{{
+		ChannelFound: true, SubscriberMutationVersion: 6,
+	}}}
+	app := New(Options{Directory: directory, Hydrator: hydrator, MembershipAuthority: authority})
+
+	result, err := app.List(context.Background(), ListRequest{UID: "u1"})
+	if err != nil {
+		t.Fatalf("List(): %v", err)
+	}
+	if got, want := result.Deletes, []ConversationKey{{ChannelID: "g1", ChannelType: 2}}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("deletes=%+v, want %+v", got, want)
+	}
+	if len(hydrator.memberships) != 0 {
+		t.Fatalf("hydrated=%+v, want zero head reads", hydrator.memberships)
+	}
+	if len(authority.tombstones) != 1 || authority.tombstones[0] != 6 {
+		t.Fatalf("tombstones=%+v, want exact authoritative fence 6", authority.tombstones)
+	}
+}
+
+func TestListTreatsMembershipAuthorityErrorAsUnresolvedWithoutHeadRead(t *testing.T) {
+	directory := &membershipDirectoryStore{rows: []metadb.UserChannelMembership{{UID: "u1", ChannelID: "g1", ChannelType: 2}}, done: true}
+	hydrator := &membershipHeadHydrator{}
+	authorityErr := errors.New("authority unavailable")
+	app := New(Options{Directory: directory, Hydrator: hydrator, MembershipAuthority: &recordingConversationMembershipAuthority{
+		results: []channelmembers.LiveMembershipAuthorityResult{{Err: authorityErr}},
+	}})
+	result, err := app.List(context.Background(), ListRequest{UID: "u1"})
+	if err != nil {
+		t.Fatalf("List(): %v", err)
+	}
+	if got, want := result.Unresolved, []ConversationKey{{ChannelID: "g1", ChannelType: 2}}; !reflect.DeepEqual(got, want) || len(hydrator.memberships) != 0 {
+		t.Fatalf("unresolved=%+v hydrated=%+v", got, hydrator.memberships)
+	}
+}
+
 type membershipDirectoryStore struct {
 	rows   []metadb.UserChannelMembership
 	cursor metadb.UserChannelMembershipCursor
@@ -145,6 +188,31 @@ func (s *membershipDirectoryStore) ListUserChannelMembershipPage(_ context.Conte
 type membershipHeadHydrator struct {
 	results     []HydrationResult
 	memberships []metadb.UserChannelMembership
+}
+
+type recordingConversationMembershipAuthority struct {
+	results    []channelmembers.LiveMembershipAuthorityResult
+	tombstones []uint64
+}
+
+func allowConversationMembershipAuthority() *recordingConversationMembershipAuthority {
+	return &recordingConversationMembershipAuthority{}
+}
+
+func (a *recordingConversationMembershipAuthority) AuthorizeLiveMemberships(_ context.Context, memberships []channelmembers.LiveMembership) []channelmembers.LiveMembershipAuthorityResult {
+	if a.results != nil {
+		return append([]channelmembers.LiveMembershipAuthorityResult(nil), a.results...)
+	}
+	results := make([]channelmembers.LiveMembershipAuthorityResult, len(memberships))
+	for index := range results {
+		results[index] = channelmembers.LiveMembershipAuthorityResult{ChannelFound: true, Subscriber: true}
+	}
+	return results
+}
+
+func (a *recordingConversationMembershipAuthority) TombstoneRevokedMembership(_ context.Context, _ channelmembers.LiveMembership, sourceVersion uint64, _ int64) error {
+	a.tombstones = append(a.tombstones, sourceVersion)
+	return nil
 }
 
 type membershipRetryStore struct {

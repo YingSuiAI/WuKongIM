@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	channelmembers "github.com/WuKongIM/WuKongIM/internal/contracts/channelmembers"
 	metadb "github.com/WuKongIM/WuKongIM/pkg/db/meta"
 )
 
@@ -15,6 +16,9 @@ type Options struct {
 	Reader ChannelMessageReader
 	// Memberships authorizes ordinary message pulls and supplies visibility floors.
 	Memberships SyncMembershipStore
+	// MembershipAuthority revalidates live non-person memberships against
+	// uncached channel-owned subscriber metadata before message reads.
+	MembershipAuthority channelmembers.LiveMembershipAuthority
 	// ChannelState rejects terminally disbanded channels during ordinary pulls.
 	ChannelState SyncChannelStateStore
 	// EventStore owns durable message event projection reads and writes.
@@ -46,12 +50,13 @@ type Options struct {
 
 // App is a thin message facade over channel append submission and sync reads.
 type App struct {
-	submitter    Submitter
-	reader       ChannelMessageReader
-	memberships  SyncMembershipStore
-	channelState SyncChannelStateStore
-	eventStore   MessageEventStore
-	permissions  PermissionStore
+	submitter           Submitter
+	reader              ChannelMessageReader
+	memberships         SyncMembershipStore
+	membershipAuthority channelmembers.LiveMembershipAuthority
+	channelState        SyncChannelStateStore
+	eventStore          MessageEventStore
+	permissions         PermissionStore
 	// permissionBatch performs one authoritative, batch-scoped metadata read
 	// when the configured store supports it and no cross-batch TTL cache is enabled.
 	permissionBatch PermissionBatchStore
@@ -80,6 +85,7 @@ func New(opts Options) *App {
 		submitter:              opts.Submitter,
 		reader:                 opts.Reader,
 		memberships:            opts.Memberships,
+		membershipAuthority:    opts.MembershipAuthority,
 		channelState:           opts.ChannelState,
 		eventStore:             opts.EventStore,
 		permissions:            permissions,

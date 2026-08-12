@@ -96,6 +96,13 @@ SyncChannelMessages(query)
   -> validate login_uid, channel_id, and channel_type with legacy error strings
   -> canonicalize person-channel IDs using login_uid
   -> require a live UID-owned membership
+  -> for non-person memberships, authoritatively batch-read Channel metadata
+     plus subscriber membership before any committed-message read
+     -> authority errors fail closed
+     -> missing membership is rejected; when the authoritative subscriber
+        mutation version is newer than membership source_version, best-effort
+        tombstone the stale projection using that exact version
+  -> for person memberships, require the canonical pair to contain login_uid
   -> clamp visibility to join_seq and deleted_to_seq
   -> reject terminally disbanded channels
   -> cap limit to the legacy maximum

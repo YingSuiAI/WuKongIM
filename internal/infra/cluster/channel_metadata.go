@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	channelmembers "github.com/WuKongIM/WuKongIM/internal/contracts/channelmembers"
 	"github.com/WuKongIM/WuKongIM/internal/runtime/channelappend"
 	messageusecase "github.com/WuKongIM/WuKongIM/internal/usecase/message"
 	clusterpkg "github.com/WuKongIM/WuKongIM/pkg/cluster"
@@ -324,6 +325,60 @@ func permissionBatchErrorResults(results []messageusecase.PermissionReadResult, 
 		results[i].Err = mapped
 	}
 	return results
+}
+
+// AuthorizeLiveMemberships confirms UID-owned live candidates against one
+// uncached authoritative Channel/subscriber batch.
+func (s *ChannelMetadataStore) AuthorizeLiveMemberships(ctx context.Context, memberships []channelmembers.LiveMembership) []channelmembers.LiveMembershipAuthorityResult {
+	results := make([]channelmembers.LiveMembershipAuthorityResult, len(memberships))
+	if len(memberships) == 0 {
+		return results
+	}
+	reads := make([]messageusecase.PermissionRead, 0, len(memberships)*2)
+	for _, membership := range memberships {
+		reads = append(reads,
+			messageusecase.PermissionRead{Kind: messageusecase.PermissionReadChannel, ChannelID: membership.ChannelID, ChannelType: membership.ChannelType},
+			messageusecase.PermissionRead{Kind: messageusecase.PermissionReadSubscriberContains, ChannelID: membership.ChannelID, ChannelType: membership.ChannelType, UID: membership.UID},
+		)
+	}
+	facts := s.ReadPermissionsBatch(ctx, reads)
+	if len(facts) != len(reads) {
+		err := fmt.Errorf("membership authority returned %d facts for %d reads", len(facts), len(reads))
+		for index := range results {
+			results[index].Err = err
+		}
+		return results
+	}
+	for index := range memberships {
+		channelFact := facts[index*2]
+		subscriberFact := facts[index*2+1]
+		if channelFact.Err != nil {
+			results[index].Err = channelFact.Err
+			continue
+		}
+		if subscriberFact.Err != nil {
+			results[index].Err = subscriberFact.Err
+			continue
+		}
+		results[index] = channelmembers.LiveMembershipAuthorityResult{
+			ChannelFound:              channelFact.Found,
+			Subscriber:                subscriberFact.Value,
+			Disband:                   channelFact.Found && channelFact.Channel.Disband != 0,
+			SubscriberMutationVersion: channelFact.Channel.SubscriberMutationVersion,
+		}
+	}
+	return results
+}
+
+// TombstoneRevokedMembership repairs one stale UID-owned projection with the
+// exact authoritative subscriber mutation fence selected by the usecase.
+func (s *ChannelMetadataStore) TombstoneRevokedMembership(ctx context.Context, membership channelmembers.LiveMembership, sourceVersion uint64, updatedAt int64) error {
+	if s == nil || s.membershipNode == nil {
+		return clusterpkg.ErrRouteNotReady
+	}
+	return s.membershipNode.TombstoneUserChannelMemberships(
+		ctx, membership.ChannelID, membership.ChannelType, []string{membership.UID}, sourceVersion, updatedAt,
+	)
 }
 
 // UpsertChannelMemberships projects normal channel subscribers into UID-owned memberships.

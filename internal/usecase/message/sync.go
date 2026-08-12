@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	channelmembers "github.com/WuKongIM/WuKongIM/internal/contracts/channelmembers"
 	metadb "github.com/WuKongIM/WuKongIM/pkg/db/meta"
 	runtimechannelid "github.com/WuKongIM/WuKongIM/pkg/protocol/channelid"
 )
@@ -167,14 +168,19 @@ type SyncChannelMessagesBatchResult struct {
 }
 
 type preparedSyncChannelMessages struct {
-	query     ChannelMessageQuery
-	eventMode string
+	query      ChannelMessageQuery
+	eventMode  string
+	loginUID   string
+	membership metadb.UserChannelMembership
 }
 
 // SyncChannelMessages returns a compatible message page for a channel.
 func (a *App) SyncChannelMessages(ctx context.Context, query SyncChannelMessagesQuery) (SyncChannelMessagesResult, error) {
 	prepared, err := a.prepareSyncChannelMessages(ctx, query)
 	if err != nil {
+		return SyncChannelMessagesResult{}, err
+	}
+	if err := a.confirmSyncMemberships(ctx, []preparedSyncChannelMessages{prepared}); err != nil {
 		return SyncChannelMessagesResult{}, err
 	}
 	page, err := a.reader.SyncMessages(ctx, prepared.query)
@@ -214,6 +220,9 @@ func (a *App) SyncChannelMessagesBatch(ctx context.Context, query SyncChannelMes
 		}
 		prepared[index] = preparedItem
 		reads[index] = preparedItem.query
+	}
+	if err := a.confirmSyncMemberships(ctx, prepared); err != nil {
+		return SyncChannelMessagesBatchResult{}, err
 	}
 	readResults, err := batchReader.SyncMessagesBatch(ctx, reads)
 	if err != nil {
@@ -285,7 +294,7 @@ func (a *App) prepareSyncChannelMessages(ctx context.Context, query SyncChannelM
 	} else {
 		visibilityMinSeq = visibilityFloor
 	}
-	if a.channelState != nil {
+	if query.ChannelType == channelTypePerson && a.channelState != nil {
 		channel, err := a.channelState.GetChannelForMessagePull(ctx, channelID, int64(query.ChannelType))
 		if err != nil && !errors.Is(err, metadb.ErrNotFound) {
 			return preparedSyncChannelMessages{}, err
@@ -305,7 +314,46 @@ func (a *App) prepareSyncChannelMessages(ctx context.Context, query SyncChannelM
 		MinSeq:    visibilityMinSeq,
 		Limit:     normalizeSyncMessagesLimit(query.Limit),
 		PullMode:  query.PullMode,
-	}, eventMode: normalizeEventSummaryMode(query)}, nil
+	}, eventMode: normalizeEventSummaryMode(query), loginUID: loginUID, membership: membership}, nil
+}
+
+func (a *App) confirmSyncMemberships(ctx context.Context, prepared []preparedSyncChannelMessages) error {
+	candidates := make([]channelmembers.LiveMembership, 0, len(prepared))
+	for _, item := range prepared {
+		if item.query.ChannelID.Type == channelTypePerson {
+			continue
+		}
+		candidates = append(candidates, channelmembers.LiveMembership{
+			UID: item.loginUID, ChannelID: item.query.ChannelID.ID, ChannelType: int64(item.query.ChannelID.Type), SourceVersion: item.membership.SourceVersion,
+		})
+	}
+	if len(candidates) == 0 {
+		return nil
+	}
+	if a.membershipAuthority == nil {
+		return ErrSyncMembershipRequired
+	}
+	facts := a.membershipAuthority.AuthorizeLiveMemberships(ctx, candidates)
+	if len(facts) != len(candidates) {
+		return ErrSyncMembershipRequired
+	}
+	for index, fact := range facts {
+		candidate := candidates[index]
+		if fact.Err != nil {
+			return fact.Err
+		}
+		if fact.Disband {
+			return ErrSyncChannelDisbanded
+		}
+		if fact.ChannelFound && fact.Subscriber {
+			continue
+		}
+		if fact.SubscriberMutationVersion > candidate.SourceVersion {
+			_ = a.membershipAuthority.TombstoneRevokedMembership(ctx, candidate, fact.SubscriberMutationVersion, a.now().UnixNano())
+		}
+		return ErrSyncMembershipRequired
+	}
+	return nil
 }
 
 func (a *App) finishSyncChannelMessages(ctx context.Context, eventMode string, page ChannelMessagePage) (SyncChannelMessagesResult, error) {
