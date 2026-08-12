@@ -47,6 +47,7 @@ func TestNewChannelMetadataStoreRegistersAuthoritativeReadHandlers(t *testing.T)
 	sort.Ints(got)
 	want := []int{
 		int(runtimeMetaRPCServiceID),
+		int(identityRPCServiceID),
 		int(subscriberRPCServiceID),
 		int(channelRPCServiceID),
 		int(permissionBatchRPCServiceID),

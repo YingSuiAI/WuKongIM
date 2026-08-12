@@ -1207,14 +1207,14 @@ func (a *App) verifyWKProtoToken(uid string, deviceFlag frame.DeviceFlag, token 
 	if a == nil || token == "" {
 		return frame.DeviceLevelSlave, errWKProtoTokenAuth
 	}
-	node, ok := a.cluster.(clusterinfra.UserMetadataNode)
+	node, ok := a.cluster.(clusterinfra.AuthoritativeDeviceMetadataNode)
 	if !ok || node == nil {
 		return frame.DeviceLevelSlave, errWKProtoTokenAuth
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), wkProtoAuthLookupTimeout)
 	defer cancel()
-	device, err := node.GetDeviceMetadata(ctx, uid, int64(deviceFlag))
+	device, err := node.GetDeviceMetadataAuthoritative(ctx, uid, int64(deviceFlag))
 	if err != nil || device.Token == "" {
 		return frame.DeviceLevelSlave, errWKProtoTokenAuth
 	}

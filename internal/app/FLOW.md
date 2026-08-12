@@ -224,6 +224,9 @@ New(Config)
        create internal/usecase/user with an infra/cluster Slot metadata
        adapter, owner-local online registry, optional presence lookup, and the
        channel metadata adapter as the system UID store
+       wire WKProto CONNECT token verification to the Slot-leader authoritative
+       Device metadata point read so issuance, rotation, and revocation do not
+       authenticate against a lagging gateway-local replica
   -> when Delivery.Enabled=true:
        create the canonical runtime/delivery Runtime with bounded plan
        admission, exact-target presence resolution, owner grouping, narrow

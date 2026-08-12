@@ -14,6 +14,11 @@ type UserMetadataNode interface {
 	GetDeviceMetadata(context.Context, string, int64) (metadb.Device, error)
 }
 
+// AuthoritativeDeviceMetadataNode exposes leader-routed credential reads for gateway authentication.
+type AuthoritativeDeviceMetadataNode interface {
+	GetDeviceMetadataAuthoritative(context.Context, string, int64) (metadb.Device, error)
+}
+
 // UserMetadataScanNode exposes cluster user metadata page scans for manager lists.
 type UserMetadataScanNode interface {
 	ScanUsersSlotPage(context.Context, uint32, metadb.UserCursor, int) ([]metadb.User, metadb.UserCursor, bool, error)

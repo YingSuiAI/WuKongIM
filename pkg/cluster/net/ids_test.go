@@ -73,6 +73,7 @@ func rpcServiceIDsForTest() map[string]uint8 {
 		"slot_user_membership":           RPCSlotUserMembership,
 		"slot_runtime_metadata":          RPCSlotRuntimeMetadata,
 		"slot_permission_metadata_batch": RPCSlotPermissionMetadataBatch,
+		"slot_identity_metadata":         RPCSlotIdentityMetadata,
 	}
 }
 

@@ -15,7 +15,7 @@ import (
 func TestPluginBindingRPCServiceIDDoesNotCollideWithSharedRPCServices(t *testing.T) {
 	occupied := map[uint8]string{
 		runtimeMetaRPCServiceID: "slot-runtime-meta",
-		4:                       "slot-identity",
+		identityRPCServiceID:    "slot-identity",
 		5:                       "node-presence",
 		6:                       "node-delivery-submit",
 		7:                       "node-delivery-push",

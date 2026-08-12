@@ -6,11 +6,12 @@ import (
 	"errors"
 	"fmt"
 
+	clusternet "github.com/WuKongIM/WuKongIM/pkg/cluster/net"
 	metadb "github.com/WuKongIM/WuKongIM/pkg/db/meta"
 	"github.com/WuKongIM/WuKongIM/pkg/slot/multiraft"
 )
 
-const identityRPCServiceID uint8 = 4
+const identityRPCServiceID uint8 = clusternet.RPCSlotIdentityMetadata
 
 const (
 	identityRPCGetUser       = "get_user"

@@ -110,3 +110,10 @@ func (c *authMetadataCluster) GetDeviceMetadata(context.Context, string, int64) 
 	}
 	return c.device, nil
 }
+
+func (c *authMetadataCluster) GetDeviceMetadataAuthoritative(context.Context, string, int64) (metadb.Device, error) {
+	if c.readErr != nil {
+		return metadb.Device{}, c.readErr
+	}
+	return c.device, nil
+}
