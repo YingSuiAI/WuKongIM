@@ -357,6 +357,7 @@ func TestLoadConfigExplicitConfigFile(t *testing.T) {
 		"WK_DELIVERY_EVENT_QUEUE_SIZE=2048",
 		"WK_DELIVERY_RECIPIENT_WORKER_CONCURRENCY=33",
 		"WK_WEBHOOK_HTTP_ADDR=http://127.0.0.1:19090/webhook",
+		"WK_WEBHOOK_SIGNING_SECRET=file-webhook-signing-secret",
 		`WK_WEBHOOK_FOCUS_EVENTS=["msg.notify","msg.offline"]`,
 		"WK_WEBHOOK_QUEUE_SIZE=2048",
 		"WK_WEBHOOK_WORKERS=32",
@@ -523,6 +524,7 @@ func TestLoadConfigExplicitConfigFile(t *testing.T) {
 	}
 	if !cfg.Webhook.Enabled ||
 		cfg.Webhook.HTTPAddr != "http://127.0.0.1:19090/webhook" ||
+		cfg.Webhook.SigningSecret != "file-webhook-signing-secret" ||
 		!slices.Equal(cfg.Webhook.FocusEvents, []string{"msg.notify", "msg.offline"}) ||
 		cfg.Webhook.QueueSize != 2048 ||
 		cfg.Webhook.Workers != 32 ||
@@ -1087,6 +1089,7 @@ func TestLoadConfigEnvOverridesFile(t *testing.T) {
 	t.Setenv("WK_DELIVERY_EVENT_QUEUE_SIZE", "512")
 	t.Setenv("WK_DELIVERY_RECIPIENT_WORKER_CONCURRENCY", "17")
 	t.Setenv("WK_WEBHOOK_HTTP_ADDR", "http://127.0.0.1:19091/webhook")
+	t.Setenv("WK_WEBHOOK_SIGNING_SECRET", "env-webhook-signing-secret")
 	t.Setenv("WK_WEBHOOK_FOCUS_EVENTS", `["msg.notify","user.onlinestatus"]`)
 	t.Setenv("WK_WEBHOOK_QUEUE_SIZE", "4096")
 	t.Setenv("WK_WEBHOOK_WORKERS", "12")
@@ -1210,6 +1213,7 @@ func TestLoadConfigEnvOverridesFile(t *testing.T) {
 	}
 	if !cfg.Webhook.Enabled ||
 		cfg.Webhook.HTTPAddr != "http://127.0.0.1:19091/webhook" ||
+		cfg.Webhook.SigningSecret != "env-webhook-signing-secret" ||
 		!slices.Equal(cfg.Webhook.FocusEvents, []string{"msg.notify", "user.onlinestatus"}) ||
 		cfg.Webhook.QueueSize != 4096 ||
 		cfg.Webhook.Workers != 12 ||
