@@ -18,10 +18,8 @@ func TestUpdateTokenCreatesMissingUserAndUpsertsDevice(t *testing.T) {
 	app := New(Options{Users: users, Devices: devices})
 
 	err := app.UpdateToken(context.Background(), UpdateTokenCommand{
-		UID:         "u1",
-		Token:       "token-1",
-		DeviceFlag:  protocolmeta.DeviceFlagApp,
-		DeviceLevel: protocolmeta.DeviceLevelSlave,
+		UID: "u1", DeviceID: "device-1", AppInstanceID: "app-1", DeviceSessionID: "device-session-1", IMSessionID: "im-session-1", InstallationGeneration: 1, SessionGeneration: 1, AuthorizationFence: 1,
+		Token: "token-1", DeviceFlag: protocolmeta.DeviceFlagApp, DeviceLevel: protocolmeta.DeviceLevelSlave,
 	})
 
 	if err != nil {
@@ -30,9 +28,31 @@ func TestUpdateTokenCreatesMissingUserAndUpsertsDevice(t *testing.T) {
 	if users.getCalls != 1 || len(users.created) != 1 || users.created[0].UID != "u1" {
 		t.Fatalf("user store getCalls=%d created=%#v, want create u1", users.getCalls, users.created)
 	}
-	wantDevice := metadb.Device{UID: "u1", DeviceFlag: int64(frame.APP), Token: "token-1", DeviceLevel: int64(frame.DeviceLevelSlave)}
+	wantDevice := metadb.Device{UID: "u1", DeviceFlag: int64(frame.APP), DeviceID: "device-1", AppInstanceID: "app-1", DeviceSessionID: "device-session-1", IMSessionID: "im-session-1", InstallationGeneration: 1, SessionGeneration: 1, AuthorizationFence: 1, Token: "token-1", DeviceLevel: int64(frame.DeviceLevelSlave)}
 	if len(devices.upserted) != 1 || devices.upserted[0] != wantDevice {
 		t.Fatalf("upserted devices = %#v, want %#v", devices.upserted, []metadb.Device{wantDevice})
+	}
+}
+
+func TestUpdateTokenRejectsOlderCredentialGeneration(t *testing.T) {
+	existing := metadb.Device{
+		UID: "u1", DeviceFlag: int64(frame.APP), DeviceID: "device-1", AppInstanceID: "app-1",
+		InstallationGeneration: 2, SessionGeneration: 2, AuthorizationFence: 2, Token: "new",
+	}
+	devices := &fakeDeviceStore{devices: map[deviceKey]metadb.Device{
+		{uid: "u1", flag: int64(frame.APP), deviceID: "device-1"}: existing,
+	}}
+	app := New(Options{Users: &fakeUserStore{}, Devices: devices, DeviceReader: devices})
+	err := app.UpdateToken(context.Background(), UpdateTokenCommand{
+		UID: "u1", DeviceID: "device-1", AppInstanceID: "app-1", DeviceSessionID: "ds-old", IMSessionID: "im-old",
+		InstallationGeneration: 1, SessionGeneration: 1, AuthorizationFence: 1,
+		Token: "old", DeviceFlag: protocolmeta.DeviceFlagApp, DeviceLevel: protocolmeta.DeviceLevelSlave,
+	})
+	if err != metadb.ErrStaleMeta {
+		t.Fatalf("error=%v, want stale meta", err)
+	}
+	if len(devices.upserted) != 0 {
+		t.Fatalf("stale credential upserts=%+v", devices.upserted)
 	}
 }
 
@@ -44,8 +64,8 @@ func TestUpdateTokenValidatesLegacyInputs(t *testing.T) {
 	}{
 		{name: "missing uid", cmd: UpdateTokenCommand{Token: "token-1"}, want: "uid不能为空！"},
 		{name: "missing token", cmd: UpdateTokenCommand{UID: "u1"}, want: "token不能为空！"},
-		{name: "special char", cmd: UpdateTokenCommand{UID: "u@1", Token: "token-1"}, want: "uid不能包含特殊字符！"},
-		{name: "system uid", cmd: UpdateTokenCommand{UID: DefaultSystemUID, Token: "token-1"}, want: "系统账号不允许更新token！"},
+		{name: "special char", cmd: UpdateTokenCommand{UID: "u@1", Token: "token-1", DeviceID: "d1", AppInstanceID: "a1", DeviceSessionID: "ds1", IMSessionID: "ims1", InstallationGeneration: 1, SessionGeneration: 1, AuthorizationFence: 1}, want: "uid不能包含特殊字符！"},
+		{name: "system uid", cmd: UpdateTokenCommand{UID: DefaultSystemUID, Token: "token-1", DeviceID: "d1", AppInstanceID: "a1", DeviceSessionID: "ds1", IMSessionID: "ims1", InstallationGeneration: 1, SessionGeneration: 1, AuthorizationFence: 1}, want: "系统账号不允许更新token！"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			err := New(Options{}).UpdateToken(context.Background(), tt.cmd)
@@ -60,7 +80,7 @@ func TestUpdateTokenMasterSchedulesLocalSameDeviceClose(t *testing.T) {
 	reg := online.NewRegistry(online.RegistryOptions{})
 	sameDevice := &recordingSession{}
 	otherDevice := &recordingSession{}
-	if err := reg.RegisterPending(online.LocalSession{Route: online.OwnerRoute{UID: "u1", SessionID: 11, DeviceFlag: uint8(frame.APP)}, Session: sameDevice}); err != nil {
+	if err := reg.RegisterPending(online.LocalSession{Route: online.OwnerRoute{UID: "u1", SessionID: 11, DeviceFlag: uint8(frame.APP), DeviceID: "device-1", SessionGeneration: 1}, Session: sameDevice}); err != nil {
 		t.Fatalf("RegisterPending(same) error = %v", err)
 	}
 	if err := reg.RegisterPending(online.LocalSession{Route: online.OwnerRoute{UID: "u1", SessionID: 12, DeviceFlag: uint8(frame.WEB)}, Session: otherDevice}); err != nil {
@@ -78,10 +98,8 @@ func TestUpdateTokenMasterSchedulesLocalSameDeviceClose(t *testing.T) {
 	})
 
 	err := app.UpdateToken(context.Background(), UpdateTokenCommand{
-		UID:         "u1",
-		Token:       "token-1",
-		DeviceFlag:  protocolmeta.DeviceFlagApp,
-		DeviceLevel: protocolmeta.DeviceLevelMaster,
+		UID: "u1", DeviceID: "device-1", AppInstanceID: "app-1", DeviceSessionID: "device-session-1", IMSessionID: "im-session-1", InstallationGeneration: 1, SessionGeneration: 1, AuthorizationFence: 1,
+		Token: "token-1", DeviceFlag: protocolmeta.DeviceFlagApp, DeviceLevel: protocolmeta.DeviceLevelMaster,
 	})
 
 	if err != nil {
@@ -101,30 +119,31 @@ func TestUpdateTokenMasterSchedulesLocalSameDeviceClose(t *testing.T) {
 func TestDeviceQuitClearsSelectedTokenAndSchedulesClose(t *testing.T) {
 	reg := online.NewRegistry(online.RegistryOptions{})
 	session := &recordingSession{}
-	if err := reg.RegisterPending(online.LocalSession{Route: online.OwnerRoute{UID: "u1", SessionID: 11, DeviceFlag: uint8(frame.APP)}, Session: session}); err != nil {
+	if err := reg.RegisterPending(online.LocalSession{Route: online.OwnerRoute{UID: "u1", SessionID: 11, DeviceFlag: uint8(frame.APP), DeviceID: "device-1", SessionGeneration: 1}, Session: session}); err != nil {
 		t.Fatalf("RegisterPending() error = %v", err)
 	}
 	devices := &fakeDeviceStore{
 		devices: map[deviceKey]metadb.Device{
-			{uid: "u1", flag: int64(frame.APP)}: {UID: "u1", DeviceFlag: int64(frame.APP), Token: "token-1", DeviceLevel: int64(frame.DeviceLevelSlave)},
+			{uid: "u1", flag: int64(frame.APP), deviceID: "device-1"}: {UID: "u1", DeviceFlag: int64(frame.APP), DeviceID: "device-1", AppInstanceID: "app-1", DeviceSessionID: "device-session-1", IMSessionID: "im-session-1", InstallationGeneration: 1, SessionGeneration: 1, AuthorizationFence: 1, Token: "token-1", DeviceLevel: int64(frame.DeviceLevelSlave)},
 		},
 	}
 	var scheduled []time.Duration
 	app := New(Options{
-		Devices: devices,
-		Online:  reg,
+		Devices:      devices,
+		DeviceReader: devices,
+		Online:       reg,
 		AfterFunc: func(d time.Duration, fn func()) {
 			scheduled = append(scheduled, d)
 			fn()
 		},
 	})
 
-	err := app.DeviceQuit(context.Background(), DeviceQuitCommand{UID: "u1", DeviceFlag: int(frame.APP)})
+	err := app.DeviceQuit(context.Background(), DeviceQuitCommand{UID: "u1", DeviceID: "device-1", DeviceFlag: int(frame.APP)})
 
 	if err != nil {
 		t.Fatalf("DeviceQuit() error = %v", err)
 	}
-	want := metadb.Device{UID: "u1", DeviceFlag: int64(frame.APP), Token: "", DeviceLevel: int64(frame.DeviceLevelMaster)}
+	want := metadb.Device{UID: "u1", DeviceFlag: int64(frame.APP), DeviceID: "device-1", AppInstanceID: "app-1", DeviceSessionID: "device-session-1", IMSessionID: "im-session-1", InstallationGeneration: 1, SessionGeneration: 1, AuthorizationFence: 1, Token: "", DeviceLevel: int64(frame.DeviceLevelMaster)}
 	if len(devices.upserted) != 1 || devices.upserted[0] != want {
 		t.Fatalf("upserted devices = %#v, want %#v", devices.upserted, []metadb.Device{want})
 	}
@@ -247,20 +266,34 @@ func (f *fakeDeviceStore) UpsertDevice(_ context.Context, device metadb.Device) 
 	return nil
 }
 
-func (f *fakeDeviceStore) GetDevice(_ context.Context, uid string, deviceFlag int64) (metadb.Device, error) {
+func (f *fakeDeviceStore) GetDevice(_ context.Context, uid string, deviceFlag int64, deviceID, appInstanceID string) (metadb.Device, error) {
 	if f.devices == nil {
 		return metadb.Device{}, metadb.ErrNotFound
 	}
-	device, ok := f.devices[deviceKey{uid: uid, flag: deviceFlag}]
+	device, ok := f.devices[deviceKey{uid: uid, flag: deviceFlag, deviceID: deviceID}]
+	if ok && appInstanceID != "" && device.AppInstanceID != appInstanceID {
+		ok = false
+	}
 	if !ok {
 		return metadb.Device{}, metadb.ErrNotFound
 	}
 	return device, nil
 }
 
+func (f *fakeDeviceStore) ListDevicesByUID(_ context.Context, uid string) ([]metadb.Device, error) {
+	var out []metadb.Device
+	for _, device := range f.devices {
+		if device.UID == uid {
+			out = append(out, device)
+		}
+	}
+	return out, nil
+}
+
 type deviceKey struct {
-	uid  string
-	flag int64
+	uid      string
+	flag     int64
+	deviceID string
 }
 
 type fakePresenceDirectory struct {

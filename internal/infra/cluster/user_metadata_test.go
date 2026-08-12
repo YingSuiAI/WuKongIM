@@ -20,7 +20,7 @@ func TestUserMetadataStoreAdaptsNodeFacade(t *testing.T) {
 	if _, err := store.GetUser(context.Background(), "u1"); err != nil {
 		t.Fatalf("GetUser() error = %v", err)
 	}
-	if _, err := store.GetDevice(context.Background(), "u1", 1); err != nil {
+	if _, err := store.GetDevice(context.Background(), "u1", 1, "device-1", "app-1"); err != nil {
 		t.Fatalf("GetDevice() error = %v", err)
 	}
 
@@ -58,8 +58,12 @@ func (n *recordingUserMetadataNode) UpsertDeviceMetadata(_ context.Context, devi
 	return nil
 }
 
-func (n *recordingUserMetadataNode) GetDeviceMetadata(_ context.Context, uid string, deviceFlag int64) (metadb.Device, error) {
+func (n *recordingUserMetadataNode) GetDeviceMetadata(_ context.Context, uid string, deviceFlag int64, deviceID, appInstanceID string) (metadb.Device, error) {
 	n.getDeviceUID = uid
 	n.getDeviceFlag = deviceFlag
-	return metadb.Device{UID: uid, DeviceFlag: deviceFlag}, nil
+	return metadb.Device{UID: uid, DeviceFlag: deviceFlag, DeviceID: deviceID, AppInstanceID: appInstanceID}, nil
+}
+
+func (n *recordingUserMetadataNode) ListDeviceMetadataByUID(_ context.Context, uid string) ([]metadb.Device, error) {
+	return []metadb.Device{{UID: uid, DeviceFlag: 1, DeviceID: "device-1"}}, nil
 }

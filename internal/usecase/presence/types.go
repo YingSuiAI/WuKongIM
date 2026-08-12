@@ -37,6 +37,18 @@ type ActivateCommand struct {
 	UID string
 	// DeviceID is the authenticated client device identifier.
 	DeviceID string
+	// AppInstanceID identifies the application data installation for this connection.
+	AppInstanceID   string
+	DeviceSessionID string
+	IMSessionID     string
+	// InstallationGeneration fences a revoked and recreated installation binding.
+	InstallationGeneration uint64
+	// SessionGeneration is the authenticated login generation for this connection.
+	SessionGeneration uint64
+	// AuthorizationFence is the Platform principal authority fence bound at token issue.
+	AuthorizationFence uint64
+	// ProtocolVersion is the negotiated WKProto version for this connection.
+	ProtocolVersion uint8
 	// DeviceFlag is the protocol device category for the session.
 	DeviceFlag uint8
 	// DeviceLevel is the protocol device conflict level for the session.
@@ -57,6 +69,8 @@ type DeactivateCommand struct {
 	UID string
 	// SessionID is the owner-local gateway session identifier.
 	SessionID uint64
+	// DisconnectedUnix records when the owner observed the connection closing.
+	DisconnectedUnix int64
 }
 
 // TouchCommand records owner-observed activity for one local gateway session.

@@ -97,7 +97,7 @@ func TestClusterSingleNodeUserMetadataFacadePersistsByUIDHashSlot(t *testing.T) 
 	if err := node.CreateUserMetadata(ctx, metadb.User{UID: "u1"}); err != nil {
 		t.Fatalf("CreateUserMetadata() error = %v", err)
 	}
-	if err := node.UpsertDeviceMetadata(ctx, metadb.Device{UID: "u1", DeviceFlag: 1, Token: "token-1", DeviceLevel: 2}); err != nil {
+	if err := node.UpsertDeviceMetadata(ctx, metadb.Device{UID: "u1", DeviceFlag: 1, DeviceID: "device-1", AppInstanceID: "app-1", Token: "token-1", DeviceLevel: 2}); err != nil {
 		t.Fatalf("UpsertDeviceMetadata() error = %v", err)
 	}
 
@@ -108,7 +108,7 @@ func TestClusterSingleNodeUserMetadataFacadePersistsByUIDHashSlot(t *testing.T) 
 	if gotUser.UID != "u1" {
 		t.Fatalf("user = %#v, want u1", gotUser)
 	}
-	gotDevice, err := node.GetDeviceMetadata(ctx, "u1", 1)
+	gotDevice, err := node.GetDeviceMetadata(ctx, "u1", 1, "device-1", "app-1")
 	if err != nil {
 		t.Fatalf("GetDeviceMetadata() error = %v", err)
 	}

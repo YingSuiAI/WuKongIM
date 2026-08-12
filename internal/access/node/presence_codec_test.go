@@ -403,9 +403,9 @@ func TestPresenceCodecGoldenTouchRoutesWireLayout(t *testing.T) {
 		'W', 'K', 'V', 'P', 2,
 		presenceOpTouchRoutesID,
 		7, 8, 9, 12, 13, 10, 11,
-		0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+		0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 		1,
-		2, 'u', '1', 1, 2, 3, 4, 2, 'd', '1', 1, 0, 3, 't', 'c', 'p', 0xc8, 0x01, 0xac, 0x02,
+		2, 'u', '1', 1, 2, 3, 4, 2, 'd', '1', 0, 0, 0, 0, 0, 0, 0, 1, 0, 3, 't', 'c', 'p', 0xc8, 0x01, 0xac, 0x02,
 		0, 0, 0, 0, 0, 0, 0,
 		0, 0, 0, 0,
 		0, 0, 0,
@@ -447,7 +447,7 @@ func TestPresenceCodecGoldenTouchRoutesWireLayout(t *testing.T) {
 		2, 'o', 'k',
 		0, 0,
 		1,
-		2, 'u', '1', 1, 2, 3, 4, 2, 'd', '1', 1, 0, 3, 't', 'c', 'p', 0xc8, 0x01, 0xac, 0x02,
+		2, 'u', '1', 1, 2, 3, 4, 2, 'd', '1', 0, 0, 0, 0, 0, 0, 0, 1, 0, 3, 't', 'c', 'p', 0xc8, 0x01, 0xac, 0x02,
 	}
 	if !reflect.DeepEqual(endpointRespBody, wantEndpointResp) {
 		t.Fatalf("endpoint response wire bytes = %#v, want %#v", endpointRespBody, wantEndpointResp)

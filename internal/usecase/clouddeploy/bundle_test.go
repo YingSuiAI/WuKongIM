@@ -215,7 +215,7 @@ func TestSealRendersNativeTwelveGroupTemplates(t *testing.T) {
 		!strings.Contains(caddy, "{{MANAGER_UPSTREAMS}}") || strings.Contains(caddy, "{{MANAGER_UPSTREAM}}") {
 		t.Fatalf("Demo routing/auth contract = %s", caddy)
 	}
-	for _, demoPath := range []string{"/route", "/user/*", "/channel/*", "/message/*", "/conversation/*", "/conversations/*", "/streammessage/*"} {
+	for _, demoPath := range []string{"/route", "/user/*", "/channel/*", "/message/*", "/conversation/*", "/conversations/*"} {
 		if !strings.Contains(caddy, demoPath) {
 			t.Fatalf("Demo routing omits client path %s: %s", demoPath, caddy)
 		}

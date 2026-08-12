@@ -13,6 +13,9 @@ func decodeConnect(f frame.Frame, data []byte, version uint8) (frame.Frame, erro
 	if connectPacket.Version, err = dec.Uint8(); err != nil {
 		return nil, errors.Wrap(err, "解码version失败！")
 	}
+	if connectPacket.Version != frame.LatestVersion {
+		return connectPacket, nil
+	}
 	var deviceFlag uint8
 	if deviceFlag, err = dec.Uint8(); err != nil {
 		return nil, errors.Wrap(err, "解码DeviceFlag失败！")
@@ -35,6 +38,15 @@ func decodeConnect(f frame.Frame, data []byte, version uint8) (frame.Frame, erro
 	if connectPacket.ClientKey, err = dec.String(); err != nil {
 		return nil, errors.Wrap(err, "解码ClientKey失败！")
 	}
+	if connectPacket.AppInstanceID, err = dec.String(); err != nil {
+		return nil, errors.Wrap(err, "解码AppInstanceId失败！")
+	}
+	if connectPacket.InstallationGeneration, err = dec.Uint64(); err != nil {
+		return nil, errors.Wrap(err, "解码InstallationGeneration失败！")
+	}
+	if connectPacket.SessionGeneration, err = dec.Uint64(); err != nil {
+		return nil, errors.Wrap(err, "解码SessionGeneration失败！")
+	}
 	return connectPacket, err
 }
 
@@ -53,6 +65,11 @@ func encodeConnect(connectPacket *frame.ConnectPacket, enc *Encoder, _ uint8) er
 	enc.WriteInt64(connectPacket.ClientTimestamp)
 	// clientKey
 	enc.WriteString(connectPacket.ClientKey)
+	if connectPacket.Version == frame.LatestVersion {
+		enc.WriteString(connectPacket.AppInstanceID)
+		enc.WriteUint64(connectPacket.InstallationGeneration)
+		enc.WriteUint64(connectPacket.SessionGeneration)
+	}
 
 	return nil
 }
@@ -66,5 +83,10 @@ func encodeConnectSize(connectPacket *frame.ConnectPacket, _ uint8) int {
 	size += len(connectPacket.Token) + frame.StringFixLenByteSize
 	size += frame.ClientTimestampByteSize
 	size += len(connectPacket.ClientKey) + frame.StringFixLenByteSize
+	if connectPacket.Version == frame.LatestVersion {
+		size += len(connectPacket.AppInstanceID) + frame.StringFixLenByteSize
+		size += 8
+		size += 8
+	}
 	return size
 }

@@ -62,7 +62,7 @@ func TestManagerGetUserMapsDetailAndNotFound(t *testing.T) {
 			userDetail: managementusecase.UserDetail{
 				UID: "u1", SlotID: 1, HashSlot: 7, Online: true,
 				Devices: []managementusecase.UserDevice{{
-					DeviceFlag: "app", DeviceLevel: "master", TokenSet: true, Online: true, OnlineSessionCount: 1,
+					DeviceID: "d1", DeviceFlag: "app", DeviceLevel: "master", TokenSet: true, Online: true, OnlineSessionCount: 1,
 				}},
 				Connections: []managementusecase.Connection{{
 					NodeID: 2, SessionID: 10, UID: "u1", DeviceID: "d1", DeviceFlag: "app", DeviceLevel: "master", Listener: "tcp",
@@ -83,7 +83,7 @@ func TestManagerGetUserMapsDetailAndNotFound(t *testing.T) {
 		"slot_id":1,
 		"hash_slot":7,
 		"online":true,
-		"devices":[{"device_flag":"app","device_level":"master","token_set":true,"online":true,"online_session_count":1}],
+		"devices":[{"device_id":"d1","device_flag":"app","device_level":"master","token_set":true,"online":true,"online_session_count":1}],
 		"connections":[{"node_id":2,"session_id":10,"uid":"u1","device_id":"d1","device_flag":"app","device_level":"master","slot_id":0,"state":"","listener":"tcp","connected_at":"0001-01-01T00:00:00Z","remote_addr":"","local_addr":""}]
 	}`) {
 		t.Fatalf("body = %s", rec.Body.String())

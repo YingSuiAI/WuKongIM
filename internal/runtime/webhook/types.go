@@ -10,8 +10,8 @@ const (
 	EventMsgNotify = "msg.notify"
 	// EventMsgOffline reports offline recipients for one committed message chunk.
 	EventMsgOffline = "msg.offline"
-	// EventUserOnlineStatus reports online/offline route status strings.
-	EventUserOnlineStatus = "user.onlinestatus"
+	// EventPresenceLease reports typed installation-level connection lease transitions.
+	EventPresenceLease = "presence.lease.v1"
 )
 
 // Message is the event-neutral committed message shape accepted by the webhook runtime.
@@ -54,10 +54,27 @@ type OfflineMessage struct {
 	ToUIDs []string
 }
 
-// OnlineStatus records one legacy-compatible user online status string.
-type OnlineStatus struct {
-	// Value is the preformatted legacy online-status string.
-	Value string
+// PresenceLease is the typed installation-level webhook body.
+type PresenceLease struct {
+	PrincipalUID           string `json:"principal_uid"`
+	TransportUID           string `json:"transport_uid"`
+	AppInstanceID          string `json:"app_instance_id"`
+	DeviceSessionID        string `json:"device_session_id"`
+	IMSessionID            string `json:"im_session_id"`
+	InstallationGeneration uint64 `json:"installation_generation"`
+	DeviceID               string `json:"device_id"`
+	DeviceClass            string `json:"device_class"`
+	DeviceFlag             uint8  `json:"device_flag"`
+	SessionGeneration      uint64 `json:"session_generation"`
+	AuthorizationFence     uint64 `json:"authorization_fence"`
+	OwnerNodeID            uint64 `json:"owner_node_id"`
+	OwnerBootID            uint64 `json:"owner_boot_id"`
+	OwnerSeq               uint64 `json:"owner_seq"`
+	SessionID              uint64 `json:"session_id"`
+	ConnectionID           string `json:"connection_id"`
+	Kind                   string `json:"kind"`
+	ObservedAt             int64  `json:"observed_at"`
+	ExpiresAt              int64  `json:"expires_at"`
 }
 
 // SendRequest is one encoded webhook request.

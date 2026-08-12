@@ -103,7 +103,7 @@ func ExampleEndReasonUsage() {
 
 	for i, scenario := range scenarios {
 		header := &Header{End: scenario.isEnd}
-		event := NewEventNotification(fmt.Sprintf("demo_msg_%d", i), scenario.name, 1640995200000000000+int64(i), scenario.payload, header)
+		event := NewEventNotification(fmt.Sprintf("demo_msg_%d", i), scenario.name, uint64(1640995200000000000+i), scenario.payload, header)
 
 		jsonData, _ := Encode(event)
 		fmt.Printf("%s (EndReason: %d, End: %t):\n", scenario.name, scenario.endReason, scenario.isEnd)

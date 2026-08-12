@@ -13,6 +13,11 @@ func (a *App) Touch(ctx context.Context, cmd TouchCommand) error {
 	if a.local == nil {
 		return ErrLocalRegistryUnavailable
 	}
-	a.local.MarkTouched(cmd.SessionID, cmd.ActivityUnix)
+	route, ok := a.local.MarkTouched(cmd.SessionID, cmd.ActivityUnix)
+	if ok && cmd.ActivityUnix-route.LastLeaseObservedUnix >= leaseHeartbeatSeconds {
+		if route, ok = a.local.MarkLeaseObserved(cmd.SessionID, cmd.ActivityUnix); ok {
+			a.observeLease(ctx, route, "heartbeat", cmd.ActivityUnix)
+		}
+	}
 	return nil
 }

@@ -12,7 +12,7 @@ import (
 type webhookEventRuntime interface {
 	Notify(context.Context, runtimewebhook.Message)
 	Offline(context.Context, runtimewebhook.OfflineMessage)
-	OnlineStatus(context.Context, runtimewebhook.OnlineStatus)
+	PresenceLease(context.Context, runtimewebhook.PresenceLease)
 }
 
 type webhookNotifyEnqueuer struct {
@@ -115,11 +115,11 @@ func (o webhookOfflineObserver) ObserveOfflineRecipient(ctx context.Context, eve
 	})
 }
 
-func (o webhookPresenceObserver) ObserveOnlineStatus(ctx context.Context, event presence.OnlineStatusEvent) error {
+func (o webhookPresenceObserver) ObserveLease(ctx context.Context, event presence.LeaseEvent) error {
 	if o.runtime == nil {
 		return nil
 	}
-	o.runtime.OnlineStatus(ctx, runtimewebhook.OnlineStatus{Value: event.Value})
+	o.runtime.PresenceLease(ctx, runtimewebhook.PresenceLease(event))
 	return nil
 }
 

@@ -35,7 +35,7 @@ func supportedWebhookEvents() []string {
 	return []string{
 		runtimewebhook.EventMsgNotify,
 		runtimewebhook.EventMsgOffline,
-		runtimewebhook.EventUserOnlineStatus,
+		runtimewebhook.EventPresenceLease,
 	}
 }
 

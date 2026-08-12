@@ -10,6 +10,7 @@ import (
 
 type deviceQuitRequest struct {
 	UID        string `json:"uid"`
+	DeviceID   string `json:"device_id"`
 	DeviceFlag int    `json:"device_flag"`
 }
 
@@ -43,6 +44,7 @@ func (s *Server) handleDeviceQuit(c *gin.Context) {
 	}
 	writeMutationResult(c, s.users.DeviceQuit(c.Request.Context(), userusecase.DeviceQuitCommand{
 		UID:        req.UID,
+		DeviceID:   req.DeviceID,
 		DeviceFlag: req.DeviceFlag,
 	}))
 }

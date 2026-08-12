@@ -508,6 +508,9 @@ func (s *authoritySlot) touchLocked(route Route) {
 	if route.OwnerSeq < s.ownerSeq[key] {
 		return
 	}
+	if existing, ok := s.active[key]; ok && route.OwnerSeq == existing.OwnerSeq && routeGenerationOlder(route, existing) {
+		return
+	}
 	s.ownerSeq[key] = route.OwnerSeq
 	route = normalizeRouteSeen(route)
 	if existing, ok := s.active[key]; ok {
@@ -521,6 +524,16 @@ func (s *authoritySlot) touchLocked(route Route) {
 		return
 	}
 	s.upsertActiveLocked(route)
+}
+
+func routeGenerationOlder(incoming, current Route) bool {
+	if incoming.InstallationGeneration != current.InstallationGeneration {
+		return incoming.InstallationGeneration < current.InstallationGeneration
+	}
+	if incoming.SessionGeneration != current.SessionGeneration {
+		return incoming.SessionGeneration < current.SessionGeneration
+	}
+	return incoming.AuthorizationFence < current.AuthorizationFence
 }
 
 func (s *authoritySlot) conflictsLocked(route Route) []identityKey {

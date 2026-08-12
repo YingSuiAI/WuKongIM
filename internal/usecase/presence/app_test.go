@@ -160,54 +160,27 @@ func TestActivateCleansPendingLocalRouteWhenMarkActiveFails(t *testing.T) {
 	}
 }
 
-func TestActivateEmitsOnlineStatusAfterSuccessfulMarkActive(t *testing.T) {
+func TestActivateEmitsConnectedLeaseAfterSuccessfulMarkActive(t *testing.T) {
 	var calls []string
 	local := newFakeLocalRegistry(&calls)
-	observer := &fakeOnlineStatusObserver{calls: &calls, err: errBoom}
+	observer := &fakeLeaseObserver{calls: &calls, err: errBoom}
 	app := New(Options{
-		Local:                local,
-		Authority:            &fakeAuthorityClient{calls: &calls},
-		OnlineStatusObserver: observer,
+		Local:         local,
+		Authority:     &fakeAuthorityClient{calls: &calls},
+		LeaseObserver: observer,
 	})
 
 	err := app.Activate(context.Background(), ActivateCommand{
-		UID:        "u1",
-		DeviceFlag: 2,
-		SessionID:  11,
-		Session:    fakeSessionHandle{},
+		UID: "u1", DeviceID: "device-1", AppInstanceID: "app-1", SessionGeneration: 7,
+		DeviceFlag: 2, ConnectedUnix: 100, SessionID: 11, Session: fakeSessionHandle{},
 	})
 	require.NoError(t, err)
 
-	require.Equal(t, []string{"local.register_pending", "authority.register", "local.mark_active", "observer.online_status"}, calls)
-	require.Equal(t, []OnlineStatusEvent{{UID: "u1", Online: true, Value: "u1-2-1-11-1-1"}}, observer.events)
+	require.Equal(t, []string{"local.register_pending", "authority.register", "local.mark_active", "observer.lease"}, calls)
+	require.Equal(t, []LeaseEvent{{PrincipalUID: "u1", TransportUID: "u1", AppInstanceID: "app-1", DeviceID: "device-1", DeviceClass: "desktop", DeviceFlag: 2, SessionGeneration: 7, OwnerSeq: 11, SessionID: 11, ConnectionID: "0:0:11", Kind: "connected", ObservedAt: 100000, ExpiresAt: 190000}}, observer.events)
 }
 
-func TestActivateOnlineStatusCountsActiveLocalSessionsAfterTransition(t *testing.T) {
-	var calls []string
-	local := newFakeLocalRegistry(&calls)
-	local.pending[10] = LocalSession{Route: OwnerRoute{UID: "u1", DeviceFlag: 2, SessionID: 10}, State: RouteStateActive}
-	local.pending[12] = LocalSession{Route: OwnerRoute{UID: "u1", DeviceFlag: 3, SessionID: 12}, State: RouteStateActive}
-	local.pending[13] = LocalSession{Route: OwnerRoute{UID: "u1", DeviceFlag: 2, SessionID: 13}, State: RouteStatePending}
-	local.pending[14] = LocalSession{Route: OwnerRoute{UID: "u2", DeviceFlag: 2, SessionID: 14}, State: RouteStateActive}
-	observer := &fakeOnlineStatusObserver{calls: &calls}
-	app := New(Options{
-		Local:                local,
-		Authority:            &fakeAuthorityClient{calls: &calls},
-		OnlineStatusObserver: observer,
-	})
-
-	err := app.Activate(context.Background(), ActivateCommand{
-		UID:        "u1",
-		DeviceFlag: 2,
-		SessionID:  11,
-		Session:    fakeSessionHandle{},
-	})
-	require.NoError(t, err)
-
-	require.Equal(t, []OnlineStatusEvent{{UID: "u1", Online: true, Value: "u1-2-1-11-2-3"}}, observer.events)
-}
-
-func TestActivateFailurePathsDoNotEmitOnlineStatus(t *testing.T) {
+func TestActivateFailurePathsDoNotEmitLease(t *testing.T) {
 	tests := []struct {
 		name      string
 		authority *fakeAuthorityClient
@@ -232,11 +205,11 @@ func TestActivateFailurePathsDoNotEmitOnlineStatus(t *testing.T) {
 				authority = &fakeAuthorityClient{}
 			}
 			authority.calls = &calls
-			observer := &fakeOnlineStatusObserver{calls: &calls}
+			observer := &fakeLeaseObserver{calls: &calls}
 			app := New(Options{
-				Local:                local,
-				Authority:            authority,
-				OnlineStatusObserver: observer,
+				Local:         local,
+				Authority:     authority,
+				LeaseObserver: observer,
 			})
 
 			err := app.Activate(context.Background(), ActivateCommand{
@@ -250,7 +223,7 @@ func TestActivateFailurePathsDoNotEmitOnlineStatus(t *testing.T) {
 	}
 }
 
-func TestActivateWithNilOnlineStatusObserverIsNoop(t *testing.T) {
+func TestActivateWithNilLeaseObserverIsNoop(t *testing.T) {
 	var calls []string
 	local := newFakeLocalRegistry(&calls)
 	app := New(Options{
@@ -410,33 +383,35 @@ func TestDeactivateRemovesLocalRouteAndQueuesAuthorityTombstone(t *testing.T) {
 	}
 }
 
-func TestDeactivateEmitsOfflineStatusForLastLocalSession(t *testing.T) {
+func TestDeactivateEmitsDisconnectedLeaseForSession(t *testing.T) {
 	var calls []string
 	local := newFakeLocalRegistry(&calls)
 	local.pending[11] = LocalSession{Route: OwnerRoute{UID: "u1", OwnerNodeID: 3, OwnerBootID: 4, OwnerSeq: 5, SessionID: 11, DeviceFlag: 2}, State: RouteStateActive}
-	observer := &fakeOnlineStatusObserver{calls: &calls, err: errBoom}
+	observer := &fakeLeaseObserver{calls: &calls, err: errBoom}
 	app := New(Options{
-		Local:                local,
-		Authority:            &fakeAuthorityClient{calls: &calls},
-		OnlineStatusObserver: observer,
+		Local:         local,
+		Authority:     &fakeAuthorityClient{calls: &calls},
+		LeaseObserver: observer,
 	})
 
-	err := app.Deactivate(context.Background(), DeactivateCommand{UID: "u1", SessionID: 11})
+	err := app.Deactivate(context.Background(), DeactivateCommand{UID: "u1", SessionID: 11, DisconnectedUnix: 200})
 	require.NoError(t, err)
 
-	require.Equal(t, []string{"local.mark_closing_unregister", "observer.online_status", "authority.enqueue_unregister"}, calls)
-	require.Equal(t, []OnlineStatusEvent{{UID: "u1", Online: false, Value: "u1-2-0-11-0-0"}}, observer.events)
+	require.Equal(t, []string{"local.mark_closing_unregister", "observer.lease", "authority.enqueue_unregister"}, calls)
+	require.Equal(t, "disconnected", observer.events[0].Kind)
+	require.Equal(t, int64(200000), observer.events[0].ObservedAt)
+	require.Equal(t, int64(200000), observer.events[0].ExpiresAt)
 }
 
 func TestDeactivateDoesNotEmitOfflineStatusForPendingSession(t *testing.T) {
 	var calls []string
 	local := newFakeLocalRegistry(&calls)
 	local.pending[11] = LocalSession{Route: OwnerRoute{UID: "u1", OwnerNodeID: 3, OwnerBootID: 4, OwnerSeq: 5, SessionID: 11}, State: RouteStatePending}
-	observer := &fakeOnlineStatusObserver{calls: &calls}
+	observer := &fakeLeaseObserver{calls: &calls}
 	app := New(Options{
-		Local:                local,
-		Authority:            &fakeAuthorityClient{calls: &calls},
-		OnlineStatusObserver: observer,
+		Local:         local,
+		Authority:     &fakeAuthorityClient{calls: &calls},
+		LeaseObserver: observer,
 	})
 
 	err := app.Deactivate(context.Background(), DeactivateCommand{UID: "u1", SessionID: 11})
@@ -446,45 +421,46 @@ func TestDeactivateDoesNotEmitOfflineStatusForPendingSession(t *testing.T) {
 	require.Equal(t, []string{"local.mark_closing_unregister", "authority.enqueue_unregister"}, calls)
 }
 
-func TestDeactivateDoesNotEmitOfflineStatusWhenSameUIDSessionRemains(t *testing.T) {
+func TestDeactivateEmitsPerConnectionLeaseWhenSameUIDSessionRemains(t *testing.T) {
 	var calls []string
 	local := newFakeLocalRegistry(&calls)
 	local.pending[11] = LocalSession{Route: OwnerRoute{UID: "u1", OwnerNodeID: 3, OwnerBootID: 4, OwnerSeq: 5, SessionID: 11}, State: RouteStateActive}
 	local.pending[12] = LocalSession{Route: OwnerRoute{UID: "u1", OwnerNodeID: 3, OwnerBootID: 4, OwnerSeq: 6, SessionID: 12}, State: RouteStateActive}
-	observer := &fakeOnlineStatusObserver{calls: &calls}
+	observer := &fakeLeaseObserver{calls: &calls}
 	app := New(Options{
-		Local:                local,
-		Authority:            &fakeAuthorityClient{calls: &calls},
-		OnlineStatusObserver: observer,
+		Local:         local,
+		Authority:     &fakeAuthorityClient{calls: &calls},
+		LeaseObserver: observer,
 	})
 
 	err := app.Deactivate(context.Background(), DeactivateCommand{UID: "u1", SessionID: 11})
 	require.NoError(t, err)
 
-	require.Empty(t, observer.events)
-	require.Equal(t, []string{"local.mark_closing_unregister", "authority.enqueue_unregister"}, calls)
+	require.Len(t, observer.events, 1)
+	require.Equal(t, "disconnected", observer.events[0].Kind)
+	require.Equal(t, []string{"local.mark_closing_unregister", "observer.lease", "authority.enqueue_unregister"}, calls)
 }
 
-func TestDeactivateEmitsOfflineStatusWhenOnlySameUIDPendingSessionRemains(t *testing.T) {
+func TestDeactivateEmitsLeaseWhenOnlySameUIDPendingSessionRemains(t *testing.T) {
 	var calls []string
 	local := newFakeLocalRegistry(&calls)
 	local.pending[11] = LocalSession{Route: OwnerRoute{UID: "u1", OwnerNodeID: 3, OwnerBootID: 4, OwnerSeq: 5, SessionID: 11, DeviceFlag: 2}, State: RouteStateActive}
 	local.pending[12] = LocalSession{Route: OwnerRoute{UID: "u1", OwnerNodeID: 3, OwnerBootID: 4, OwnerSeq: 6, SessionID: 12, DeviceFlag: 2}, State: RouteStatePending}
-	observer := &fakeOnlineStatusObserver{calls: &calls}
+	observer := &fakeLeaseObserver{calls: &calls}
 	app := New(Options{
-		Local:                local,
-		Authority:            &fakeAuthorityClient{calls: &calls},
-		OnlineStatusObserver: observer,
+		Local:         local,
+		Authority:     &fakeAuthorityClient{calls: &calls},
+		LeaseObserver: observer,
 	})
 
 	err := app.Deactivate(context.Background(), DeactivateCommand{UID: "u1", SessionID: 11})
 	require.NoError(t, err)
 
-	require.Equal(t, []string{"local.mark_closing_unregister", "observer.online_status", "authority.enqueue_unregister"}, calls)
-	require.Equal(t, []OnlineStatusEvent{{UID: "u1", Online: false, Value: "u1-2-0-11-0-0"}}, observer.events)
+	require.Equal(t, []string{"local.mark_closing_unregister", "observer.lease", "authority.enqueue_unregister"}, calls)
+	require.Equal(t, "disconnected", observer.events[0].Kind)
 }
 
-func TestDeactivateWithNilOnlineStatusObserverIsNoop(t *testing.T) {
+func TestDeactivateWithNilLeaseObserverIsNoop(t *testing.T) {
 	var calls []string
 	local := newFakeLocalRegistry(&calls)
 	local.pending[11] = LocalSession{Route: OwnerRoute{UID: "u1", OwnerNodeID: 3, OwnerBootID: 4, OwnerSeq: 5, SessionID: 11}}
@@ -520,13 +496,28 @@ func TestEndpointsByUIDUsesAuthorityClient(t *testing.T) {
 }
 
 func TestTouchMarksLocalSessionTouched(t *testing.T) {
-	local := &fakeLocalRegistry{}
+	local := newFakeLocalRegistry(&[]string{})
+	local.pending[44] = LocalSession{Route: OwnerRoute{UID: "u1", SessionID: 44}, State: RouteStateActive}
 	app := New(Options{Local: local})
 
 	err := app.Touch(context.Background(), TouchCommand{SessionID: 44, ActivityUnix: 123})
 	require.NoError(t, err)
 	require.Equal(t, uint64(44), local.touchedSessionID)
 	require.Equal(t, int64(123), local.touchedUnix)
+}
+
+func TestTouchEmitsHeartbeatOnlyEveryThirtySeconds(t *testing.T) {
+	calls := []string{}
+	local := newFakeLocalRegistry(&calls)
+	local.pending[44] = LocalSession{Route: OwnerRoute{UID: "u1", SessionID: 44, LastLeaseObservedUnix: 100}, State: RouteStateActive}
+	observer := &fakeLeaseObserver{calls: &calls}
+	app := New(Options{Local: local, LeaseObserver: observer})
+	require.NoError(t, app.Touch(context.Background(), TouchCommand{SessionID: 44, ActivityUnix: 129}))
+	require.Empty(t, observer.events)
+	require.NoError(t, app.Touch(context.Background(), TouchCommand{SessionID: 44, ActivityUnix: 130}))
+	require.Len(t, observer.events, 1)
+	require.Equal(t, "heartbeat", observer.events[0].Kind)
+	require.Equal(t, int64(220000), observer.events[0].ExpiresAt)
 }
 
 func TestTouchRequiresLocalRegistry(t *testing.T) {
@@ -556,6 +547,16 @@ type fakeLocalRegistry struct {
 	markActiveErr    error
 	touchedSessionID uint64
 	touchedUnix      int64
+}
+
+func (f *fakeLocalRegistry) MarkLeaseObserved(sessionID uint64, observedUnix int64) (OwnerRoute, bool) {
+	session, ok := f.pending[sessionID]
+	if !ok || session.State != RouteStateActive {
+		return OwnerRoute{}, false
+	}
+	session.Route.LastLeaseObservedUnix = observedUnix
+	f.pending[sessionID] = session
+	return session.Route, true
 }
 
 func newFakeLocalRegistry(calls *[]string) *fakeLocalRegistry {
@@ -610,7 +611,13 @@ func (f *fakeLocalRegistry) LocalSessionsByUID(uid string) []LocalSession {
 func (f *fakeLocalRegistry) MarkTouched(sessionID uint64, activityUnix int64) (OwnerRoute, bool) {
 	f.touchedSessionID = sessionID
 	f.touchedUnix = activityUnix
-	return OwnerRoute{SessionID: sessionID, LastActivityUnix: activityUnix}, true
+	session, ok := f.pending[sessionID]
+	if !ok {
+		return OwnerRoute{}, false
+	}
+	session.Route.LastActivityUnix = activityUnix
+	f.pending[sessionID] = session
+	return session.Route, true
 }
 
 type fakeAuthorityClient struct {
@@ -690,14 +697,14 @@ func (h fakeSessionHandle) WriteDelivery(any) error { return h.err }
 
 func (h fakeSessionHandle) CloseSession(string) error { return h.err }
 
-type fakeOnlineStatusObserver struct {
+type fakeLeaseObserver struct {
 	calls  *[]string
-	events []OnlineStatusEvent
+	events []LeaseEvent
 	err    error
 }
 
-func (f *fakeOnlineStatusObserver) ObserveOnlineStatus(_ context.Context, event OnlineStatusEvent) error {
-	*f.calls = append(*f.calls, "observer.online_status")
+func (f *fakeLeaseObserver) ObserveLease(_ context.Context, event LeaseEvent) error {
+	*f.calls = append(*f.calls, "observer.lease")
 	f.events = append(f.events, event)
 	return f.err
 }

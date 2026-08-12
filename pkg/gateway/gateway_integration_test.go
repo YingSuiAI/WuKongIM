@@ -60,11 +60,11 @@ func TestGatewayWKProtoAuthRejectsBadToken(t *testing.T) {
 		Handler: handler,
 		Authenticator: gateway.NewWKProtoAuthenticator(gateway.WKProtoAuthOptions{
 			TokenAuthOn: true,
-			VerifyToken: func(uid string, deviceFlag frame.DeviceFlag, token string) (frame.DeviceLevel, error) {
-				if uid == "u1" && token == "good-token" {
-					return frame.DeviceLevelMaster, nil
+			VerifyToken: func(uid string, deviceFlag frame.DeviceFlag, deviceID, appInstanceID string, generation uint64, token string) (gateway.VerifiedCredential, error) {
+				if uid == "u1" && deviceID == "d1" && appInstanceID == "app-1" && generation == 1 && token == "good-token" {
+					return gateway.VerifiedCredential{DeviceLevel: frame.DeviceLevelMaster, DeviceSessionID: "ds-1", IMSessionID: "im-1", InstallationGeneration: 1, AuthorizationFence: 1}, nil
 				}
-				return 0, errors.New("token verify fail")
+				return gateway.VerifiedCredential{}, errors.New("token verify fail")
 			},
 		}),
 		Listeners: []gateway.ListenerOptions{
@@ -83,12 +83,14 @@ func TestGatewayWKProtoAuthRejectsBadToken(t *testing.T) {
 	t.Cleanup(func() { _ = conn.Close() })
 
 	connack := mustConnectWKProto(t, conn, &frame.ConnectPacket{
-		Version:         frame.LatestVersion,
-		UID:             "u1",
-		Token:           "bad-token",
-		DeviceID:        "d1",
-		DeviceFlag:      frame.APP,
-		ClientTimestamp: time.Now().UnixMilli(),
+		Version:           frame.LatestVersion,
+		UID:               "u1",
+		Token:             "bad-token",
+		DeviceID:          "d1",
+		AppInstanceID:     "app-1",
+		SessionGeneration: 1,
+		DeviceFlag:        frame.APP,
+		ClientTimestamp:   time.Now().UnixMilli(),
 	})
 	if connack.ReasonCode != frame.ReasonAuthFail {
 		t.Fatalf("expected auth fail connack, got %v", connack.ReasonCode)
@@ -150,11 +152,11 @@ func TestGatewayWKProtoAuthAcceptsConnectBeforeDispatchingFrames(t *testing.T) {
 			Now: func() time.Time {
 				return time.UnixMilli(10_000)
 			},
-			VerifyToken: func(uid string, deviceFlag frame.DeviceFlag, token string) (frame.DeviceLevel, error) {
-				if uid == "u1" && token == "good-token" {
-					return frame.DeviceLevelMaster, nil
+			VerifyToken: func(uid string, deviceFlag frame.DeviceFlag, deviceID, appInstanceID string, generation uint64, token string) (gateway.VerifiedCredential, error) {
+				if uid == "u1" && deviceID == "d1" && appInstanceID == "app-1" && generation == 1 && token == "good-token" {
+					return gateway.VerifiedCredential{DeviceLevel: frame.DeviceLevelMaster, DeviceSessionID: "ds-1", IMSessionID: "im-1", InstallationGeneration: 1, AuthorizationFence: 1}, nil
 				}
-				return 0, errors.New("token verify fail")
+				return gateway.VerifiedCredential{}, errors.New("token verify fail")
 			},
 		}),
 		Listeners: []gateway.ListenerOptions{
@@ -173,12 +175,14 @@ func TestGatewayWKProtoAuthAcceptsConnectBeforeDispatchingFrames(t *testing.T) {
 	t.Cleanup(func() { _ = conn.Close() })
 
 	connack := mustConnectWKProto(t, conn, &frame.ConnectPacket{
-		Version:         frame.LatestVersion,
-		UID:             "u1",
-		Token:           "good-token",
-		DeviceID:        "d1",
-		DeviceFlag:      frame.APP,
-		ClientTimestamp: 9_000,
+		Version:           frame.LatestVersion,
+		UID:               "u1",
+		Token:             "good-token",
+		DeviceID:          "d1",
+		AppInstanceID:     "app-1",
+		SessionGeneration: 1,
+		DeviceFlag:        frame.APP,
+		ClientTimestamp:   9_000,
 	})
 	if connack.ReasonCode != frame.ReasonSuccess {
 		t.Fatalf("expected success connack, got %v", connack.ReasonCode)
@@ -210,11 +214,11 @@ func TestGatewayWKProtoActivationSeesDeviceIDBeforeConnectSucceeds(t *testing.T)
 		Handler: handler,
 		Authenticator: gateway.NewWKProtoAuthenticator(gateway.WKProtoAuthOptions{
 			TokenAuthOn: true,
-			VerifyToken: func(uid string, deviceFlag frame.DeviceFlag, token string) (frame.DeviceLevel, error) {
-				if uid == "u1" && token == "good-token" {
-					return frame.DeviceLevelMaster, nil
+			VerifyToken: func(uid string, deviceFlag frame.DeviceFlag, deviceID, appInstanceID string, generation uint64, token string) (gateway.VerifiedCredential, error) {
+				if uid == "u1" && deviceID == "d1" && appInstanceID == "app-1" && generation == 1 && token == "good-token" {
+					return gateway.VerifiedCredential{DeviceLevel: frame.DeviceLevelMaster, DeviceSessionID: "ds-1", IMSessionID: "im-1", InstallationGeneration: 1, AuthorizationFence: 1}, nil
 				}
-				return 0, errors.New("token verify fail")
+				return gateway.VerifiedCredential{}, errors.New("token verify fail")
 			},
 		}),
 		Listeners: []gateway.ListenerOptions{
@@ -233,12 +237,14 @@ func TestGatewayWKProtoActivationSeesDeviceIDBeforeConnectSucceeds(t *testing.T)
 	t.Cleanup(func() { _ = conn.Close() })
 
 	connack := mustConnectWKProto(t, conn, &frame.ConnectPacket{
-		Version:         frame.LatestVersion,
-		UID:             "u1",
-		Token:           "good-token",
-		DeviceID:        "d1",
-		DeviceFlag:      frame.APP,
-		ClientTimestamp: time.Now().UnixMilli(),
+		Version:           frame.LatestVersion,
+		UID:               "u1",
+		Token:             "good-token",
+		DeviceID:          "d1",
+		AppInstanceID:     "app-1",
+		SessionGeneration: 1,
+		DeviceFlag:        frame.APP,
+		ClientTimestamp:   time.Now().UnixMilli(),
 	})
 	if connack.ReasonCode != frame.ReasonSuccess {
 		t.Fatalf("expected success connack, got %v", connack.ReasonCode)

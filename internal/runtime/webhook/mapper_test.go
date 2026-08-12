@@ -139,20 +139,19 @@ func TestBuildOfflineBodyIncludesUIDsBelowCompressThreshold(t *testing.T) {
 	}
 }
 
-func TestBuildOnlineStatusBodyFiltersEmptyValues(t *testing.T) {
-	body, err := buildOnlineStatusBody([]OnlineStatus{
-		{Value: "u1-1"},
-		{},
-		{Value: "u2-0"},
+func TestBuildPresenceLeaseBodyPreservesTypedValues(t *testing.T) {
+	body, err := buildPresenceLeaseBody([]PresenceLease{
+		{PrincipalUID: "u1", ConnectionID: "1:1:1", Kind: "connected"},
+		{PrincipalUID: "u2", ConnectionID: "1:1:2", Kind: "heartbeat"},
 	})
 	if err != nil {
-		t.Fatalf("buildOnlineStatusBody() error = %v", err)
+		t.Fatalf("buildPresenceLeaseBody() error = %v", err)
 	}
-	var got []string
+	var got []PresenceLease
 	if err := json.Unmarshal(body, &got); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v body=%s", err, string(body))
 	}
-	if want := []string{"u1-1", "u2-0"}; !reflect.DeepEqual(got, want) {
+	if want := []PresenceLease{{PrincipalUID: "u1", ConnectionID: "1:1:1", Kind: "connected"}, {PrincipalUID: "u2", ConnectionID: "1:1:2", Kind: "heartbeat"}}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("statuses = %#v, want %#v", got, want)
 	}
 }

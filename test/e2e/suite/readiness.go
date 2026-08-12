@@ -35,13 +35,12 @@ func waitWKProtoReady(ctx context.Context, addr string, process *NodeProcess) er
 		if err := processReadinessExitError(process, "WKProto readiness"); err != nil {
 			return err
 		}
-		client, err := NewWKProtoClient()
-		if err != nil {
-			return err
+		client, err := NewWKProtoClientWithTimeout(time.Second)
+		if err == nil {
+			uid := fmt.Sprintf("e2e-readiness-%s", strings.NewReplacer(":", "-", ".", "-").Replace(addr))
+			err = client.Connect(addr, uid, uid+"-device")
+			_ = client.Close()
 		}
-
-		_, err = client.ConnectContext(ctx, addr, "e2e-ready", "e2e-ready-device")
-		_ = client.Close()
 		if err == nil {
 			return nil
 		}

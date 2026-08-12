@@ -779,6 +779,35 @@ func TestDirectoryTouchMovesRouteOutOfOldExpiryBucket(t *testing.T) {
 	}
 }
 
+func TestDirectoryTouchIgnoresOlderInstallationAuthority(t *testing.T) {
+	dir := NewDirectory(DirectoryOptions{ShardCount: 1})
+	target := RouteTarget{HashSlot: 8, SlotID: 1, LeaderNodeID: 1, RouteRevision: 1}
+	dir.BecomeAuthority(target)
+	route := Route{
+		UID: "u1", OwnerNodeID: 1, OwnerBootID: 1, OwnerSeq: 5, SessionID: 10,
+		DeviceID: "d1", AppInstanceID: "app1", InstallationGeneration: 2,
+		SessionGeneration: 2, AuthorizationFence: 2, LastSeenUnix: 200,
+	}
+	if _, err := dir.RegisterRoute(target, route); err != nil {
+		t.Fatal(err)
+	}
+	stale := route
+	stale.InstallationGeneration = 1
+	stale.SessionGeneration = 1
+	stale.AuthorizationFence = 1
+	stale.LastSeenUnix = 300
+	if err := dir.TouchRoutes(target, []Route{stale}); err != nil {
+		t.Fatal(err)
+	}
+	routes, err := dir.EndpointsByUID(target, "u1")
+	if err != nil || len(routes) != 1 {
+		t.Fatalf("routes=%+v err=%v", routes, err)
+	}
+	if routes[0].InstallationGeneration != 2 || routes[0].SessionGeneration != 2 || routes[0].AuthorizationFence != 2 || routes[0].LastSeenUnix != 200 {
+		t.Fatalf("stale heartbeat changed route: %+v", routes[0])
+	}
+}
+
 func TestDirectoryUnregisterUnschedulesExpiryAndPreservesTombstone(t *testing.T) {
 	dir := NewDirectory(DirectoryOptions{ShardCount: 1})
 	target := RouteTarget{HashSlot: 8, SlotID: 1, LeaderNodeID: 1, RouteRevision: 1}

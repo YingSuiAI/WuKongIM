@@ -78,40 +78,58 @@ type session struct {
 
 // These keys mirror gateway/types session value keys without importing that package.
 const (
-	hotSessionValueUID               = "gateway.uid"
-	hotSessionValueDeviceID          = "gateway.device_id"
-	hotSessionValueDeviceFlag        = "gateway.device_flag"
-	hotSessionValueDeviceLevel       = "gateway.device_level"
-	hotSessionValueProtocolVersion   = "gateway.protocol_version"
-	hotSessionValueProtocolName      = "gateway.protocol_name"
-	hotSessionValueEncryptionEnabled = "gateway.encryption_enabled"
-	hotSessionValueAESKey            = "gateway.aes_key"
-	hotSessionValueAESIV             = "gateway.aes_iv"
-	hotSessionValueCrypto            = "gateway.wkproto_crypto"
+	hotSessionValueUID                    = "gateway.uid"
+	hotSessionValueDeviceID               = "gateway.device_id"
+	hotSessionValueAppInstanceID          = "gateway.app_instance_id"
+	hotSessionValueDeviceSessionID        = "gateway.device_session_id"
+	hotSessionValueIMSessionID            = "gateway.im_session_id"
+	hotSessionValueSessionGeneration      = "gateway.session_generation"
+	hotSessionValueInstallationGeneration = "gateway.installation_generation"
+	hotSessionValueAuthorizationFence     = "gateway.authorization_fence"
+	hotSessionValueDeviceFlag             = "gateway.device_flag"
+	hotSessionValueDeviceLevel            = "gateway.device_level"
+	hotSessionValueProtocolVersion        = "gateway.protocol_version"
+	hotSessionValueProtocolName           = "gateway.protocol_name"
+	hotSessionValueEncryptionEnabled      = "gateway.encryption_enabled"
+	hotSessionValueAESKey                 = "gateway.aes_key"
+	hotSessionValueAESIV                  = "gateway.aes_iv"
+	hotSessionValueCrypto                 = "gateway.wkproto_crypto"
 )
 
 type sessionHotValues struct {
-	uid               any
-	deviceID          any
-	deviceFlag        any
-	deviceLevel       any
-	protocolVersion   any
-	protocolName      any
-	encryptionEnabled any
-	aesKey            any
-	aesIV             any
-	crypto            any
+	uid                    any
+	deviceID               any
+	appInstanceID          any
+	deviceSessionID        any
+	imSessionID            any
+	installationGeneration any
+	sessionGeneration      any
+	authorizationFence     any
+	deviceFlag             any
+	deviceLevel            any
+	protocolVersion        any
+	protocolName           any
+	encryptionEnabled      any
+	aesKey                 any
+	aesIV                  any
+	crypto                 any
 
-	uidSet               bool
-	deviceIDSet          bool
-	deviceFlagSet        bool
-	deviceLevelSet       bool
-	protocolVersionSet   bool
-	protocolNameSet      bool
-	encryptionEnabledSet bool
-	aesKeySet            bool
-	aesIVSet             bool
-	cryptoSet            bool
+	uidSet                    bool
+	deviceIDSet               bool
+	appInstanceIDSet          bool
+	deviceSessionIDSet        bool
+	imSessionIDSet            bool
+	installationGenerationSet bool
+	sessionGenerationSet      bool
+	authorizationFenceSet     bool
+	deviceFlagSet             bool
+	deviceLevelSet            bool
+	protocolVersionSet        bool
+	protocolNameSet           bool
+	encryptionEnabledSet      bool
+	aesKeySet                 bool
+	aesIVSet                  bool
+	cryptoSet                 bool
 }
 
 func newSession(id uint64, listener, remoteAddr, localAddr string, writeFrameFn WriteFrameFn) *session {
@@ -260,6 +278,12 @@ func isHotValueKey(key string) bool {
 	switch key {
 	case hotSessionValueUID,
 		hotSessionValueDeviceID,
+		hotSessionValueAppInstanceID,
+		hotSessionValueDeviceSessionID,
+		hotSessionValueIMSessionID,
+		hotSessionValueInstallationGeneration,
+		hotSessionValueSessionGeneration,
+		hotSessionValueAuthorizationFence,
 		hotSessionValueDeviceFlag,
 		hotSessionValueDeviceLevel,
 		hotSessionValueProtocolVersion,
@@ -280,6 +304,18 @@ func (v *sessionHotValues) set(key string, value any) {
 		v.uid, v.uidSet = value, true
 	case hotSessionValueDeviceID:
 		v.deviceID, v.deviceIDSet = value, true
+	case hotSessionValueAppInstanceID:
+		v.appInstanceID, v.appInstanceIDSet = value, true
+	case hotSessionValueDeviceSessionID:
+		v.deviceSessionID, v.deviceSessionIDSet = value, true
+	case hotSessionValueIMSessionID:
+		v.imSessionID, v.imSessionIDSet = value, true
+	case hotSessionValueInstallationGeneration:
+		v.installationGeneration, v.installationGenerationSet = value, true
+	case hotSessionValueSessionGeneration:
+		v.sessionGeneration, v.sessionGenerationSet = value, true
+	case hotSessionValueAuthorizationFence:
+		v.authorizationFence, v.authorizationFenceSet = value, true
 	case hotSessionValueDeviceFlag:
 		v.deviceFlag, v.deviceFlagSet = value, true
 	case hotSessionValueDeviceLevel:
@@ -311,6 +347,30 @@ func (v *sessionHotValues) value(key string) any {
 	case hotSessionValueDeviceID:
 		if v.deviceIDSet {
 			return v.deviceID
+		}
+	case hotSessionValueAppInstanceID:
+		if v.appInstanceIDSet {
+			return v.appInstanceID
+		}
+	case hotSessionValueDeviceSessionID:
+		if v.deviceSessionIDSet {
+			return v.deviceSessionID
+		}
+	case hotSessionValueIMSessionID:
+		if v.imSessionIDSet {
+			return v.imSessionID
+		}
+	case hotSessionValueInstallationGeneration:
+		if v.installationGenerationSet {
+			return v.installationGeneration
+		}
+	case hotSessionValueSessionGeneration:
+		if v.sessionGenerationSet {
+			return v.sessionGeneration
+		}
+	case hotSessionValueAuthorizationFence:
+		if v.authorizationFenceSet {
+			return v.authorizationFence
 		}
 	case hotSessionValueDeviceFlag:
 		if v.deviceFlagSet {

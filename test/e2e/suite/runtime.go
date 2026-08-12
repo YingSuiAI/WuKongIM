@@ -198,6 +198,7 @@ func (s *Suite) StartSingleNodeCluster(opts ...Option) *StartedNode {
 		Spec:       spec,
 		BinaryPath: s.binaryPath,
 	}
+	registerWKProtoEndpoint(spec)
 	require.NoError(s.t, process.Start())
 	node := &StartedNode{Spec: spec, Process: process}
 	registerStartedNodeCleanup(s.t, node)
@@ -255,6 +256,7 @@ func (s *Suite) StartStaticCluster(nodeCount int, opts ...Option) *StartedCluste
 	}
 	registerStartedClusterCleanup(s.t, cluster)
 	for _, spec := range specs {
+		registerWKProtoEndpoint(spec)
 		process := &NodeProcess{Spec: spec, BinaryPath: s.binaryPath}
 		require.NoError(s.t, process.Start())
 		cluster.Nodes = append(cluster.Nodes, StartedNode{Spec: spec, Process: process})
@@ -349,6 +351,7 @@ func (c *StartedCluster) StartSeedJoinNodeNoWait(t testing.TB, cfg SeedJoinNodeC
 	require.NoError(t, os.WriteFile(spec.ConfigPath, []byte(renderedConfig), 0o644))
 	spec.Env = append(envFromConfig(renderedConfig), spec.Env...)
 
+	registerWKProtoEndpoint(spec)
 	process := &NodeProcess{Spec: spec, BinaryPath: c.binaryPath}
 	require.NoError(t, process.Start())
 	c.Nodes = append(c.Nodes, StartedNode{Spec: spec, Process: process})

@@ -36,6 +36,18 @@ type OwnerRoute struct {
 	SessionID uint64
 	// DeviceID is the authenticated client device identifier.
 	DeviceID string
+	// AppInstanceID identifies the application data installation that owns the connection.
+	AppInstanceID   string
+	DeviceSessionID string
+	IMSessionID     string
+	// InstallationGeneration fences a revoked and recreated installation binding.
+	InstallationGeneration uint64
+	// SessionGeneration fences connections created by an older login session.
+	SessionGeneration uint64
+	// AuthorizationFence is the Platform principal authority fence bound at token issue.
+	AuthorizationFence uint64
+	// ProtocolVersion is the negotiated WKProto version for capability gating.
+	ProtocolVersion uint8
 	// DeviceFlag is the WuKong protocol device category for the session.
 	DeviceFlag uint8
 	// DeviceLevel is the WuKong protocol device conflict level for the session.
@@ -46,6 +58,8 @@ type OwnerRoute struct {
 	ConnectedUnix int64
 	// LastActivityUnix records the latest owner-observed client activity for batched authority touch.
 	LastActivityUnix int64
+	// LastLeaseObservedUnix is the latest owner-side presence lease event emission time.
+	LastLeaseObservedUnix int64
 }
 
 // LocalSession stores the concrete gateway session separately from its route projection.

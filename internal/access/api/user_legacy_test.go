@@ -19,7 +19,7 @@ func TestUpdateTokenMapsCompatibleRequestToUsecaseCommand(t *testing.T) {
 	srv := New(Options{Users: users, ServiceToken: "service-secret"})
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/user/token", bytes.NewBufferString(`{"uid":"u1","token":"t1","device_flag":0,"device_level":1}`))
+	req := httptest.NewRequest(http.MethodPost, "/user/token", bytes.NewBufferString(`{"uid":"u1","device_id":"d1","app_instance_id":"app1","session_generation":2,"token":"t1","device_flag":0,"device_level":1}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer service-secret")
 
@@ -35,10 +35,8 @@ func TestUpdateTokenMapsCompatibleRequestToUsecaseCommand(t *testing.T) {
 		t.Fatalf("tokenCommands = %#v, want one call", users.tokenCommands)
 	}
 	if got, want := users.tokenCommands[0], (userusecase.UpdateTokenCommand{
-		UID:         "u1",
-		Token:       "t1",
-		DeviceFlag:  protocolmeta.DeviceFlagApp,
-		DeviceLevel: protocolmeta.DeviceLevelMaster,
+		UID: "u1", DeviceID: "d1", AppInstanceID: "app1", SessionGeneration: 2,
+		Token: "t1", DeviceFlag: protocolmeta.DeviceFlagApp, DeviceLevel: protocolmeta.DeviceLevelMaster,
 	}); got != want {
 		t.Fatalf("token command = %#v, want %#v", got, want)
 	}
@@ -80,7 +78,7 @@ func TestDeviceQuitMapsCompatibleRequestToUsecaseCommand(t *testing.T) {
 	srv := New(Options{Users: users})
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/user/device_quit", bytes.NewBufferString(`{"uid":"u1","device_flag":-1}`))
+	req := httptest.NewRequest(http.MethodPost, "/user/device_quit", bytes.NewBufferString(`{"uid":"u1","device_id":"d1","device_flag":-1}`))
 	req.Header.Set("Content-Type", "application/json")
 
 	srv.Handler().ServeHTTP(rec, req)
@@ -91,7 +89,7 @@ func TestDeviceQuitMapsCompatibleRequestToUsecaseCommand(t *testing.T) {
 	if got, want := rec.Body.String(), "{\"status\":200}"; got != want {
 		t.Fatalf("body = %q, want %q", got, want)
 	}
-	if got, want := users.deviceQuitCommands, []userusecase.DeviceQuitCommand{{UID: "u1", DeviceFlag: -1}}; !equalDeviceQuitCommands(got, want) {
+	if got, want := users.deviceQuitCommands, []userusecase.DeviceQuitCommand{{UID: "u1", DeviceID: "d1", DeviceFlag: -1}}; !equalDeviceQuitCommands(got, want) {
 		t.Fatalf("device quit commands = %#v, want %#v", got, want)
 	}
 }

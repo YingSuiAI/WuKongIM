@@ -10,17 +10,21 @@ import (
 
 func TestConnectParamsToProtoDefaultsLatestVersion(t *testing.T) {
 	params := ConnectParams{
-		ClientKey:  "client-key",
-		DeviceID:   "device-id",
-		DeviceFlag: DeviceApp,
-		UID:        "user-1",
-		Token:      "token-1",
+		ClientKey:              "client-key",
+		DeviceID:               "device-id",
+		AppInstanceID:          "app-1",
+		InstallationGeneration: 2,
+		SessionGeneration:      3,
+		DeviceFlag:             DeviceApp,
+		UID:                    "user-1",
+		Token:                  "token-1",
 	}
 
 	packet := params.ToProto()
 
 	require.NotNil(t, packet)
 	assert.Equal(t, uint8(frame.LatestVersion), packet.Version)
+	assert.Equal(t, uint64(2), packet.InstallationGeneration)
 }
 
 func TestToFrameReturnsWKPacketFrame(t *testing.T) {
@@ -132,12 +136,12 @@ func TestFromProtoSendAckPreservesUint64MessageSeq(t *testing.T) {
 	assert.Equal(t, uint64(^uint32(0))+33, result.MessageSeq)
 }
 
-func TestFromProtoRecvPacketMapsStreamIDFromStreamId(t *testing.T) {
+func TestFromProtoRecvPacketMapsMessageIdentity(t *testing.T) {
 	params := FromProtoRecvPacket(&frame.RecvPacket{
-		StreamNo: "stream-no",
-		StreamId: 42,
+		MessageID:  42,
+		MessageSeq: 43,
 	})
 
-	assert.Equal(t, "stream-no", params.StreamNo)
-	assert.Equal(t, "42", params.StreamID)
+	assert.Equal(t, "42", params.MessageID)
+	assert.Equal(t, uint64(43), params.MessageSeq)
 }

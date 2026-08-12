@@ -1,6 +1,7 @@
 package gateway_test
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/WuKongIM/WuKongIM/pkg/gateway"
@@ -8,7 +9,7 @@ import (
 	"github.com/WuKongIM/WuKongIM/pkg/protocol/wkprotoenc"
 )
 
-func TestAuthenticatorStoresNegotiatedProtocolVersion(t *testing.T) {
+func TestAuthenticatorRejectsProtocolBeforeV6(t *testing.T) {
 	auth := gateway.NewWKProtoAuthenticator(gateway.WKProtoAuthOptions{DisableEncryption: true})
 
 	result, err := auth.Authenticate(nil, &frame.ConnectPacket{
@@ -18,23 +19,47 @@ func TestAuthenticatorStoresNegotiatedProtocolVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Authenticate() error = %v", err)
 	}
-	if result.SessionValues[gateway.SessionValueProtocolVersion] != uint8(5) {
-		t.Fatalf("protocol version = %#v, want 5", result.SessionValues[gateway.SessionValueProtocolVersion])
+	if result.Connack.ReasonCode != frame.ReasonAuthFail || result.Connack.ServerVersion != frame.LatestVersion || result.SessionValues != nil {
+		t.Fatalf("Authenticate(v5) = %#v, want explicit v6 rejection", result)
 	}
 }
 
 func TestAuthenticatorStoresDeviceIDSessionValue(t *testing.T) {
 	auth := gateway.NewWKProtoAuthenticator(gateway.WKProtoAuthOptions{DisableEncryption: true})
 
-	result, err := auth.Authenticate(nil, &frame.ConnectPacket{
-		UID:      "u1",
-		DeviceID: "d-1",
+	result, err := auth.Authenticate(nil, &frame.ConnectPacket{Version: frame.LatestVersion,
+		UID:               "u1",
+		DeviceID:          "d-1",
+		AppInstanceID:     "app-1",
+		SessionGeneration: 4,
 	})
 	if err != nil {
 		t.Fatalf("Authenticate() error = %v", err)
 	}
 	if result.SessionValues[gateway.SessionValueDeviceID] != "d-1" {
 		t.Fatalf("device id = %#v, want %q", result.SessionValues[gateway.SessionValueDeviceID], "d-1")
+	}
+	if result.SessionValues[gateway.SessionValueAppInstanceID] != "app-1" || result.SessionValues[gateway.SessionValueSessionGeneration] != uint64(4) {
+		t.Fatalf("installation claims = %#v", result.SessionValues)
+	}
+}
+
+func TestAuthenticatorBindsTokenVerificationToInstallationClaims(t *testing.T) {
+	var got []any
+	auth := gateway.NewWKProtoAuthenticator(gateway.WKProtoAuthOptions{TokenAuthOn: true, DisableEncryption: true, VerifyToken: func(uid string, flag frame.DeviceFlag, deviceID, appInstanceID string, generation uint64, token string) (gateway.VerifiedCredential, error) {
+		got = []any{uid, flag, deviceID, appInstanceID, generation, token}
+		return gateway.VerifiedCredential{DeviceLevel: frame.DeviceLevelMaster, DeviceSessionID: "ds-1", IMSessionID: "im-1", InstallationGeneration: 2, AuthorizationFence: 9}, nil
+	}})
+	result, err := auth.Authenticate(nil, &frame.ConnectPacket{Version: frame.LatestVersion, UID: "u1", DeviceID: "d1", AppInstanceID: "a1", InstallationGeneration: 2, SessionGeneration: 3, DeviceFlag: frame.PC, Token: "token"})
+	if err != nil || result.Connack.ReasonCode != frame.ReasonSuccess {
+		t.Fatalf("Authenticate() = %#v, %v", result, err)
+	}
+	want := []any{"u1", frame.DeviceFlag(frame.PC), "d1", "a1", uint64(3), "token"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("claims = %#v, want %#v", got, want)
+	}
+	if result.SessionValues[gateway.SessionValueDeviceSessionID] != "ds-1" || result.SessionValues[gateway.SessionValueIMSessionID] != "im-1" || result.SessionValues[gateway.SessionValueInstallationGeneration] != uint64(2) || result.SessionValues[gateway.SessionValueAuthorizationFence] != uint64(9) {
+		t.Fatalf("verified claims = %#v", result.SessionValues)
 	}
 }
 
@@ -43,7 +68,7 @@ func TestAuthenticatorNegotiatesWKProtoEncryption(t *testing.T) {
 		EncryptionEnabled: true,
 	})
 
-	result, err := auth.Authenticate(nil, &frame.ConnectPacket{
+	result, err := auth.Authenticate(nil, &frame.ConnectPacket{Version: frame.LatestVersion,
 		UID:       "u1",
 		ClientKey: testClientPublicKey(t),
 	})
@@ -75,7 +100,7 @@ func TestAuthenticatorRejectsMissingClientKeyWhenEncryptionEnabled(t *testing.T)
 		EncryptionEnabled: true,
 	})
 
-	result, err := auth.Authenticate(nil, &frame.ConnectPacket{UID: "u1"})
+	result, err := auth.Authenticate(nil, &frame.ConnectPacket{Version: frame.LatestVersion, UID: "u1"})
 	if err != nil {
 		t.Fatalf("Authenticate() error = %v", err)
 	}
@@ -89,7 +114,7 @@ func TestAuthenticatorRejectsInvalidClientKeyWhenEncryptionEnabled(t *testing.T)
 		EncryptionEnabled: true,
 	})
 
-	result, err := auth.Authenticate(nil, &frame.ConnectPacket{
+	result, err := auth.Authenticate(nil, &frame.ConnectPacket{Version: frame.LatestVersion,
 		UID:       "u1",
 		ClientKey: "bad-client-key",
 	})
@@ -106,7 +131,7 @@ func TestAuthenticatorSkipsEncryptionMaterialWhenDisabled(t *testing.T) {
 		DisableEncryption: true,
 	})
 
-	result, err := auth.Authenticate(nil, &frame.ConnectPacket{
+	result, err := auth.Authenticate(nil, &frame.ConnectPacket{Version: frame.LatestVersion,
 		UID:       "u1",
 		ClientKey: testClientPublicKey(t),
 	})

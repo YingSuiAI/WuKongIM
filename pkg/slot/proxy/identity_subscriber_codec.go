@@ -31,6 +31,8 @@ func encodeIdentityRPCRequestBinary(req identityRPCRequest) ([]byte, error) {
 	dst = runtimeMetaAppendUvarint(dst, req.SlotID)
 	dst = runtimeMetaAppendString(dst, req.UID)
 	dst = runtimeMetaAppendVarint(dst, req.DeviceFlag)
+	dst = runtimeMetaAppendString(dst, req.DeviceID)
+	dst = runtimeMetaAppendString(dst, req.AppInstanceID)
 	dst = runtimeMetaAppendString(dst, req.After.UID)
 	dst = runtimeMetaAppendVarint(dst, int64(req.Limit))
 	return dst, nil
@@ -58,6 +60,12 @@ func decodeIdentityRPCRequest(body []byte) (identityRPCRequest, error) {
 		return identityRPCRequest{}, err
 	}
 	if req.DeviceFlag, offset, err = runtimeMetaReadVarint(body, offset); err != nil {
+		return identityRPCRequest{}, err
+	}
+	if req.DeviceID, offset, err = runtimeMetaReadString(body, offset); err != nil {
+		return identityRPCRequest{}, err
+	}
+	if req.AppInstanceID, offset, err = runtimeMetaReadString(body, offset); err != nil {
 		return identityRPCRequest{}, err
 	}
 	if req.After.UID, offset, err = runtimeMetaReadString(body, offset); err != nil {
@@ -193,6 +201,13 @@ func appendIdentityDevicePtr(dst []byte, device *metadb.Device) []byte {
 	dst = append(dst, 1)
 	dst = runtimeMetaAppendString(dst, device.UID)
 	dst = runtimeMetaAppendVarint(dst, device.DeviceFlag)
+	dst = runtimeMetaAppendString(dst, device.DeviceID)
+	dst = runtimeMetaAppendString(dst, device.AppInstanceID)
+	dst = runtimeMetaAppendString(dst, device.DeviceSessionID)
+	dst = runtimeMetaAppendString(dst, device.IMSessionID)
+	dst = runtimeMetaAppendUvarint(dst, device.InstallationGeneration)
+	dst = runtimeMetaAppendUvarint(dst, device.SessionGeneration)
+	dst = runtimeMetaAppendUvarint(dst, device.AuthorizationFence)
 	dst = runtimeMetaAppendString(dst, device.Token)
 	dst = runtimeMetaAppendVarint(dst, device.DeviceLevel)
 	return dst
@@ -208,6 +223,27 @@ func readIdentityDevicePtr(body []byte, offset int) (*metadb.Device, int, error)
 		return nil, offset, err
 	}
 	if device.DeviceFlag, next, err = runtimeMetaReadVarint(body, next); err != nil {
+		return nil, offset, err
+	}
+	if device.DeviceID, next, err = runtimeMetaReadString(body, next); err != nil {
+		return nil, offset, err
+	}
+	if device.AppInstanceID, next, err = runtimeMetaReadString(body, next); err != nil {
+		return nil, offset, err
+	}
+	if device.DeviceSessionID, next, err = runtimeMetaReadString(body, next); err != nil {
+		return nil, offset, err
+	}
+	if device.IMSessionID, next, err = runtimeMetaReadString(body, next); err != nil {
+		return nil, offset, err
+	}
+	if device.InstallationGeneration, next, err = runtimeMetaReadUvarint(body, next); err != nil {
+		return nil, offset, err
+	}
+	if device.SessionGeneration, next, err = runtimeMetaReadUvarint(body, next); err != nil {
+		return nil, offset, err
+	}
+	if device.AuthorizationFence, next, err = runtimeMetaReadUvarint(body, next); err != nil {
 		return nil, offset, err
 	}
 	if device.Token, next, err = runtimeMetaReadString(body, next); err != nil {

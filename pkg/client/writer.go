@@ -412,7 +412,7 @@ func writeRequestEncodedSizeHint(req writeRequest) int {
 		if pkt == nil {
 			return 64 + len(req.msg.Payload) + len(req.msg.ClientMsgNo) + len(req.msg.ChannelID) + len(req.msg.Topic)
 		}
-		return 64 + len(pkt.Payload) + len(pkt.ClientMsgNo) + len(pkt.ChannelID) + len(pkt.MsgKey) + len(pkt.Topic) + len(pkt.StreamNo)
+		return 64 + len(pkt.Payload) + len(pkt.ClientMsgNo) + len(pkt.ChannelID) + len(pkt.MsgKey) + len(pkt.Topic)
 	case writeKindFrame:
 		return 64
 	default:
