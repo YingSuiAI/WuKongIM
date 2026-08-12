@@ -3,7 +3,7 @@ title: Docker
 description: Build a WuKongIM image from the current source, verify development Compose, and establish the container runtime contract.
 ---
 
-The repository `Dockerfile` builds `wukongim`, `wkbench`, `wkanalysis`, and `wkcloudsim` from the current source. The runtime image defaults to:
+The repository `Dockerfile` builds a production `runtime` target containing only `wukongim`. Development Compose builds the separate `dev-tools` target when it needs `wkbench`, `wkanalysis`, or `wkcloudsim`. The runtime image defaults to:
 
 ```text
 /usr/local/bin/wukongim -config /etc/wukongim/wukongim.toml

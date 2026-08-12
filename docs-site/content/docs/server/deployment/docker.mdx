@@ -3,7 +3,7 @@ title: Docker 部署
 description: 从当前源码构建 WuKongIM 镜像，验证开发 Compose，并建立容器运行合同。
 ---
 
-仓库 `Dockerfile` 会从当前源码构建 `wukongim`、`wkbench`、`wkanalysis` 和 `wkcloudsim`，运行镜像默认执行：
+仓库 `Dockerfile` 的生产 `runtime` target 仅包含 `wukongim`。开发 Compose 需要 `wkbench`、`wkanalysis` 或 `wkcloudsim` 时会构建独立的 `dev-tools` target。运行镜像默认执行：
 
 ```text
 /usr/local/bin/wukongim -config /etc/wukongim/wukongim.toml
