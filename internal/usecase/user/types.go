@@ -47,7 +47,7 @@ type DeviceStore interface {
 
 // DeviceReader loads per-device token metadata.
 type DeviceReader interface {
-	GetDevice(ctx context.Context, uid string, deviceFlag int64) (metadb.Device, error)
+	GetDevice(ctx context.Context, uid string, deviceFlag int64, deviceID, appInstanceID string) (metadb.Device, error)
 }
 
 // PresenceDirectory exposes authoritative online route lookups.
@@ -110,6 +110,20 @@ type App struct {
 type UpdateTokenCommand struct {
 	// UID identifies the user.
 	UID string
+	// DeviceID is the stable installation credential identifier.
+	DeviceID string
+	// AppInstanceID identifies one application data installation.
+	AppInstanceID string
+	// DeviceSessionID is the Platform auth session identity.
+	DeviceSessionID string
+	// IMSessionID is the Platform IM session identity.
+	IMSessionID string
+	// InstallationGeneration fences a revoked and recreated installation binding.
+	InstallationGeneration uint64
+	// SessionGeneration fences tokens issued before the current login generation.
+	SessionGeneration uint64
+	// AuthorizationFence binds the credential to Platform principal authority.
+	AuthorizationFence uint64
 	// Token is the new device token.
 	Token string
 	// DeviceFlag is the WuKong protocol device category.
@@ -122,6 +136,8 @@ type UpdateTokenCommand struct {
 type DeviceQuitCommand struct {
 	// UID identifies the user.
 	UID string
+	// DeviceID identifies the installation whose credential is cleared.
+	DeviceID string
 	// DeviceFlag selects one device flag, or -1 for APP/WEB/PC.
 	DeviceFlag int
 }
@@ -169,6 +185,20 @@ func (c UpdateTokenCommand) validate() error {
 		return errors.New("uid不能为空！")
 	case c.Token == "":
 		return errors.New("token不能为空！")
+	case c.DeviceID == "":
+		return errors.New("device_id不能为空！")
+	case c.AppInstanceID == "":
+		return errors.New("app_instance_id不能为空！")
+	case c.DeviceSessionID == "":
+		return errors.New("device_session_id不能为空！")
+	case c.IMSessionID == "":
+		return errors.New("im_session_id不能为空！")
+	case c.InstallationGeneration == 0:
+		return errors.New("installation_generation不能为空！")
+	case c.SessionGeneration == 0:
+		return errors.New("session_generation不能为空！")
+	case c.AuthorizationFence == 0:
+		return errors.New("authorization_fence不能为空！")
 	case strings.Contains(c.UID, "@"), strings.Contains(c.UID, "#"), strings.Contains(c.UID, "&"):
 		return errors.New("uid不能包含特殊字符！")
 	default:

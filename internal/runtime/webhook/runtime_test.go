@@ -257,14 +257,14 @@ func TestRuntimeFocusEventsFiltersDisabledEvents(t *testing.T) {
 		Message: Message{MessageID: 1, MessageSeq: 1, ChannelID: "c1"},
 		ToUIDs:  []string{"u1"},
 	})
-	rt.OnlineStatus(context.Background(), OnlineStatus{Value: "u1-1"})
+	rt.PresenceLease(context.Background(), PresenceLease{ConnectionID: "1:1:1"})
 	rt.Notify(context.Background(), Message{MessageID: 2, MessageSeq: 2})
 
 	req := sender.wait(t)
 	if req.Event != EventMsgNotify {
 		t.Fatalf("event = %q, want %q", req.Event, EventMsgNotify)
 	}
-	if observer.hasResult(EventMsgOffline, "accepted") || observer.hasResult(EventUserOnlineStatus, "accepted") {
+	if observer.hasResult(EventMsgOffline, "accepted") || observer.hasResult(EventPresenceLease, "accepted") {
 		t.Fatalf("disabled events were admitted: %#v", observer.snapshot())
 	}
 }
@@ -298,7 +298,7 @@ func TestRuntimeAdmissionBeforeStartAndStopAreSafe(t *testing.T) {
 	}
 	rt.Notify(context.Background(), Message{MessageID: 1, MessageSeq: 1})
 	rt.Offline(context.Background(), OfflineMessage{Message: Message{MessageID: 1, MessageSeq: 1, ChannelID: "c1"}, ToUIDs: []string{"u1"}})
-	rt.OnlineStatus(context.Background(), OnlineStatus{Value: "u1-1"})
+	rt.PresenceLease(context.Background(), PresenceLease{ConnectionID: "1:1:1"})
 	if err := rt.Stop(context.Background()); err != nil {
 		t.Fatalf("Stop() before Start error = %v", err)
 	}
@@ -347,7 +347,7 @@ func TestRuntimeRestartsAfterMaintenanceStop(t *testing.T) {
 	}
 }
 
-func TestRuntimeSendsOfflineAndOnlineStatusEvents(t *testing.T) {
+func TestRuntimeSendsOfflineAndPresenceLeaseEvents(t *testing.T) {
 	sender := &recordingSender{requests: make(chan SendRequest, 2)}
 	rt, err := New(RuntimeOptions{
 		Sender:              sender,
@@ -372,8 +372,8 @@ func TestRuntimeSendsOfflineAndOnlineStatusEvents(t *testing.T) {
 		Message: Message{MessageID: 1, MessageSeq: 1, ChannelID: "c1"},
 		ToUIDs:  []string{"u1", "u2"},
 	})
-	rt.OnlineStatus(context.Background(), OnlineStatus{Value: "u1-1"})
-	rt.OnlineStatus(context.Background(), OnlineStatus{Value: "u2-0"})
+	rt.PresenceLease(context.Background(), PresenceLease{PrincipalUID: "u1", ConnectionID: "1:1:1", Kind: "connected"})
+	rt.PresenceLease(context.Background(), PresenceLease{PrincipalUID: "u2", ConnectionID: "1:1:2", Kind: "disconnected"})
 
 	got := map[string]SendRequest{}
 	for len(got) < 2 {
@@ -383,11 +383,11 @@ func TestRuntimeSendsOfflineAndOnlineStatusEvents(t *testing.T) {
 	if _, ok := got[EventMsgOffline]; !ok {
 		t.Fatalf("missing offline event: %#v", got)
 	}
-	if _, ok := got[EventUserOnlineStatus]; !ok {
+	if _, ok := got[EventPresenceLease]; !ok {
 		t.Fatalf("missing online status event: %#v", got)
 	}
-	var statuses []string
-	if err := json.Unmarshal(got[EventUserOnlineStatus].Body, &statuses); err != nil {
+	var statuses []PresenceLease
+	if err := json.Unmarshal(got[EventPresenceLease].Body, &statuses); err != nil {
 		t.Fatalf("json.Unmarshal(online) error = %v", err)
 	}
 	if len(statuses) != 2 {

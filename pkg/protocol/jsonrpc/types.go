@@ -30,14 +30,6 @@ type ReasonCodeEnum int
 //    // ... other reason codes
 // )
 
-type StreamFlagEnum int
-
-const (
-	StreamStart StreamFlagEnum = 0
-	StreamIng   StreamFlagEnum = 1
-	StreamEnd   StreamFlagEnum = 2
-)
-
 type ActionEnum int
 
 const (
@@ -58,7 +50,6 @@ type Header struct {
 type SettingFlags struct {
 	Receipt bool `json:"receipt,omitempty"`
 	Signal  bool `json:"signal,omitempty"`
-	Stream  bool `json:"stream,omitempty"`
 	Topic   bool `json:"topic,omitempty"`
 }
 
@@ -90,14 +81,17 @@ type BaseNotification struct {
 // --- Specific Request Payloads (Params) ---
 
 type ConnectParams struct {
-	Header          Header         `json:"header,omitempty"`
-	Version         int            `json:"version,omitempty"`
-	ClientKey       string         `json:"clientKey,omitempty"`
-	DeviceID        string         `json:"deviceId,omitempty"`
-	DeviceFlag      DeviceFlagEnum `json:"deviceFlag"`
-	ClientTimestamp int64          `json:"clientTimestamp,omitempty"`
-	UID             string         `json:"uid"`
-	Token           string         `json:"token"`
+	Header                 Header         `json:"header,omitempty"`
+	Version                int            `json:"version,omitempty"`
+	ClientKey              string         `json:"clientKey,omitempty"`
+	DeviceID               string         `json:"deviceId,omitempty"`
+	AppInstanceID          string         `json:"appInstanceId,omitempty"`
+	InstallationGeneration uint64         `json:"installationGeneration"`
+	SessionGeneration      uint64         `json:"sessionGeneration"`
+	DeviceFlag             DeviceFlagEnum `json:"deviceFlag"`
+	ClientTimestamp        int64          `json:"clientTimestamp,omitempty"`
+	UID                    string         `json:"uid"`
+	Token                  string         `json:"token"`
 }
 
 type SendParams struct {
@@ -106,7 +100,6 @@ type SendParams struct {
 	MsgKey      string       `json:"msgKey,omitempty"`
 	Expire      uint32       `json:"expire,omitempty"`
 	ClientMsgNo string       `json:"clientMsgNo,omitempty"`
-	StreamNo    string       `json:"streamNo,omitempty"`
 	ChannelID   string       `json:"channelId"`
 	ChannelType int          `json:"channelType"`
 	Topic       string       `json:"topic,omitempty"`
@@ -174,22 +167,19 @@ type SubscriptionResult struct {
 // --- Specific Notification Payloads (Params) ---
 
 type RecvNotificationParams struct {
-	Header      *Header        `json:"header,omitempty"`
-	Setting     *SettingFlags  `json:"setting,omitempty"`
-	MsgKey      string         `json:"msgKey,omitempty"`
-	Expire      uint32         `json:"expire,omitempty"`
-	MessageID   string         `json:"messageId"`
-	MessageSeq  uint64         `json:"messageSeq"`
-	ClientMsgNo string         `json:"clientMsgNo,omitempty"`
-	StreamNo    string         `json:"streamNo,omitempty"`
-	StreamID    string         `json:"streamId,omitempty"`
-	StreamFlag  StreamFlagEnum `json:"streamFlag,omitempty"`
-	Timestamp   int32          `json:"timestamp"`
-	ChannelID   string         `json:"channelId"`
-	ChannelType int            `json:"channelType"`
-	Topic       string         `json:"topic,omitempty"`
-	FromUID     string         `json:"fromUid"`
-	Payload     []byte         `json:"payload"`
+	Header      *Header       `json:"header,omitempty"`
+	Setting     *SettingFlags `json:"setting,omitempty"`
+	MsgKey      string        `json:"msgKey,omitempty"`
+	Expire      uint32        `json:"expire,omitempty"`
+	MessageID   string        `json:"messageId"`
+	MessageSeq  uint64        `json:"messageSeq"`
+	ClientMsgNo string        `json:"clientMsgNo,omitempty"`
+	Timestamp   int32         `json:"timestamp"`
+	ChannelID   string        `json:"channelId"`
+	ChannelType int           `json:"channelType"`
+	Topic       string        `json:"topic,omitempty"`
+	FromUID     string        `json:"fromUid"`
+	Payload     []byte        `json:"payload"`
 }
 
 // DisconnectNotificationParams are same as DisconnectParams
@@ -200,7 +190,7 @@ type EventNotificationParams struct {
 	Header    *Header `json:"header,omitempty"`
 	ID        string  `json:"id"`
 	Type      string  `json:"type"`
-	Timestamp int64   `json:"timestamp"`
+	Timestamp uint64  `json:"timestamp"`
 	Data      string  `json:"data"`
 }
 
@@ -316,9 +306,6 @@ func (sf SettingFlags) ToProto() frame.Setting {
 	if sf.Signal {
 		setting |= frame.SettingSignal
 	}
-	if sf.Stream {
-		setting |= frame.SettingStream
-	}
 	if sf.Topic {
 		setting |= frame.SettingTopic
 	}
@@ -341,14 +328,17 @@ func (p ConnectParams) ToProto() *frame.ConnectPacket {
 	}
 
 	req := &frame.ConnectPacket{
-		Framer:          headerToFramer(p.Header),
-		Version:         version,
-		ClientKey:       p.ClientKey,
-		DeviceID:        p.DeviceID,
-		DeviceFlag:      frame.DeviceFlag(p.DeviceFlag),
-		ClientTimestamp: p.ClientTimestamp,
-		UID:             p.UID,
-		Token:           p.Token,
+		Framer:                 headerToFramer(p.Header),
+		Version:                version,
+		ClientKey:              p.ClientKey,
+		DeviceID:               p.DeviceID,
+		AppInstanceID:          p.AppInstanceID,
+		InstallationGeneration: p.InstallationGeneration,
+		SessionGeneration:      p.SessionGeneration,
+		DeviceFlag:             frame.DeviceFlag(p.DeviceFlag),
+		ClientTimestamp:        p.ClientTimestamp,
+		UID:                    p.UID,
+		Token:                  p.Token,
 	}
 	return req
 }
@@ -381,7 +371,6 @@ func (p SendParams) ToProto() *frame.SendPacket {
 		Payload:     p.Payload,
 		MsgKey:      p.MsgKey,
 		Expire:      p.Expire,
-		StreamNo:    p.StreamNo,
 		Topic:       p.Topic,
 	}
 	return req
@@ -424,9 +413,6 @@ func FromProtoRecvPacket(pkt *frame.RecvPacket) RecvNotificationParams {
 		MessageID:   strconv.FormatInt(pkt.MessageID, 10),
 		MessageSeq:  pkt.MessageSeq,
 		ClientMsgNo: pkt.ClientMsgNo,
-		StreamNo:    pkt.StreamNo,
-		StreamID:    strconv.FormatUint(pkt.StreamId, 10),
-		StreamFlag:  StreamFlagEnum(pkt.StreamFlag),
 		Timestamp:   pkt.Timestamp,
 		ChannelID:   pkt.ChannelID,
 		ChannelType: int(pkt.ChannelType),
@@ -521,7 +507,6 @@ func fromProtoSetting(setting frame.Setting) *SettingFlags {
 	flags := &SettingFlags{}
 	flags.Receipt = (setting & frame.SettingReceiptEnabled) != 0
 	flags.Signal = (setting & frame.SettingSignal) != 0
-	flags.Stream = (setting & frame.SettingStream) != 0
 	flags.Topic = (setting & frame.SettingTopic) != 0
 	return flags
 }
@@ -612,7 +597,6 @@ func (r SendRequest) ToProto() (*frame.SendPacket, error) {
 		Payload:     payloadBytes,
 		MsgKey:      r.Params.MsgKey,
 		Expire:      r.Params.Expire,
-		StreamNo:    r.Params.StreamNo,
 		Topic:       r.Params.Topic,
 	}
 	return pkt, nil
@@ -650,7 +634,7 @@ func FromProtoRecvNotification(pkt *frame.RecvPacket) RecvNotification {
 }
 
 // NewEventNotification creates a new EventNotification
-func NewEventNotification(id string, eventType string, timestamp int64, data string, header *Header) EventNotification {
+func NewEventNotification(id string, eventType string, timestamp uint64, data string, header *Header) EventNotification {
 	return EventNotification{
 		BaseNotification: BaseNotification{
 			Jsonrpc: jsonRPCVersion,

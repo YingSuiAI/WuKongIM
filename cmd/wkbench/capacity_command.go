@@ -166,6 +166,7 @@ func bindCapacityActivateChannelsFlags(flags *pflag.FlagSet, cfg *capacity.Activ
 
 func bindCapacityMessageEventFlags(flags *pflag.FlagSet, cfg *messageevent.Config, apiCSV *string) {
 	flags.StringVar(apiCSV, "api", "", "comma-separated target HTTP API base addresses")
+	flags.StringVar(&cfg.ServiceToken, "service-token", cfg.ServiceToken, "service token for message event append")
 	flags.StringVar(&cfg.RunID, "run-id", cfg.RunID, "stable benchmark run identifier")
 	flags.IntVar(&cfg.Channels, "channels", cfg.Channels, "number of generated group channels")
 	flags.IntVar(&cfg.StreamsPerChannel, "streams-per-channel", cfg.StreamsPerChannel, "stream base messages generated per channel")

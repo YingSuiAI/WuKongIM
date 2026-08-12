@@ -70,6 +70,12 @@ type ConnectOptions struct {
 	UID string
 	// DeviceID is the stable client device id.
 	DeviceID string
+	// AppInstanceID identifies one application data installation within DeviceID.
+	AppInstanceID string
+	// InstallationGeneration fences a revoked and recreated installation binding.
+	InstallationGeneration uint64
+	// SessionGeneration fences sessions created before the current login generation.
+	SessionGeneration uint64
 	// DeviceFlag is the WuKong protocol device category.
 	DeviceFlag frame.DeviceFlag
 	// Token is the CONNECT token; empty falls back to Config.Token.

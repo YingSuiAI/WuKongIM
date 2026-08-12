@@ -41,28 +41,19 @@ export class Convert {
             }
         }
 
-        // 从 event_meta snapshot 或 legacy stream_data 中提取流文本
-        let streamTextResolved = false
+        // 从 typed EVENT compact snapshot 提取可恢复正文
         if (eventMeta && eventMeta.events && eventMeta.events.length > 0) {
             for (const ek of eventMeta.events) {
                 if (ek.event_key === "main" || eventMeta.events.length === 1) {
                     const snapshot = ek.snapshot
                     if (snapshot && snapshot.kind === "text" && snapshot.text) {
                         message.streamText = snapshot.text
-                        streamTextResolved = true
                         break
                     }
                 }
             }
         }
-        if (!streamTextResolved) {
-            const streamBase64Data = msgMap["stream_data"]
-            if (streamBase64Data) {
-                const streamText = Buffer.from(streamBase64Data, 'base64')
-                message.streamText = streamText.toString('utf8')
-            }
-        }
-       
+
         let contentType = 0
         try {
             let contentObj = null

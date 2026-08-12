@@ -150,6 +150,8 @@ Current flow:
     index, checkpoint/history/retention record, and catalog entry before retry.
     Message and index deletion is paged in batches of at most 1024 rows and
     approximately 8 MiB of payload.
-21. Schema and key helpers define the durable message table layout.
+21. Schema and key helpers define the durable message table layout. The current
+    breaking schema and replicated record codec contain no legacy stream number,
+    stream ID, or stream flag columns; Agent output uses typed EVENT projection.
 
 Storage code in this package must not import Pebble directly.

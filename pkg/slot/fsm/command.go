@@ -62,10 +62,17 @@ const (
 	tagUserDeviceLevel uint8 = 4
 
 	// Device field tags.
-	tagDeviceUID   uint8 = 1
-	tagDeviceFlag  uint8 = 2
-	tagDeviceToken uint8 = 3
-	tagDeviceLevel uint8 = 4
+	tagDeviceUID                    uint8 = 1
+	tagDeviceFlag                   uint8 = 2
+	tagDeviceToken                  uint8 = 3
+	tagDeviceLevel                  uint8 = 4
+	tagDeviceID                     uint8 = 5
+	tagDeviceAppInstanceID          uint8 = 6
+	tagDeviceSessionGeneration      uint8 = 7
+	tagDeviceInstallationGeneration uint8 = 8
+	tagDeviceAuthorizationFence     uint8 = 9
+	tagDeviceDeviceSessionID        uint8 = 10
+	tagDeviceIMSessionID            uint8 = 11
 
 	// Channel field tags.
 	tagChannelID            uint8 = 1
@@ -706,6 +713,13 @@ func EncodeUpsertDeviceCommand(d metadb.Device) []byte {
 		tlvOverhead + uidLen +
 		tlvOverhead + 8 +
 		tlvOverhead + tokenLen +
+		tlvOverhead + 8 +
+		tlvOverhead + len(d.DeviceID) +
+		tlvOverhead + len(d.AppInstanceID) +
+		tlvOverhead + len(d.DeviceSessionID) +
+		tlvOverhead + len(d.IMSessionID) +
+		tlvOverhead + 8 +
+		tlvOverhead + 8 +
 		tlvOverhead + 8
 
 	buf := make([]byte, size)
@@ -719,7 +733,14 @@ func EncodeUpsertDeviceCommand(d metadb.Device) []byte {
 	off = putStringField(buf, off, tagDeviceUID, d.UID)
 	off = putInt64Field(buf, off, tagDeviceFlag, d.DeviceFlag)
 	off = putStringField(buf, off, tagDeviceToken, d.Token)
-	_ = putInt64Field(buf, off, tagDeviceLevel, d.DeviceLevel)
+	off = putInt64Field(buf, off, tagDeviceLevel, d.DeviceLevel)
+	off = putStringField(buf, off, tagDeviceID, d.DeviceID)
+	off = putStringField(buf, off, tagDeviceAppInstanceID, d.AppInstanceID)
+	off = putStringField(buf, off, tagDeviceDeviceSessionID, d.DeviceSessionID)
+	off = putStringField(buf, off, tagDeviceIMSessionID, d.IMSessionID)
+	off = putInt64Field(buf, off, tagDeviceInstallationGeneration, int64(d.InstallationGeneration))
+	off = putInt64Field(buf, off, tagDeviceSessionGeneration, int64(d.SessionGeneration))
+	_ = putInt64Field(buf, off, tagDeviceAuthorizationFence, int64(d.AuthorizationFence))
 
 	return buf
 }
@@ -1598,6 +1619,29 @@ func decodeDevice(data []byte) (metadb.Device, error) {
 				return metadb.Device{}, fmt.Errorf("%w: bad DeviceLevel length", metadb.ErrCorruptValue)
 			}
 			d.DeviceLevel = int64(binary.BigEndian.Uint64(value))
+		case tagDeviceID:
+			d.DeviceID = string(value)
+		case tagDeviceAppInstanceID:
+			d.AppInstanceID = string(value)
+		case tagDeviceDeviceSessionID:
+			d.DeviceSessionID = string(value)
+		case tagDeviceIMSessionID:
+			d.IMSessionID = string(value)
+		case tagDeviceInstallationGeneration:
+			if len(value) != 8 {
+				return metadb.Device{}, fmt.Errorf("%w: bad InstallationGeneration length", metadb.ErrCorruptValue)
+			}
+			d.InstallationGeneration = binary.BigEndian.Uint64(value)
+		case tagDeviceSessionGeneration:
+			if len(value) != 8 {
+				return metadb.Device{}, fmt.Errorf("%w: bad SessionGeneration length", metadb.ErrCorruptValue)
+			}
+			d.SessionGeneration = binary.BigEndian.Uint64(value)
+		case tagDeviceAuthorizationFence:
+			if len(value) != 8 {
+				return metadb.Device{}, fmt.Errorf("%w: bad AuthorizationFence length", metadb.ErrCorruptValue)
+			}
+			d.AuthorizationFence = binary.BigEndian.Uint64(value)
 		default:
 			// Unknown tag — skip for forward compatibility.
 		}

@@ -432,19 +432,23 @@ func TestStoreCreateUserAndUpsertDevice(t *testing.T) {
 	require.ErrorIs(t, err, metadb.ErrAlreadyExists)
 
 	require.NoError(t, store.UpsertDevice(ctx, metadb.Device{
-		UID:         "u1",
-		DeviceFlag:  2,
-		Token:       "web-token",
-		DeviceLevel: 1,
+		UID:           "u1",
+		DeviceFlag:    2,
+		DeviceID:      "device-2",
+		AppInstanceID: "app-2",
+		Token:         "web-token",
+		DeviceLevel:   1,
 	}))
 
-	gotDevice, err := store.GetDevice(ctx, "u1", 2)
+	gotDevice, err := store.GetDevice(ctx, "u1", 2, "device-2", "app-2")
 	require.NoError(t, err)
 	require.Equal(t, metadb.Device{
-		UID:         "u1",
-		DeviceFlag:  2,
-		Token:       "web-token",
-		DeviceLevel: 1,
+		UID:           "u1",
+		DeviceFlag:    2,
+		DeviceID:      "device-2",
+		AppInstanceID: "app-2",
+		Token:         "web-token",
+		DeviceLevel:   1,
 	}, gotDevice)
 }
 
@@ -767,19 +771,23 @@ func TestStoreGetDeviceReadsAuthoritativeRemoteSlot(t *testing.T) {
 
 	uid := findUIDForSlot(t, nodes[0].cluster, 2, "remote-device")
 	require.NoError(t, nodes[1].db.ForHashSlot(mustHashSlotForKey(t, nodes[1].cluster, uid)).UpsertDevice(ctx, metadb.Device{
-		UID:         uid,
-		DeviceFlag:  5,
-		Token:       "device-token",
-		DeviceLevel: 1,
+		UID:           uid,
+		DeviceFlag:    5,
+		DeviceID:      "device-5",
+		AppInstanceID: "app-5",
+		Token:         "device-token",
+		DeviceLevel:   1,
 	}))
 
-	got, err := nodes[0].store.GetDevice(ctx, uid, 5)
+	got, err := nodes[0].store.GetDevice(ctx, uid, 5, "device-5", "app-5")
 	require.NoError(t, err)
 	require.Equal(t, metadb.Device{
-		UID:         uid,
-		DeviceFlag:  5,
-		Token:       "device-token",
-		DeviceLevel: 1,
+		UID:           uid,
+		DeviceFlag:    5,
+		DeviceID:      "device-5",
+		AppInstanceID: "app-5",
+		Token:         "device-token",
+		DeviceLevel:   1,
 	}, got)
 }
 

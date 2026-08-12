@@ -66,6 +66,7 @@ type UserDetailDTO struct {
 
 // UserDeviceDTO is the manager-facing stored-device summary response body.
 type UserDeviceDTO struct {
+	DeviceID string `json:"device_id"`
 	// DeviceFlag is the stable manager-facing device flag.
 	DeviceFlag string `json:"device_flag"`
 	// DeviceLevel is the stable manager-facing device level.
@@ -110,13 +111,17 @@ type ResetUserTokenResponseDTO struct {
 }
 
 type kickUserRequestBody struct {
+	DeviceID   string `json:"device_id"`
 	DeviceFlag string `json:"device_flag"`
 }
 
 type resetUserTokenRequestBody struct {
-	DeviceFlag  string `json:"device_flag"`
-	DeviceLevel string `json:"device_level"`
-	Token       string `json:"token"`
+	DeviceID          string `json:"device_id"`
+	AppInstanceID     string `json:"app_instance_id"`
+	SessionGeneration uint64 `json:"session_generation"`
+	DeviceFlag        string `json:"device_flag"`
+	DeviceLevel       string `json:"device_level"`
+	Token             string `json:"token"`
 }
 
 func (s *Server) handleUsers(c *gin.Context) {
@@ -180,6 +185,7 @@ func (s *Server) handleUserKick(c *gin.Context) {
 	}
 	resp, err := s.management.KickUser(c.Request.Context(), managementusecase.KickUserRequest{
 		UID:        c.Param("uid"),
+		DeviceID:   body.DeviceID,
 		DeviceFlag: body.DeviceFlag,
 	})
 	if err != nil {
@@ -200,10 +206,13 @@ func (s *Server) handleUserTokenReset(c *gin.Context) {
 		return
 	}
 	resp, err := s.management.ResetUserToken(c.Request.Context(), managementusecase.ResetUserTokenRequest{
-		UID:         c.Param("uid"),
-		DeviceFlag:  body.DeviceFlag,
-		DeviceLevel: body.DeviceLevel,
-		Token:       body.Token,
+		UID:               c.Param("uid"),
+		DeviceID:          body.DeviceID,
+		AppInstanceID:     body.AppInstanceID,
+		SessionGeneration: body.SessionGeneration,
+		DeviceFlag:        body.DeviceFlag,
+		DeviceLevel:       body.DeviceLevel,
+		Token:             body.Token,
 	})
 	if err != nil {
 		writeUserError(c, err, "invalid device token reset request", "user not found")
@@ -272,6 +281,7 @@ func userDeviceDTOs(items []managementusecase.UserDevice) []UserDeviceDTO {
 	out := make([]UserDeviceDTO, 0, len(items))
 	for _, item := range items {
 		out = append(out, UserDeviceDTO{
+			DeviceID:           item.DeviceID,
 			DeviceFlag:         item.DeviceFlag,
 			DeviceLevel:        item.DeviceLevel,
 			TokenSet:           item.TokenSet,

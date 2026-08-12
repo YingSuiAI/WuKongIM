@@ -66,6 +66,30 @@ func TestLocalSessionWriterClassifiesMissingRegistryAsRetryable(t *testing.T) {
 	}
 }
 
+func TestLocalSessionWriterWritesEventOnlyToExactInstallationRoute(t *testing.T) {
+	registry := online.NewRegistry(online.RegistryOptions{})
+	session := &localSessionWriterTestSession{}
+	route := registerLocalSessionWriterTestSession(t, registry, 1, "u1", 10, session)
+	writer := NewLocalSessionWriter(LocalSessionWriterOptions{Online: registry})
+	push := onlinedelivery.EventPush{OwnerNodeID: 1, EventID: "evt-1", EventType: "agent.delta", Timestamp: 1234, Payload: []byte(`{"delta":"hi"}`), Routes: []onlinedelivery.Route{route}}
+
+	result := writer.WriteEventSession(context.Background(), push, route)
+	if result.Disposition != runtimedelivery.SessionWriteAccepted {
+		t.Fatalf("disposition = %v err = %v, want accepted", result.Disposition, result.Err)
+	}
+	packet, ok := session.lastEvent.(*frame.EventPacket)
+	if !ok || packet.Id != "evt-1" || packet.Type != "agent.delta" || packet.Timestamp != 1234 || string(packet.Data) != `{"delta":"hi"}` {
+		t.Fatalf("packet = %#v, want typed EVENT", session.lastEvent)
+	}
+
+	stale := route
+	stale.DeviceID = "replacement-installation"
+	result = writer.WriteEventSession(context.Background(), push, stale)
+	if result.Disposition != runtimedelivery.SessionWriteDropped {
+		t.Fatalf("stale disposition = %v, want dropped", result.Disposition)
+	}
+}
+
 func TestLocalSessionWriterClassifiesPacketBuildAndTerminalWriteFailures(t *testing.T) {
 	registry := online.NewRegistry(online.RegistryOptions{ShardCount: 1})
 	session := &localSessionWriterTestSession{}
@@ -114,12 +138,16 @@ func TestBuildOnlineDeliveryRecvPacketUsesRecipientPersonView(t *testing.T) {
 }
 
 type localSessionWriterTestSession struct {
-	writeErr error
-	writes   atomic.Int64
-	last     atomic.Pointer[frame.RecvPacket]
+	writeErr  error
+	lastEvent any
+	writes    atomic.Int64
+	last      atomic.Pointer[frame.RecvPacket]
 }
 
 func (s *localSessionWriterTestSession) WriteDelivery(value any) error {
+	if _, ok := value.(*frame.EventPacket); ok {
+		s.lastEvent = value
+	}
 	s.writes.Add(1)
 	if packet, ok := value.(*frame.RecvPacket); ok {
 		retained := *packet
@@ -143,6 +171,7 @@ func registerLocalSessionWriterTestSession(
 	route := online.OwnerRoute{
 		UID: uid, OwnerNodeID: ownerNodeID, OwnerBootID: 7,
 		OwnerSeq: sessionID + 100, SessionID: sessionID, ConnectedUnix: 100,
+		AppInstanceID: "app-1", SessionGeneration: 1, ProtocolVersion: uint8(frame.LatestVersion),
 	}
 	if err := registry.RegisterPending(online.LocalSession{Route: route, Session: session}); err != nil {
 		t.Fatalf("RegisterPending(%d) error = %v", sessionID, err)
@@ -153,5 +182,6 @@ func registerLocalSessionWriterTestSession(
 	return onlinedelivery.Route{
 		UID: uid, OwnerNodeID: ownerNodeID, OwnerBootID: route.OwnerBootID,
 		OwnerSeq: route.OwnerSeq, SessionID: sessionID,
+		AppInstanceID: route.AppInstanceID, SessionGeneration: route.SessionGeneration, ProtocolVersion: route.ProtocolVersion,
 	}
 }

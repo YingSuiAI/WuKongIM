@@ -11,12 +11,13 @@ type UserMetadataNode interface {
 	CreateUserMetadata(context.Context, metadb.User) error
 	GetUserMetadata(context.Context, string) (metadb.User, error)
 	UpsertDeviceMetadata(context.Context, metadb.Device) error
-	GetDeviceMetadata(context.Context, string, int64) (metadb.Device, error)
+	GetDeviceMetadata(context.Context, string, int64, string, string) (metadb.Device, error)
+	ListDeviceMetadataByUID(context.Context, string) ([]metadb.Device, error)
 }
 
 // AuthoritativeDeviceMetadataNode exposes leader-routed credential reads for gateway authentication.
 type AuthoritativeDeviceMetadataNode interface {
-	GetDeviceMetadataAuthoritative(context.Context, string, int64) (metadb.Device, error)
+	GetDeviceMetadataAuthoritative(context.Context, string, int64, string, string) (metadb.Device, error)
 }
 
 // UserMetadataScanNode exposes cluster user metadata page scans for manager lists.
@@ -61,11 +62,19 @@ func (s *UserMetadataStore) UpsertDevice(ctx context.Context, device metadb.Devi
 }
 
 // GetDevice reads per-device token metadata from the current Slot route.
-func (s *UserMetadataStore) GetDevice(ctx context.Context, uid string, deviceFlag int64) (metadb.Device, error) {
+func (s *UserMetadataStore) GetDevice(ctx context.Context, uid string, deviceFlag int64, deviceID, appInstanceID string) (metadb.Device, error) {
 	if s == nil || s.node == nil {
 		return metadb.Device{}, metadb.ErrNotFound
 	}
-	return s.node.GetDeviceMetadata(ctx, uid, deviceFlag)
+	return s.node.GetDeviceMetadata(ctx, uid, deviceFlag, deviceID, appInstanceID)
+}
+
+// ListDevicesByUID reads every durable installation row for one user.
+func (s *UserMetadataStore) ListDevicesByUID(ctx context.Context, uid string) ([]metadb.Device, error) {
+	if s == nil || s.node == nil {
+		return nil, metadb.ErrNotFound
+	}
+	return s.node.ListDeviceMetadataByUID(ctx, uid)
 }
 
 // ScanUsersSlotPage returns one user metadata page for a physical Slot.

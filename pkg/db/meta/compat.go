@@ -340,12 +340,20 @@ func (s *ShardStore) UpsertDevice(ctx context.Context, device Device) error {
 	return s.shard.UpsertDevice(ctx, device)
 }
 
-func (s *ShardStore) GetDevice(ctx context.Context, uid string, deviceFlag int64) (Device, error) {
+func (s *ShardStore) GetDevice(ctx context.Context, uid string, deviceFlag int64, deviceID, appInstanceID string) (Device, error) {
 	if err := s.validate(); err != nil {
 		return Device{}, err
 	}
-	device, ok, err := s.shard.GetDevice(ctx, uid, deviceFlag)
+	device, ok, err := s.shard.GetDevice(ctx, uid, deviceFlag, deviceID, appInstanceID)
 	return device, foundError(ok, err)
+}
+
+// ListDevicesByUID returns every durable installation row for one user.
+func (s *ShardStore) ListDevicesByUID(ctx context.Context, uid string) ([]Device, error) {
+	if err := s.validate(); err != nil {
+		return nil, err
+	}
+	return s.shard.ListDevicesByUID(ctx, uid)
 }
 
 func (s *ShardStore) UpsertChannelRuntimeMeta(ctx context.Context, meta ChannelRuntimeMeta) error {
@@ -504,11 +512,11 @@ func (s *ShardStore) AppendMessageEvent(ctx context.Context, event MessageEventA
 	return s.shard.AppendMessageEvent(ctx, event)
 }
 
-func (s *ShardStore) GetMessageEventState(ctx context.Context, channelID string, channelType int64, clientMsgNo string, eventKey string) (MessageEventState, error) {
+func (s *ShardStore) GetMessageEventState(ctx context.Context, channelID string, channelType int64, clientMsgNo, runID, eventKey string) (MessageEventState, error) {
 	if err := s.validate(); err != nil {
 		return MessageEventState{}, err
 	}
-	state, ok, err := s.shard.GetMessageEventState(ctx, channelID, channelType, clientMsgNo, eventKey)
+	state, ok, err := s.shard.GetMessageEventState(ctx, channelID, channelType, clientMsgNo, runID, eventKey)
 	return state, foundError(ok, err)
 }
 
@@ -517,6 +525,22 @@ func (s *ShardStore) ListMessageEventStates(ctx context.Context, channelID strin
 		return nil, err
 	}
 	return s.shard.ListMessageEventStates(ctx, channelID, channelType, clientMsgNo, limit)
+}
+
+// GetMessageEventCursor returns one run-global authority cursor.
+func (s *ShardStore) GetMessageEventCursor(ctx context.Context, channelID string, channelType int64, clientMsgNo, runID string) (MessageEventCursor, bool, error) {
+	if err := s.validate(); err != nil {
+		return MessageEventCursor{}, false, err
+	}
+	return s.shard.GetMessageEventCursor(ctx, channelID, channelType, clientMsgNo, runID)
+}
+
+// GetMessageEventApplied returns one durable event idempotency record.
+func (s *ShardStore) GetMessageEventApplied(ctx context.Context, channelID string, channelType int64, clientMsgNo, eventID string) (MessageEventApplied, bool, error) {
+	if err := s.validate(); err != nil {
+		return MessageEventApplied{}, false, err
+	}
+	return s.shard.GetMessageEventApplied(ctx, channelID, channelType, clientMsgNo, eventID)
 }
 
 func (s *ShardStore) BindPluginUser(ctx context.Context, binding PluginUserBinding) error {

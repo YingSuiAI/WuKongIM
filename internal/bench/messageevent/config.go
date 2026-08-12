@@ -10,6 +10,8 @@ import (
 type Config struct {
 	// APIAddrs are target HTTP API base addresses used for public writes and metrics reads.
 	APIAddrs []string
+	// ServiceToken authorizes service-only message event appends.
+	ServiceToken string
 	// RunID is embedded in generated channel, uid, client message, and event identifiers.
 	RunID string
 	// Channels is the number of generated group channels.
@@ -18,9 +20,9 @@ type Config struct {
 	StreamsPerChannel int
 	// LanesPerStream is the number of event keys updated before each stream finish.
 	LanesPerStream int
-	// DeltasPerLane is the number of stream.delta updates sent to each event key.
+	// DeltasPerLane is the number of delta updates sent to each event key.
 	DeltasPerLane int
-	// PayloadBytes is the approximate payload body size for each stream.delta.
+	// PayloadBytes is the approximate payload body size for each delta.
 	PayloadBytes int
 	// Concurrency is the maximum number of streams running at once.
 	Concurrency int
@@ -38,9 +40,9 @@ type Config struct {
 type Shape struct {
 	// Streams is the number of base stream messages generated.
 	Streams int `json:"streams"`
-	// DeltaEvents is the number of cache-only stream.delta requests sent.
+	// DeltaEvents is the number of cache-only delta requests sent.
 	DeltaEvents int `json:"delta_events"`
-	// FinishEvents is the number of stream.finish requests sent.
+	// FinishEvents is the number of finish requests sent.
 	FinishEvents int `json:"finish_events"`
 	// ExpectedDurableEvents is the compact durable event count expected after finishes.
 	ExpectedDurableEvents int `json:"expected_durable_events"`
@@ -67,6 +69,9 @@ func DefaultConfig() Config {
 func (c Config) Validate() error {
 	if len(c.APIAddrs) == 0 {
 		return fmt.Errorf("api addrs: --api is required")
+	}
+	if strings.TrimSpace(c.ServiceToken) == "" {
+		return fmt.Errorf("service token is required")
 	}
 	for i, addr := range c.APIAddrs {
 		if strings.TrimSpace(addr) == "" {

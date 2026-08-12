@@ -168,6 +168,20 @@ func (r *Registry) MarkTouched(sessionID uint64, activityUnix int64) (OwnerRoute
 	return session.Route, true
 }
 
+// MarkLeaseObserved advances the last emitted installation lease timestamp.
+func (r *Registry) MarkLeaseObserved(sessionID uint64, observedUnix int64) (OwnerRoute, bool) {
+	shard := r.sessionShard(sessionID)
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
+	session, ok := shard.bySession[sessionID]
+	if !ok || session.State != RouteStateActive || observedUnix <= session.Route.LastLeaseObservedUnix {
+		return OwnerRoute{}, false
+	}
+	session.Route.LastLeaseObservedUnix = observedUnix
+	shard.bySession[sessionID] = session
+	return session.Route, true
+}
+
 // DrainTouched returns up to limit dirty active routes and clears their dirty markers.
 func (r *Registry) DrainTouched(limit int) []OwnerRoute {
 	if limit <= 0 {
@@ -273,5 +287,7 @@ func sameRoute(a, b OwnerRoute) bool {
 		a.SessionID == b.SessionID &&
 		a.OwnerNodeID == b.OwnerNodeID &&
 		a.OwnerBootID == b.OwnerBootID &&
-		a.OwnerSeq == b.OwnerSeq
+		a.OwnerSeq == b.OwnerSeq &&
+		a.AppInstanceID == b.AppInstanceID &&
+		a.SessionGeneration == b.SessionGeneration
 }

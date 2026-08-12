@@ -25,8 +25,7 @@ const (
 )
 
 const (
-	groupChannelType    = 2
-	legacyStreamSetting = 1 << 1
+	groupChannelType = 2
 )
 
 // Result is the machine-readable output from one message event stream pressure run.
@@ -79,23 +78,23 @@ type RequestSummary struct {
 	ChannelUpserts int `json:"channel_upserts"`
 	// BaseMessages is the number of /message/send stream base messages that succeeded.
 	BaseMessages int `json:"base_messages"`
-	// DeltaEvents is the number of stream.delta requests that succeeded.
+	// DeltaEvents is the number of delta requests that succeeded.
 	DeltaEvents int `json:"delta_events"`
-	// FinishEvents is the number of stream.finish requests that succeeded.
+	// FinishEvents is the number of finish requests that succeeded.
 	FinishEvents int `json:"finish_events"`
 	// Errors is the number of failed public API requests.
 	Errors int `json:"errors"`
-	// DeltaP50 is the stream.delta request p50 latency.
+	// DeltaP50 is the delta request p50 latency.
 	DeltaP50 time.Duration `json:"delta_p50"`
-	// DeltaP95 is the stream.delta request p95 latency.
+	// DeltaP95 is the delta request p95 latency.
 	DeltaP95 time.Duration `json:"delta_p95"`
-	// DeltaP99 is the stream.delta request p99 latency.
+	// DeltaP99 is the delta request p99 latency.
 	DeltaP99 time.Duration `json:"delta_p99"`
-	// FinishP50 is the stream.finish request p50 latency.
+	// FinishP50 is the finish request p50 latency.
 	FinishP50 time.Duration `json:"finish_p50"`
-	// FinishP95 is the stream.finish request p95 latency.
+	// FinishP95 is the finish request p95 latency.
 	FinishP95 time.Duration `json:"finish_p95"`
-	// FinishP99 is the stream.finish request p99 latency.
+	// FinishP99 is the finish request p99 latency.
 	FinishP99 time.Duration `json:"finish_p99"`
 }
 
@@ -290,34 +289,50 @@ func (r *Runner) runStream(ctx context.Context, cfg Config, spec streamSpec, rec
 	channelID := generatedChannelID(cfg, spec.channelIndex)
 	fromUID := generatedUID(cfg, spec.channelIndex)
 	clientMsgNo := generatedClientMsgNo(cfg, spec.channelIndex, spec.streamIndex)
+	runID := generatedRunID(spec.channelIndex, spec.streamIndex)
+	authorizationFence := uint64(1)
 	api := cfg.APIAddrs[(spec.channelIndex+spec.streamIndex)%len(cfg.APIAddrs)]
+	var sendResult struct {
+		MessageID  uint64 `json:"message_id"`
+		MessageSeq uint64 `json:"message_seq"`
+	}
 	if err := r.postJSON(ctx, api, "/message/send", map[string]any{
 		"from_uid":      fromUID,
 		"channel_id":    channelID,
 		"channel_type":  groupChannelType,
 		"client_msg_no": clientMsgNo,
-		"setting":       legacyStreamSetting,
-		"payload":       base64.StdEncoding.EncodeToString([]byte("stream base")),
-	}, nil); err != nil {
+		"payload":       base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf(`{"type":1,"run_id":%q,"authorization_fence":%d}`, runID, authorizationFence))),
+	}, &sendResult); err != nil {
 		return fmt.Errorf("send base stream %s: %w", clientMsgNo, err)
+	}
+	if sendResult.MessageID == 0 {
+		return fmt.Errorf("send base stream %s: response omitted message_id", clientMsgNo)
 	}
 	recorder.recordBaseMessage()
 
+	authoritySequence := uint64(0)
 	for lane := 0; lane < cfg.LanesPerStream; lane++ {
 		for delta := 0; delta < cfg.DeltasPerLane; delta++ {
+			authoritySequence++
+			eventID := generatedEventID(cfg, spec.channelIndex, spec.streamIndex, lane, delta)
+			eventKey := generatedEventKey(lane)
+			occurredAt := time.Now().UTC()
+			textDelta := generatedPayload(cfg.PayloadBytes)
 			start := time.Now()
-			if err := r.postJSON(ctx, api, "/message/event", map[string]any{
-				"channel_id":    channelID,
-				"channel_type":  groupChannelType,
-				"from_uid":      fromUID,
-				"client_msg_no": clientMsgNo,
-				"event_id":      generatedEventID(cfg, spec.channelIndex, spec.streamIndex, lane, delta),
-				"event_key":     generatedEventKey(lane),
-				"event_type":    "stream.delta",
-				"payload": map[string]any{
-					"kind":  "text",
-					"delta": generatedPayload(cfg.PayloadBytes),
-				},
+			if err := r.postJSON(ctx, api, "/message/events:append", map[string]any{
+				"channel_id":          channelID,
+				"channel_type":        groupChannelType,
+				"from_uid":            fromUID,
+				"message_id":          sendResult.MessageID,
+				"client_msg_no":       clientMsgNo,
+				"run_id":              runID,
+				"authorization_fence": authorizationFence,
+				"authority_sequence":  authoritySequence,
+				"event_id":            eventID,
+				"event_key":           eventKey,
+				"event_type":          "delta",
+				"occurred_at":         occurredAt.UnixMilli(),
+				"payload":             generatedAgentRunDeltaPayload(eventID, runID, channelID, clientMsgNo, fromUID, sendResult.MessageSeq, eventKey, authoritySequence, authorizationFence, occurredAt, textDelta),
 			}, nil); err != nil {
 				return fmt.Errorf("append delta %s lane %d delta %d: %w", clientMsgNo, lane, delta, err)
 			}
@@ -326,14 +341,23 @@ func (r *Runner) runStream(ctx context.Context, cfg Config, spec streamSpec, rec
 	}
 
 	start := time.Now()
-	if err := r.postJSON(ctx, api, "/message/event", map[string]any{
-		"channel_id":    channelID,
-		"channel_type":  groupChannelType,
-		"from_uid":      fromUID,
-		"client_msg_no": clientMsgNo,
-		"event_id":      fmt.Sprintf("%s-finish", clientMsgNo),
-		"event_type":    "stream.finish",
-		"payload":       map[string]any{"end_reason": 3},
+	authoritySequence++
+	finishEventID := generatedFinishEventID(spec.channelIndex, spec.streamIndex)
+	finishOccurredAt := time.Now().UTC()
+	if err := r.postJSON(ctx, api, "/message/events:append", map[string]any{
+		"channel_id":          channelID,
+		"channel_type":        groupChannelType,
+		"from_uid":            fromUID,
+		"message_id":          sendResult.MessageID,
+		"client_msg_no":       clientMsgNo,
+		"run_id":              runID,
+		"authorization_fence": authorizationFence,
+		"authority_sequence":  authoritySequence,
+		"event_id":            finishEventID,
+		"event_key":           "main",
+		"event_type":          "finish",
+		"occurred_at":         finishOccurredAt.UnixMilli(),
+		"payload":             generatedAgentRunFinishPayload(finishEventID, runID, channelID, clientMsgNo, fromUID, sendResult.MessageSeq, authoritySequence, authorizationFence, finishOccurredAt),
 	}, nil); err != nil {
 		return fmt.Errorf("finish stream %s: %w", clientMsgNo, err)
 	}
@@ -392,6 +416,9 @@ func (r *Runner) postJSON(ctx context.Context, api string, path string, body any
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if path == "/message/events:append" {
+		req.Header.Set("Authorization", "Bearer "+r.cfg.ServiceToken)
+	}
 	resp, err := r.client.Do(req)
 	if err != nil {
 		return err
@@ -448,7 +475,47 @@ func generatedWarmRuntimeClientMsgNo(cfg Config, channelIndex int) string {
 }
 
 func generatedEventID(cfg Config, channelIndex int, streamIndex int, lane int, delta int) string {
-	return fmt.Sprintf("wkbench-message-event-%s-c%06d-s%06d-l%03d-d%03d", sanitizeRunID(cfg.RunID), channelIndex, streamIndex, lane, delta)
+	return fmt.Sprintf("019d%04x-%04x-7000-8000-%012x", channelIndex&0xffff, streamIndex&0xffff, uint64(lane&0xff)<<32|uint64(delta&0xffffffff))
+}
+
+func generatedRunID(channelIndex int, streamIndex int) string {
+	return fmt.Sprintf("019d%04x-%04x-7000-8001-%012x", channelIndex&0xffff, streamIndex&0xffff, uint64(streamIndex+1))
+}
+
+func generatedFinishEventID(channelIndex int, streamIndex int) string {
+	return fmt.Sprintf("019d%04x-%04x-7000-8002-%012x", channelIndex&0xffff, streamIndex&0xffff, uint64(streamIndex+1))
+}
+
+func generatedAgentRunDeltaPayload(eventID, runID, conversationID, clientMsgNo, fromUID string, messageSequence uint64, eventKey string, authoritySequence, authorizationFence uint64, occurredAt time.Time, textDelta string) map[string]any {
+	return generatedAgentRunPayload(eventID, runID, conversationID, clientMsgNo, fromUID, messageSequence, eventKey, "delta", authoritySequence, authorizationFence, occurredAt, map[string]any{"text_delta": textDelta})
+}
+
+func generatedAgentRunFinishPayload(eventID, runID, conversationID, clientMsgNo, fromUID string, messageSequence, authoritySequence, authorizationFence uint64, occurredAt time.Time) map[string]any {
+	return generatedAgentRunPayload(eventID, runID, conversationID, clientMsgNo, fromUID, messageSequence, "main", "finish", authoritySequence, authorizationFence, occurredAt, map[string]any{"snapshot": map[string]any{
+		"state": "succeeded", "authority_sequence": authoritySequence, "text": "", "complete": true,
+	}})
+}
+
+func generatedAgentRunPayload(eventID, runID, conversationID, clientMsgNo, fromUID string, messageSequence uint64, eventKey, eventType string, authoritySequence, authorizationFence uint64, occurredAt time.Time, variant map[string]any) map[string]any {
+	payload := map[string]any{
+		"event_id": eventID, "run_id": runID,
+		"base_message": map[string]any{
+			"conversation_id": generatedContractUUID(conversationID, 1), "message_id": generatedContractUUID(clientMsgNo, 2),
+			"client_msg_id": clientMsgNo, "committed_message_ref": "agent-run." + runID,
+			"message_sequence": messageSequence, "source_principal_id": generatedContractUUID(fromUID, 3),
+		},
+		"event_key": eventKey, "event_type": eventType, "authority_sequence": authoritySequence,
+		"authorization_fence": authorizationFence, "occurred_at": occurredAt.Format(time.RFC3339Nano),
+	}
+	for key, value := range variant {
+		payload[key] = value
+	}
+	return payload
+}
+
+func generatedContractUUID(value string, domain byte) string {
+	_ = value
+	return fmt.Sprintf("00000000-0000-7000-8000-%012x", domain)
 }
 
 func generatedEventKey(lane int) string {
@@ -587,8 +654,8 @@ func evaluateGates(result Result) []GateResult {
 	metrics := result.Metrics
 	return []GateResult{
 		newGate("request_errors_zero", 0, float64(result.Requests.Errors), "public API request errors must stay at zero"),
-		newGate("delta_cache_count_matches", float64(shape.DeltaEvents), metrics.MessageEventAppendCountByPath["cache"], "stream.delta requests must stay cache-only"),
-		newBoundedGate("finish_propose_count_bounded", 1, float64(shape.ExpectedFinishProposals), metrics.MessageEventProposeCountByPath["finish_batch"], "stream.finish proposals may coalesce but must stay non-zero and at or below finish count"),
+		newGate("delta_cache_count_matches", float64(shape.DeltaEvents), metrics.MessageEventAppendCountByPath["cache"], "delta requests must stay cache-only"),
+		newBoundedGate("finish_propose_count_bounded", 1, float64(shape.ExpectedFinishProposals), metrics.MessageEventProposeCountByPath["finish_batch"], "finish proposals may coalesce but must stay non-zero and at or below finish count"),
 		newGate("cache_miss_zero", 0, metrics.MessageEventCacheMissCount, "stream cache misses must stay at zero"),
 		newGate("backpressured_zero", 0, metrics.MessageEventBackpressuredCount, "message event backpressure must stay at zero"),
 	}

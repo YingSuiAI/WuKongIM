@@ -68,14 +68,8 @@ func buildOfflineBody(message OfflineMessage, compressThreshold int) ([]byte, er
 	return json.Marshal(resp)
 }
 
-func buildOnlineStatusBody(statuses []OnlineStatus) ([]byte, error) {
-	values := make([]string, 0, len(statuses))
-	for _, status := range statuses {
-		if status.Value != "" {
-			values = append(values, status.Value)
-		}
-	}
-	return json.Marshal(values)
+func buildPresenceLeaseBody(statuses []PresenceLease) ([]byte, error) {
+	return json.Marshal(statuses)
 }
 
 func messageRespFromMessage(msg Message) messageResp {

@@ -12,13 +12,10 @@ type messageRow struct {
 	MessageID         uint64
 	FramerFlags       uint8
 	Setting           uint8
-	StreamFlag        uint8
 	MsgKey            string
 	Expire            uint64
 	ClientSeq         uint64
 	ClientMsgNo       string
-	StreamNo          string
-	StreamID          uint64
 	Timestamp         int64
 	ServerTimestampMS int64
 	ChannelID         string

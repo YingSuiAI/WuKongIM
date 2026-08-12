@@ -26,14 +26,21 @@ func activateCommandFromContext(ctx *coregateway.Context, now time.Time) (presen
 	}
 
 	return presence.ActivateCommand{
-		UID:           uid,
-		DeviceID:      deviceIDFromValue(ctx.Session.Value(coregateway.SessionValueDeviceID)),
-		DeviceFlag:    deviceFlagFromValue(ctx.Session.Value(coregateway.SessionValueDeviceFlag)),
-		DeviceLevel:   deviceLevelFromValue(ctx.Session.Value(coregateway.SessionValueDeviceLevel)),
-		Listener:      listener,
-		ConnectedUnix: now.Unix(),
-		SessionID:     ctx.Session.ID(),
-		Session:       gatewayPresenceSession{ctx: ctx},
+		UID:                    uid,
+		DeviceID:               deviceIDFromValue(ctx.Session.Value(coregateway.SessionValueDeviceID)),
+		AppInstanceID:          stringFromValue(ctx.Session.Value(coregateway.SessionValueAppInstanceID)),
+		DeviceSessionID:        stringFromValue(ctx.Session.Value(coregateway.SessionValueDeviceSessionID)),
+		IMSessionID:            stringFromValue(ctx.Session.Value(coregateway.SessionValueIMSessionID)),
+		InstallationGeneration: uint64FromValue(ctx.Session.Value(coregateway.SessionValueInstallationGeneration)),
+		SessionGeneration:      uint64FromValue(ctx.Session.Value(coregateway.SessionValueSessionGeneration)),
+		AuthorizationFence:     uint64FromValue(ctx.Session.Value(coregateway.SessionValueAuthorizationFence)),
+		ProtocolVersion:        deviceFlagFromValue(ctx.Session.Value(coregateway.SessionValueProtocolVersion)),
+		DeviceFlag:             deviceFlagFromValue(ctx.Session.Value(coregateway.SessionValueDeviceFlag)),
+		DeviceLevel:            deviceLevelFromValue(ctx.Session.Value(coregateway.SessionValueDeviceLevel)),
+		Listener:               listener,
+		ConnectedUnix:          now.Unix(),
+		SessionID:              ctx.Session.ID(),
+		Session:                gatewayPresenceSession{ctx: ctx},
 	}, nil
 }
 
@@ -43,8 +50,24 @@ func deactivateCommandFromContext(ctx *coregateway.Context) presence.DeactivateC
 	}
 	uid, _ := ctx.Session.Value(coregateway.SessionValueUID).(string)
 	return presence.DeactivateCommand{
-		UID:       uid,
-		SessionID: ctx.Session.ID(),
+		UID:              uid,
+		SessionID:        ctx.Session.ID(),
+		DisconnectedUnix: time.Now().Unix(),
+	}
+}
+
+func stringFromValue(value any) string { valueString, _ := value.(string); return valueString }
+
+func uint64FromValue(value any) uint64 {
+	switch v := value.(type) {
+	case uint64:
+		return v
+	case int64:
+		return uint64(v)
+	case int:
+		return uint64(v)
+	default:
+		return 0
 	}
 }
 

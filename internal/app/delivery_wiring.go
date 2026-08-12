@@ -17,9 +17,12 @@ func (a *App) wireDelivery() {
 		localNodeID = a.cfg.NodeID
 	}
 	var remote runtimedelivery.RemoteOwnerPusher
+	var remoteEvent runtimedelivery.RemoteEventPusher
 	if presenceNode, ok := a.cluster.(clusterinfra.PresenceNode); ok {
 		localNodeID = presenceNode.NodeID()
-		remote = accessnode.NewClient(presenceNode)
+		client := accessnode.NewClient(presenceNode)
+		remote = client
+		remoteEvent = client
 	}
 	offlineBatch := composeOfflineRecipientObservers(a.pluginReceive, a.webhookOffline)
 	var offlineObserver runtimedelivery.OfflineRecipientsObserver
@@ -31,6 +34,7 @@ func (a *App) wireDelivery() {
 		LocalNodeID:               localNodeID,
 		Presence:                  deliveryinfra.NewPresenceResolver(a.presence),
 		RemoteOwnerPusher:         remote,
+		RemoteEventPusher:         remoteEvent,
 		SessionWriter:             deliveryinfra.NewLocalSessionWriter(deliveryinfra.LocalSessionWriterOptions{Online: a.online, Logger: a.logger.Named("delivery.owner")}),
 		OfflineRecipientsObserver: offlineObserver,
 		QueueSize:                 a.cfg.Delivery.EventQueueSize,
@@ -54,9 +58,11 @@ func (a *App) wireDelivery() {
 	a.deliveryWorker = runtime
 	if presenceNode, ok := a.cluster.(clusterinfra.PresenceNode); ok {
 		adapter := accessnode.New(accessnode.Options{
-			Delivery: accessnode.AdaptOnlineDeliveryOwnerPush(runtime),
-			Logger:   a.logger.Named("node"),
+			Delivery:      accessnode.AdaptOnlineDeliveryOwnerPush(runtime),
+			DeliveryEvent: runtime,
+			Logger:        a.logger.Named("node"),
 		})
 		presenceNode.RegisterRPC(accessnode.DeliveryPushRPCServiceID, nodeRPCHandlerFunc(adapter.HandleDeliveryPushRPC))
+		presenceNode.RegisterRPC(accessnode.DeliveryEventPushRPCServiceID, nodeRPCHandlerFunc(adapter.HandleDeliveryEventPushRPC))
 	}
 }

@@ -328,8 +328,6 @@ const (
 	TimestampByteSize        = 4
 	BigTimestampByteSize     = 8
 	ActionByteSize           = 1
-	StreamIdByteSize         = 8
-	StreamFlagByteSize       = 1
 	ExpireByteSize           = 4
 	NodeIdByteSize           = 8
 	ChunkIDByteSize          = 8

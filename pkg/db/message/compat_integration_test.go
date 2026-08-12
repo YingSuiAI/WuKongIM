@@ -172,13 +172,10 @@ func TestCompatEngineAppendReadAndIdempotency(t *testing.T) {
 		MessageID:   42,
 		Framer:      frame.Framer{RedDot: true},
 		Setting:     frame.Setting(3),
-		StreamFlag:  frame.StreamFlag(2),
 		MsgKey:      "msg-key",
 		Expire:      60,
 		ClientSeq:   7,
 		ClientMsgNo: "client-1",
-		StreamNo:    "stream-1",
-		StreamID:    9,
 		Timestamp:   100,
 		ChannelID:   id.ID,
 		ChannelType: id.Type,
@@ -445,15 +442,13 @@ func encodeCompatTestMessage(t *testing.T, msg channel.Message) []byte {
 	payload := make([]byte, 0, channel.DurableMessageHeaderSize+64)
 	payload = append(payload, channel.DurableMessageCodecVersion)
 	payload = binary.BigEndian.AppendUint64(payload, msg.MessageID)
-	payload = append(payload, 0, byte(msg.Setting), byte(msg.StreamFlag), msg.ChannelType)
+	payload = append(payload, 0, byte(msg.Setting), msg.ChannelType)
 	payload = binary.BigEndian.AppendUint32(payload, msg.Expire)
 	payload = binary.BigEndian.AppendUint64(payload, msg.ClientSeq)
-	payload = binary.BigEndian.AppendUint64(payload, msg.StreamID)
 	payload = binary.BigEndian.AppendUint32(payload, uint32(msg.Timestamp))
 	payload = binary.BigEndian.AppendUint64(payload, compatTestFNV64a(msg.Payload))
 	payload = appendCompatTestString(payload, msg.MsgKey)
 	payload = appendCompatTestString(payload, msg.ClientMsgNo)
-	payload = appendCompatTestString(payload, msg.StreamNo)
 	payload = appendCompatTestString(payload, msg.ChannelID)
 	payload = appendCompatTestString(payload, msg.Topic)
 	payload = appendCompatTestString(payload, msg.FromUID)

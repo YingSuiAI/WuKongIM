@@ -9,17 +9,22 @@ import (
 )
 
 const (
-	tagMessageEventChannelID   uint8 = 1
-	tagMessageEventChannelType uint8 = 2
-	tagMessageEventClientMsgNo uint8 = 3
-	tagMessageEventEventID     uint8 = 4
-	tagMessageEventEventKey    uint8 = 5
-	tagMessageEventEventType   uint8 = 6
-	tagMessageEventVisibility  uint8 = 7
-	tagMessageEventOccurredAt  uint8 = 8
-	tagMessageEventPayload     uint8 = 9
-	tagMessageEventUpdatedAt   uint8 = 10
-	tagMessageEventBatchEntry  uint8 = 11
+	tagMessageEventChannelID          uint8 = 1
+	tagMessageEventChannelType        uint8 = 2
+	tagMessageEventClientMsgNo        uint8 = 3
+	tagMessageEventEventID            uint8 = 4
+	tagMessageEventEventKey           uint8 = 5
+	tagMessageEventEventType          uint8 = 6
+	tagMessageEventVisibility         uint8 = 7
+	tagMessageEventOccurredAt         uint8 = 8
+	tagMessageEventPayload            uint8 = 9
+	tagMessageEventUpdatedAt          uint8 = 10
+	tagMessageEventBatchEntry         uint8 = 11
+	tagMessageEventRunID              uint8 = 12
+	tagMessageEventAuthorizationFence uint8 = 13
+	tagMessageEventAuthoritySequence  uint8 = 14
+	tagMessageEventProjectionOnly     uint8 = 15
+	tagMessageEventMsgEventSeq        uint8 = 16
 
 	tagMessageEventResultChannelID   uint8 = 1
 	tagMessageEventResultChannelType uint8 = 2
@@ -30,6 +35,8 @@ const (
 	tagMessageEventResultStatus      uint8 = 7
 	tagMessageEventResultState       uint8 = 8
 	tagMessageEventResultBatchEntry  uint8 = 9
+	tagMessageEventResultRunID       uint8 = 10
+	tagMessageEventResultApplied     uint8 = 11
 
 	tagMessageEventStateChannelID       uint8 = 1
 	tagMessageEventStateChannelType     uint8 = 2
@@ -45,6 +52,8 @@ const (
 	tagMessageEventStateEndReason       uint8 = 12
 	tagMessageEventStateError           uint8 = 13
 	tagMessageEventStateUpdatedAt       uint8 = 14
+	tagMessageEventStateRunID           uint8 = 15
+	tagMessageEventStateAuthoritySeq    uint8 = 16
 )
 
 var (
@@ -109,6 +118,15 @@ func appendMessageEventFields(buf []byte, event metadb.MessageEventAppend) []byt
 	buf = appendStringTLVField(buf, tagMessageEventChannelID, event.ChannelID)
 	buf = appendInt64TLVField(buf, tagMessageEventChannelType, event.ChannelType)
 	buf = appendStringTLVField(buf, tagMessageEventClientMsgNo, event.ClientMsgNo)
+	buf = appendStringTLVField(buf, tagMessageEventRunID, event.RunID)
+	buf = appendStringTLVField(buf, tagMessageEventAuthorizationFence, event.AuthorizationFence)
+	buf = appendUint64TLVField(buf, tagMessageEventAuthoritySequence, event.AuthoritySequence)
+	if event.MsgEventSeq > 0 {
+		buf = appendUint64TLVField(buf, tagMessageEventMsgEventSeq, event.MsgEventSeq)
+	}
+	if event.ProjectionOnly {
+		buf = appendBytesTLVField(buf, tagMessageEventProjectionOnly, []byte{1})
+	}
 	buf = appendStringTLVField(buf, tagMessageEventEventID, event.EventID)
 	buf = appendStringTLVField(buf, tagMessageEventEventKey, event.EventKey)
 	buf = appendStringTLVField(buf, tagMessageEventEventType, event.EventType)
@@ -121,6 +139,9 @@ func appendMessageEventFields(buf []byte, event metadb.MessageEventAppend) []byt
 
 // EncodeAppendMessageEventCommandChecked validates and encodes one event append command.
 func EncodeAppendMessageEventCommandChecked(event metadb.MessageEventAppend) ([]byte, error) {
+	if event.ProjectionOnly {
+		return nil, metadb.ErrInvalidArgument
+	}
 	if err := validateMessageEventAppend(event); err != nil {
 		return nil, err
 	}
@@ -161,6 +182,12 @@ func appendMessageEventResultFields(buf []byte, result metadb.MessageEventAppend
 	buf = appendStringTLVField(buf, tagMessageEventResultChannelID, result.ChannelID)
 	buf = appendInt64TLVField(buf, tagMessageEventResultChannelType, result.ChannelType)
 	buf = appendStringTLVField(buf, tagMessageEventResultClientMsgNo, result.ClientMsgNo)
+	buf = appendStringTLVField(buf, tagMessageEventResultRunID, result.RunID)
+	if result.Applied {
+		buf = appendBytesTLVField(buf, tagMessageEventResultApplied, []byte{1})
+	} else {
+		buf = appendBytesTLVField(buf, tagMessageEventResultApplied, []byte{0})
+	}
 	buf = appendStringTLVField(buf, tagMessageEventResultEventID, result.EventID)
 	buf = appendStringTLVField(buf, tagMessageEventResultEventKey, result.EventKey)
 	buf = appendUint64TLVField(buf, tagMessageEventResultSeq, result.MsgEventSeq)
@@ -261,6 +288,13 @@ func decodeAppendMessageEventResultFields(data []byte) (metadb.MessageEventAppen
 		case tagMessageEventResultClientMsgNo:
 			result.ClientMsgNo = string(value)
 			haveClientMsgNo = true
+		case tagMessageEventResultRunID:
+			result.RunID = string(value)
+		case tagMessageEventResultApplied:
+			if len(value) != 1 || value[0] > 1 {
+				return metadb.MessageEventAppendResult{}, fmt.Errorf("%w: invalid message event applied flag", metadb.ErrCorruptValue)
+			}
+			result.Applied = value[0] == 1
 		case tagMessageEventResultEventID:
 			result.EventID = string(value)
 			haveEventID = true
@@ -298,6 +332,9 @@ func decodeAppendMessageEvent(data []byte) (command, error) {
 	event, err := decodeMessageEventAppendFields(data)
 	if err != nil {
 		return nil, err
+	}
+	if event.ProjectionOnly {
+		return nil, fmt.Errorf("%w: projection-only event requires batch command", metadb.ErrInvalidArgument)
 	}
 	return &appendMessageEventCmd{event: event}, nil
 }
@@ -355,6 +392,27 @@ func decodeMessageEventAppendFields(data []byte) (metadb.MessageEventAppend, err
 		case tagMessageEventClientMsgNo:
 			event.ClientMsgNo = string(value)
 			haveClientMsgNo = true
+		case tagMessageEventRunID:
+			event.RunID = string(value)
+		case tagMessageEventAuthorizationFence:
+			event.AuthorizationFence = string(value)
+		case tagMessageEventAuthoritySequence:
+			v, err := decodeUint64TLV(value, "message event AuthoritySequence")
+			if err != nil {
+				return metadb.MessageEventAppend{}, err
+			}
+			event.AuthoritySequence = v
+		case tagMessageEventMsgEventSeq:
+			v, err := decodeUint64TLV(value, "message event MsgEventSeq")
+			if err != nil {
+				return metadb.MessageEventAppend{}, err
+			}
+			event.MsgEventSeq = v
+		case tagMessageEventProjectionOnly:
+			if len(value) != 1 || value[0] != 1 {
+				return metadb.MessageEventAppend{}, fmt.Errorf("invalid message event ProjectionOnly")
+			}
+			event.ProjectionOnly = true
 		case tagMessageEventEventID:
 			event.EventID = string(value)
 			haveEventID = true
@@ -390,17 +448,14 @@ func decodeMessageEventAppendFields(data []byte) (metadb.MessageEventAppend, err
 }
 
 func validateMessageEventAppend(event metadb.MessageEventAppend) error {
-	if event.ChannelID == "" || event.ChannelType <= 0 || event.ClientMsgNo == "" || event.EventID == "" || event.EventType == "" {
+	if event.ChannelID == "" || event.ChannelType <= 0 || event.ClientMsgNo == "" || event.EventID == "" || event.EventType == "" || event.AuthoritySequence == 0 {
 		return metadb.ErrInvalidArgument
 	}
 	switch event.EventType {
-	case metadb.EventTypeStreamOpen,
-		metadb.EventTypeStreamDelta,
-		metadb.EventTypeStreamClose,
-		metadb.EventTypeStreamError,
-		metadb.EventTypeStreamCancel,
-		metadb.EventTypeStreamSnapshot,
-		metadb.EventTypeStreamFinish:
+	case metadb.EventTypeOpen,
+		metadb.EventTypeDelta,
+		metadb.EventTypeSnapshot,
+		metadb.EventTypeFinish:
 		return nil
 	default:
 		return metadb.ErrInvalidArgument
@@ -428,9 +483,11 @@ func encodeMessageEventStateResult(state metadb.MessageEventState) []byte {
 	buf = appendStringTLVField(buf, tagMessageEventStateChannelID, state.ChannelID)
 	buf = appendInt64TLVField(buf, tagMessageEventStateChannelType, state.ChannelType)
 	buf = appendStringTLVField(buf, tagMessageEventStateClientMsgNo, state.ClientMsgNo)
+	buf = appendStringTLVField(buf, tagMessageEventStateRunID, state.RunID)
 	buf = appendStringTLVField(buf, tagMessageEventStateEventKey, state.EventKey)
 	buf = appendStringTLVField(buf, tagMessageEventStateStatus, state.Status)
 	buf = appendUint64TLVField(buf, tagMessageEventStateLastSeq, state.LastMsgEventSeq)
+	buf = appendUint64TLVField(buf, tagMessageEventStateAuthoritySeq, state.LastAuthoritySequence)
 	buf = appendStringTLVField(buf, tagMessageEventStateLastEventID, state.LastEventID)
 	buf = appendStringTLVField(buf, tagMessageEventStateLastEventType, state.LastEventType)
 	buf = appendStringTLVField(buf, tagMessageEventStateLastVisibility, state.LastVisibility)
@@ -466,6 +523,8 @@ func decodeMessageEventStateResult(data []byte) (metadb.MessageEventState, error
 		case tagMessageEventStateClientMsgNo:
 			state.ClientMsgNo = string(value)
 			haveClientMsgNo = true
+		case tagMessageEventStateRunID:
+			state.RunID = string(value)
 		case tagMessageEventStateEventKey:
 			state.EventKey = string(value)
 			haveEventKey = true
@@ -479,6 +538,12 @@ func decodeMessageEventStateResult(data []byte) (metadb.MessageEventState, error
 			}
 			state.LastMsgEventSeq = v
 			haveSeq = true
+		case tagMessageEventStateAuthoritySeq:
+			v, err := decodeUint64TLV(value, "message event state LastAuthoritySequence")
+			if err != nil {
+				return metadb.MessageEventState{}, err
+			}
+			state.LastAuthoritySequence = v
 		case tagMessageEventStateLastEventID:
 			state.LastEventID = string(value)
 		case tagMessageEventStateLastEventType:

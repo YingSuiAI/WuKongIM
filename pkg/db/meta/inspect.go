@@ -545,43 +545,49 @@ func inspectChannelLatestRow(latest ChannelLatest) InspectRow {
 
 func inspectMessageEventStateRow(state MessageEventState) InspectRow {
 	return InspectRow{
-		"channel_id":         state.ChannelID,
-		"channel_type":       state.ChannelType,
-		"client_msg_no":      state.ClientMsgNo,
-		"event_key":          state.EventKey,
-		"status":             state.Status,
-		"last_msg_event_seq": state.LastMsgEventSeq,
-		"last_event_id":      state.LastEventID,
-		"last_event_type":    state.LastEventType,
-		"last_visibility":    state.LastVisibility,
-		"last_occurred_at":   state.LastOccurredAt,
-		"snapshot_payload":   state.SnapshotPayload,
-		"end_reason":         state.EndReason,
-		"error":              state.Error,
-		"updated_at":         state.UpdatedAt,
+		"channel_id":              state.ChannelID,
+		"channel_type":            state.ChannelType,
+		"client_msg_no":           state.ClientMsgNo,
+		"run_id":                  state.RunID,
+		"event_key":               state.EventKey,
+		"status":                  state.Status,
+		"last_msg_event_seq":      state.LastMsgEventSeq,
+		"last_authority_sequence": state.LastAuthoritySequence,
+		"last_event_id":           state.LastEventID,
+		"last_event_type":         state.LastEventType,
+		"last_visibility":         state.LastVisibility,
+		"last_occurred_at":        state.LastOccurredAt,
+		"snapshot_payload":        state.SnapshotPayload,
+		"end_reason":              state.EndReason,
+		"error":                   state.Error,
+		"updated_at":              state.UpdatedAt,
 	}
 }
 
 func inspectMessageEventCursorRow(cursor MessageEventCursor) InspectRow {
 	return InspectRow{
-		"channel_id":         cursor.ChannelID,
-		"channel_type":       cursor.ChannelType,
-		"client_msg_no":      cursor.ClientMsgNo,
-		"last_msg_event_seq": cursor.LastMsgEventSeq,
-		"updated_at":         cursor.UpdatedAt,
+		"channel_id":              cursor.ChannelID,
+		"channel_type":            cursor.ChannelType,
+		"client_msg_no":           cursor.ClientMsgNo,
+		"run_id":                  cursor.RunID,
+		"last_msg_event_seq":      cursor.LastMsgEventSeq,
+		"last_authority_sequence": cursor.LastAuthoritySequence,
+		"terminal":                cursor.Terminal,
+		"updated_at":              cursor.UpdatedAt,
 	}
 }
 
 func inspectMessageEventAppliedRow(applied MessageEventApplied) InspectRow {
 	return InspectRow{
-		"channel_id":    applied.ChannelID,
-		"channel_type":  applied.ChannelType,
-		"client_msg_no": applied.ClientMsgNo,
-		"event_id":      applied.EventID,
-		"event_key":     applied.EventKey,
-		"msg_event_seq": applied.MsgEventSeq,
-		"status":        applied.Status,
-		"updated_at":    applied.UpdatedAt,
+		"channel_id":         applied.ChannelID,
+		"channel_type":       applied.ChannelType,
+		"client_msg_no":      applied.ClientMsgNo,
+		"event_id":           applied.EventID,
+		"event_key":          applied.EventKey,
+		"msg_event_seq":      applied.MsgEventSeq,
+		"authority_sequence": applied.AuthoritySequence,
+		"status":             applied.Status,
+		"updated_at":         applied.UpdatedAt,
 	}
 }
 

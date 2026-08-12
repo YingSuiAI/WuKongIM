@@ -47,9 +47,7 @@ const placeholder = ref("请输入对方登录名")
 const pulldowning = ref(false) // 下拉中
 const pulldownFinished = ref(false) // 下拉完成
 
-const startStreamMessage = ref(false) // 开始流消息
 const msgInputPlaceholder = ref("请输入消息")
-const streamNo = ref<string>() // 流消息序号
 
 const messages = ref<Message[]>(new Array<Message>())
 
@@ -73,22 +71,21 @@ const messageAvatarURL = (message: MessageAvatarSource): string => {
 
 title.value = `${uid || ""}(未连接)`
 
-// renderStreamText 从 event_meta 或 stream_data 中提取流文本到 message.streamText
-const renderStreamText = (m: any) => {
+// Materialize the latest typed EVENT compact snapshot into message content.
+const renderEventSnapshot = (m: any) => {
     // 优先使用 event_meta 中的 snapshot
     const eventMeta = m.eventMeta
     if (eventMeta && eventMeta.events && eventMeta.events.length > 0) {
         for (const ek of eventMeta.events) {
             if (ek.event_key === "main" || eventMeta.events.length === 1) {
                 const snapshot = ek.snapshot
-                if (snapshot && snapshot.kind === "text" && snapshot.text) {
+                if (snapshot && typeof snapshot.text === "string" && snapshot.text) {
                     m.streamText = snapshot.text
                     return
                 }
             }
         }
     }
-    // fallback: stream_data 已经在 convert.ts 中处理
 }
 
 let connectStatusListener!: ConnectStatusListener
@@ -171,25 +168,25 @@ const connectIM = (addr: string) => {
         for (const message of messages.value) {
             if (message.clientMsgNo !== clientMsgNo) continue
 
-            if (event.type === "stream.delta") {
+            if (event.type === "delta") {
                 // 增量事件：从 payload 中提取文本 delta
                 const payload = pushData.payload
-                if (payload && payload.kind === "text" && payload.delta) {
-                    message.streamText = (message.streamText || "") + payload.delta
+                if (payload?.text_delta) {
+                    message.streamText = (message.streamText || "") + payload.text_delta
                     const htmlText = await marked.parse(message.streamText)
                     message.content = new MessageText(htmlText || "")
                 }
-            } else if (event.type === "stream.close" || event.type === "stream.error" || event.type === "stream.cancel") {
-                // 终态事件：可能携带最终 snapshot
+            } else if (event.type === "snapshot" || event.type === "finish") {
                 const payload = pushData.payload
-                const snapshotText = payload?.snapshot?.kind === "text" ? (payload.snapshot.text as string) : ""
+                const snapshotText = payload?.snapshot?.text as string || ""
                 if (snapshotText) {
                     message.streamText = snapshotText
                     const htmlText = await marked.parse(message.streamText)
                     message.content = new MessageText(htmlText || "")
                 }
-            } else if (event.type === "stream.finish") {
-                (message as any).completed = true
+                if (event.type === "finish") {
+                    (message as any).completed = true
+                }
             }
 
             // 刷新 UI
@@ -258,14 +255,12 @@ const pullLast = async () => {
         pullMode: PullMode.Up
     })
 
-    // 渲染流消息
+    // Hydrate typed message-event snapshots returned with history.
     for (const m of msgs) {
-        if (m.setting.streamOn) {
-            renderStreamText(m)
-            if (m.streamText && m.streamText.length > 0) {
-                const htmlText = await marked.parse(m.streamText)
-                m.content = new MessageText(htmlText)
-            }
+        renderEventSnapshot(m)
+        if (m.streamText && m.streamText.length > 0) {
+            const htmlText = await marked.parse(m.streamText)
+            m.content = new MessageText(htmlText)
         }
     }
 
@@ -293,14 +288,12 @@ const pullDown = async () => {
         pullMode: PullMode.Down
     })
 
-    // 渲染流消息
+    // Hydrate typed message-event snapshots returned with history.
     for (const m of msgs) {
-        if (m.setting.streamOn) {
-            renderStreamText(m)
-            if (m.streamText && m.streamText.length > 0) {
-                const htmlText = await marked.parse(m.streamText)
-                m.content = new MessageText(htmlText)
-            }
+        renderEventSnapshot(m)
+        if (m.streamText && m.streamText.length > 0) {
+            const htmlText = await marked.parse(m.streamText)
+            m.content = new MessageText(htmlText)
         }
     }
 
@@ -497,8 +490,6 @@ const onKeydown = (e: any) => {
                     <input :placeholder="msgInputPlaceholder" v-model="text" style="height: 40px;"
                         @keyup.enter="onEnter" @keydown.enter="onKeydown" @compositionstart="isComposing = true"
                         @compositionend="isComposing = false" />
-                    <!-- <button class="message-stream" v-on:click="onMessageStream">{{ startStreamMessage ? '停止流消息' : '开启流消息'
-                    }}</button> -->
                     <button class="message-custom" v-on:click="onCustomMessageSend">自定义消息</button>
                     <button v-on:click="onSend">发送</button>
                 </div>
@@ -759,11 +750,6 @@ const onKeydown = (e: any) => {
 .fade-enter,
 .fade-leave-to {
     opacity: 0;
-}
-
-.message-stream {
-    width: 120px !important;
-    height: 40px;
 }
 
 .message-box {

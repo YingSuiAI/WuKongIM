@@ -13,7 +13,7 @@ import (
 const (
 	webhookNotifyQueue  = "webhook_notify"
 	webhookOfflineQueue = "webhook_offline"
-	webhookOnlineQueue  = "webhook_online_status"
+	webhookOnlineQueue  = "webhook_presence_lease"
 
 	resultAccepted       = "accepted"
 	resultOK             = "ok"
@@ -79,7 +79,7 @@ type Runtime struct {
 	state   runtimeState
 	stopCh  chan struct{}
 	notify  *workqueue.BoundedBatchPool[Message]
-	online  *workqueue.BoundedBatchPool[OnlineStatus]
+	online  *workqueue.BoundedBatchPool[PresenceLease]
 	offline *workqueue.ShardedMailbox[OfflineMessage]
 }
 
@@ -153,13 +153,13 @@ func (r *Runtime) Start(ctx context.Context) error {
 		return err
 	}
 
-	online, err := workqueue.NewBoundedBatchPool[OnlineStatus](workqueue.BoundedBatchPoolConfig[OnlineStatus]{
+	online, err := workqueue.NewBoundedBatchPool[PresenceLease](workqueue.BoundedBatchPoolConfig[PresenceLease]{
 		Name:       webhookOnlineQueue,
 		Goroutines: r.opts.Goroutines,
 		Task:       goruntimeregistry.TaskWebhookOnline,
 		Workers:    r.opts.Workers,
 		QueueSize:  r.opts.QueueSize,
-		Policy: func(OnlineStatus) workqueue.BatchOptions {
+		Policy: func(PresenceLease) workqueue.BatchOptions {
 			return workqueue.BatchOptions{MaxItems: r.opts.OnlineBatchMaxItems, MaxWait: r.opts.OnlineBatchMaxWait}
 		},
 	}, r.handleOnlineBatch)
@@ -279,9 +279,9 @@ func (r *Runtime) Offline(ctx context.Context, msg OfflineMessage) {
 	r.observeAdmission(EventMsgOffline, webhookOfflineQueue, admissionResult(err), items, depth, r.opts.QueueSize, err)
 }
 
-// OnlineStatus admits one legacy-compatible status record.
-func (r *Runtime) OnlineStatus(ctx context.Context, status OnlineStatus) {
-	if r == nil || !r.enabled(EventUserOnlineStatus) || status.Value == "" {
+// PresenceLease admits one typed installation lease transition.
+func (r *Runtime) PresenceLease(ctx context.Context, status PresenceLease) {
+	if r == nil || !r.enabled(EventPresenceLease) || status.ConnectionID == "" {
 		return
 	}
 
@@ -289,14 +289,14 @@ func (r *Runtime) OnlineStatus(ctx context.Context, status OnlineStatus) {
 	online := r.online
 	if r.state != runtimeStateStarted || online == nil {
 		r.mu.RUnlock()
-		r.observeAdmission(EventUserOnlineStatus, webhookOnlineQueue, resultClosed, 1, 0, r.opts.QueueSize, nil)
+		r.observeAdmission(EventPresenceLease, webhookOnlineQueue, resultClosed, 1, 0, r.opts.QueueSize, nil)
 		return
 	}
 	err := online.Submit(ctx, status)
 	depth := online.QueueDepth()
 	capacity := online.QueueCapacity()
 	r.mu.RUnlock()
-	r.observeAdmission(EventUserOnlineStatus, webhookOnlineQueue, admissionResult(err), 1, depth, capacity, err)
+	r.observeAdmission(EventPresenceLease, webhookOnlineQueue, admissionResult(err), 1, depth, capacity, err)
 }
 
 func (r *Runtime) handleNotifyBatch(ctx context.Context, batch []Message) error {
@@ -309,13 +309,13 @@ func (r *Runtime) handleNotifyBatch(ctx context.Context, batch []Message) error 
 	return nil
 }
 
-func (r *Runtime) handleOnlineBatch(ctx context.Context, batch []OnlineStatus) error {
-	body, err := buildOnlineStatusBody(batch)
+func (r *Runtime) handleOnlineBatch(ctx context.Context, batch []PresenceLease) error {
+	body, err := buildPresenceLeaseBody(batch)
 	if err != nil {
-		r.observeSend(EventUserOnlineStatus, resultEncodeError, len(batch), 0, 0, err)
+		r.observeSend(EventPresenceLease, resultEncodeError, len(batch), 0, 0, err)
 		return nil
 	}
-	r.sendWithRetry(ctx, EventUserOnlineStatus, body, len(batch))
+	r.sendWithRetry(ctx, EventPresenceLease, body, len(batch))
 	return nil
 }
 
@@ -429,7 +429,7 @@ func queueForEvent(event string) string {
 		return webhookNotifyQueue
 	case EventMsgOffline:
 		return webhookOfflineQueue
-	case EventUserOnlineStatus:
+	case EventPresenceLease:
 		return webhookOnlineQueue
 	default:
 		return ""

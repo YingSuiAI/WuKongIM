@@ -56,7 +56,6 @@ func benchmarkSyncFixtures(totalMessages int, streamEvery int) (*recordingChanne
 			Payload:     []byte("base"),
 		}
 		if streamEvery > 0 && i%streamEvery == 0 {
-			msg.Setting = legacySettingStream
 			key := MessageEventMessageKey{ChannelID: "g1", ChannelType: 2, ClientMsgNo: clientMsgNo}
 			rows[key] = []MessageEventState{{
 				ChannelID:       "g1",

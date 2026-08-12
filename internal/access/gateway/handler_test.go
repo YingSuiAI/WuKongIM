@@ -21,6 +21,8 @@ func TestHandlerOnSessionActivateCallsPresenceActivate(t *testing.T) {
 	sess := newTestSession(t, nil)
 	sess.SetValue(coregateway.SessionValueUID, "u1")
 	sess.SetValue(coregateway.SessionValueDeviceID, "d1")
+	sess.SetValue(coregateway.SessionValueAppInstanceID, "app1")
+	sess.SetValue(coregateway.SessionValueSessionGeneration, uint64(9))
 	sess.SetValue(coregateway.SessionValueDeviceFlag, frame.APP)
 	sess.SetValue(coregateway.SessionValueDeviceLevel, frame.DeviceLevelMaster)
 	usecase := &recordingPresence{}
@@ -41,7 +43,7 @@ func TestHandlerOnSessionActivateCallsPresenceActivate(t *testing.T) {
 		t.Fatalf("activate command count = %d, want 1", len(usecase.activateCommands))
 	}
 	cmd := usecase.activateCommands[0]
-	if cmd.UID != "u1" || cmd.DeviceID != "d1" || cmd.DeviceFlag != uint8(frame.APP) || cmd.DeviceLevel != uint8(frame.DeviceLevelMaster) {
+	if cmd.UID != "u1" || cmd.DeviceID != "d1" || cmd.AppInstanceID != "app1" || cmd.SessionGeneration != 9 || cmd.DeviceFlag != uint8(frame.APP) || cmd.DeviceLevel != uint8(frame.DeviceLevelMaster) {
 		t.Fatalf("activate identity fields = %#v", cmd)
 	}
 	if cmd.Listener != "tcp" || cmd.SessionID != sess.ID() || cmd.ConnectedUnix == 0 {

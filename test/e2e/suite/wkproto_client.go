@@ -52,6 +52,18 @@ func (c *WKProtoClient) Connect(addr, uid, deviceID string) error {
 
 // ConnectContext opens the TCP connection and returns the successful Connack.
 func (c *WKProtoClient) ConnectContext(ctx context.Context, addr, uid, deviceID string) (*frame.ConnackPacket, error) {
+	credential, ok := wkProtoCredentialForEndpoint(ctx, addr, uid, deviceID)
+	if !ok {
+		return c.ConnectCredentialContext(ctx, addr, uid, deviceID, "", "", 0, 0)
+	}
+	if credential.err != nil {
+		return nil, credential.err
+	}
+	return c.ConnectCredentialContext(ctx, addr, uid, deviceID, credential.appInstanceID, credential.token, credential.installationGeneration, credential.sessionGeneration)
+}
+
+// ConnectCredentialContext opens a WKProto session for one installation credential.
+func (c *WKProtoClient) ConnectCredentialContext(ctx context.Context, addr, uid, deviceID, appInstanceID, token string, installationGeneration, sessionGeneration uint64) (*frame.ConnackPacket, error) {
 	if c == nil {
 		return nil, fmt.Errorf("wkproto client: nil client")
 	}
@@ -70,9 +82,13 @@ func (c *WKProtoClient) ConnectContext(ctx context.Context, addr, uid, deviceID 
 		return nil, err
 	}
 	connack, err := inner.Connect(ctx, wkclient.ConnectOptions{
-		UID:        uid,
-		DeviceID:   deviceID,
-		DeviceFlag: frame.APP,
+		UID:                    uid,
+		DeviceID:               deviceID,
+		AppInstanceID:          appInstanceID,
+		InstallationGeneration: installationGeneration,
+		SessionGeneration:      sessionGeneration,
+		DeviceFlag:             frame.APP,
+		Token:                  token,
 	})
 	if err != nil {
 		_ = inner.Close()

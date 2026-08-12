@@ -63,7 +63,7 @@ POST /bench/v1/channels
 POST /bench/v1/channels/subscribers
 POST /bench/v1/channels/subscribers/remove
 POST /message/send
-POST /message/event
+POST /message/events:append
 POST /message/sync
 POST /message/syncack
 POST /message/cmd/bind
@@ -163,12 +163,10 @@ The compatible message routes are registered regardless of bench mode.
 `/message/send` accepts the legacy base64 payload request, maps `sender_uid` to
 `from_uid`, forwards `subscribers` as an explicit request-scoped command, and
 returns the legacy `{"message_id","message_seq","reason"}` response with
-protocol reason codes. `/message/event` accepts the legacy message-scoped event
-append request, forwards raw JSON payload bytes to `internal/usecase/message`,
-and returns the legacy `{"status":200,"data":...}` envelope with the projected
-stream status and `msg_event_seq` when the event has reached durable projection.
-In-flight `stream.open`, `stream.delta`, and `stream.snapshot` cache responses
-may return `msg_event_seq=0` until a terminal stream event is proposed.
+protocol reason codes. Service-only `/message/events:append` accepts the typed
+message-scoped event append, forwards raw JSON payload bytes to the usecase, and
+returns the original `event_key`, request `authority_sequence`, and projected
+`msg_event_seq`. The removed `/message/event` route returns 404.
 `/message/sync` and
 `/message/syncack` forward durable CMD message sync and ack requests to
 `internal/usecase/cmdsync`, preserving legacy validation messages and response
@@ -179,9 +177,7 @@ or tombstone durable CMD discovery state. Sync reads
 stripping one command-channel suffix from client-facing channel IDs.
 `/channel/messagesync` keeps the legacy response shape, converts canonical
 person-channel IDs back to the peer UID for the logged-in user, and maps message
-event summaries to the legacy `event_meta`, `event_sync_hint`, and stream fields
-when the usecase provides them. Fine-grained `/message/eventsync` is intentionally
-not registered in this phase. If the composition root does not provide the
+event summaries to `event_meta` when requested. If the composition root does not provide the
 corresponding message or CMD sync usecase, these routes fail closed using their
 legacy envelopes. `/channel/messagesyncbatch` first validates every requested
 ordinary membership, then lets the cluster facade group the aligned committed

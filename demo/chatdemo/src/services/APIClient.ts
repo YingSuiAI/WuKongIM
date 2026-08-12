@@ -233,13 +233,6 @@ export default class APIClient {
             "subscribers": [] // 订阅者 如果此字段有值，表示消息只发给指定的订阅者,没有值则发给频道内所有订阅者
           })
     }
-
-    messageStreamStart = (param:any) => {
-       return APIClient.shared.post('/streammessage/start',param)
-    }
-    messageStreamEnd = (param:any) => {
-        return APIClient.shared.post('/streammessage/end',param)
-     }
 }
 
 export class RequestConfig {

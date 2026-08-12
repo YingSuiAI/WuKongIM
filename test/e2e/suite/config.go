@@ -15,6 +15,8 @@ import (
 
 const staticThreeNodeClusterID = "wukongim-e2e-three"
 
+const defaultE2EServiceToken = "wukongim-e2e-service"
+
 // NodeSpec describes the external runtime inputs for one e2e node process.
 type NodeSpec struct {
 	ID          uint64
@@ -60,6 +62,7 @@ func RenderClusterConfig(local NodeSpec, nodes []NodeSpec) string {
 		{key: "WK_CLUSTER_HASH_SLOT_COUNT", value: fmt.Sprintf("%d", hashSlotCount)},
 		{key: "WK_CLUSTER_SLOT_REPLICA_N", value: fmt.Sprintf("%d", replicaN)},
 		{key: "WK_API_LISTEN_ADDR", value: local.APIAddr},
+		{key: "WK_API_SERVICE_TOKEN", value: defaultE2EServiceToken},
 		{key: "WK_METRICS_ENABLE", value: "true"},
 		{key: "WK_GATEWAY_LISTENERS", value: renderGatewayListeners(local.GatewayAddr)},
 		{key: "WK_GATEWAY_SEND_TIMEOUT", value: "5s"},
@@ -105,6 +108,7 @@ func RenderSeedJoinNodeConfig(local NodeSpec, cfg SeedJoinNodeConfig) string {
 		{key: "WK_CLUSTER_HASH_SLOT_COUNT", value: "16"},
 		{key: "WK_CLUSTER_SLOT_REPLICA_N", value: "3"},
 		{key: "WK_API_LISTEN_ADDR", value: local.APIAddr},
+		{key: "WK_API_SERVICE_TOKEN", value: defaultE2EServiceToken},
 		{key: "WK_METRICS_ENABLE", value: "true"},
 		{key: "WK_GATEWAY_LISTENERS", value: renderGatewayListeners(local.GatewayAddr)},
 		{key: "WK_GATEWAY_SEND_TIMEOUT", value: "5s"},

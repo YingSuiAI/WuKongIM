@@ -89,14 +89,8 @@
         "properties": {
           "receipt": { "type": "boolean", "description": "消息已读回执"},
           "signal": { "type": "boolean", "description": "是否采用signal加密" },
-          "stream": { "type": "boolean", "description": "是否为流式消息" },
           "topic": { "type": "boolean", "description": "是否包含 Topic" }
         }
-      },
-      "StreamFlagEnum": {
-        "type": "integer",
-        "description": "流式标记 (0: Start, 1: Ing, 2: End)",
-        "enum": [0, 1, 2]
       },
       "ActionEnum": {
         "type": "integer",
@@ -116,12 +110,15 @@
               "version": { "type": "integer", "description": "协议版本" },
               "clientKey": { "type": "string", "description": "客户端公钥" },
               "deviceId": { "type": "string", "description": "设备ID" },
+              "appInstanceId": { "type": "string", "description": "应用安装实例ID" },
+              "installationGeneration": { "type": "integer", "format": "uint64", "description": "安装代际" },
+              "sessionGeneration": { "type": "integer", "format": "uint64", "description": "登录会话代际" },
               "deviceFlag": { "$ref": "#/components/schemas/DeviceFlagEnum" },
               "clientTimestamp": { "type": "integer", "format": "int64", "description": "客户端13位毫秒时间戳" },
               "uid": { "type": "string", "description": "用户ID" },
               "token": { "type": "string", "description": "认证Token" }
             },
-            "required": ["uid", "token"]
+            "required": ["uid", "token", "deviceId", "appInstanceId", "installationGeneration", "sessionGeneration"]
           },
           "id": { "type": "string" }
         },
@@ -162,7 +159,6 @@
               "msgKey": { "type": "string", "description": "消息验证Key" },
               "expire": { "type": "integer", "format": "uint32", "description": "消息过期时间(秒), 0表示不过期" },
               "clientMsgNo": { "type": "string", "description": "客户端消息唯一编号(UUID)" },
-              "streamNo": { "type": "string", "description": "流编号 (如果 setting.stream 为 true)" },
               "channelId": { "type": "string", "description": "频道ID" },
               "channelType": { "type": "integer", "description": "频道类型 (1:个人, 2:群组)" },
               "topic": { "type": "string", "description": "消息 Topic (如果 setting.topic 为 true)" },
@@ -208,9 +204,6 @@
               "messageId": { "type": "string", "description": "服务端消息ID" },
               "messageSeq": { "type": "integer", "format": "uint64", "description": "服务端消息序列号" },
               "clientMsgNo": { "type": "string", "description": "客户端消息唯一编号 (用于去重)" },
-              "streamNo": { "type": "string", "description": "流编号 (如果 setting.stream 为 true, 协议版本 >= 2)" },
-              "streamId": { "type": "string", "description": "流序列号 (如果 setting.stream 为 true, 协议版本 >= 2)" },
-              "streamFlag": { "$ref": "#/components/schemas/StreamFlagEnum", "description": "流标记 (如果 setting.stream 为 true, 协议版本 >= 2)" },
               "timestamp": { "type": "integer", "format": "int32", "description": "服务端消息时间戳(秒)" },
               "channelId": { "type": "string", "description": "频道ID" },
               "channelType": { "type": "integer", "description": "频道类型" },

@@ -164,13 +164,10 @@ func testMessageRow() messageRow {
 		MessageID:         99,
 		FramerFlags:       3,
 		Setting:           1,
-		StreamFlag:        2,
 		MsgKey:            "mk",
 		Expire:            30,
 		ClientSeq:         11,
 		ClientMsgNo:       "client-1",
-		StreamNo:          "stream-1",
-		StreamID:          12,
 		Timestamp:         1234,
 		ServerTimestampMS: 1700000000123,
 		ChannelID:         "ch",
@@ -218,15 +215,13 @@ func encodeLegacyCompatibilityPayload(row messageRow) []byte {
 	payload := make([]byte, 0)
 	payload = append(payload, channel.DurableMessageCodecVersion)
 	payload = binary.BigEndian.AppendUint64(payload, row.MessageID)
-	payload = append(payload, row.FramerFlags, row.Setting, row.StreamFlag, row.ChannelType)
+	payload = append(payload, row.FramerFlags, row.Setting, row.ChannelType)
 	payload = binary.BigEndian.AppendUint32(payload, uint32(row.Expire))
 	payload = binary.BigEndian.AppendUint64(payload, row.ClientSeq)
-	payload = binary.BigEndian.AppendUint64(payload, row.StreamID)
 	payload = binary.BigEndian.AppendUint32(payload, uint32(row.Timestamp))
 	payload = binary.BigEndian.AppendUint64(payload, row.PayloadHash)
 	payload = appendCompatibilityString(payload, row.MsgKey)
 	payload = appendCompatibilityString(payload, row.ClientMsgNo)
-	payload = appendCompatibilityString(payload, row.StreamNo)
 	payload = appendCompatibilityString(payload, row.ChannelID)
 	payload = appendCompatibilityString(payload, row.Topic)
 	payload = appendCompatibilityString(payload, row.FromUID)

@@ -61,6 +61,18 @@ type Route struct {
 	SessionID uint64
 	// DeviceID is the authenticated client device identifier.
 	DeviceID string
+	// AppInstanceID identifies the application data installation that owns the route.
+	AppInstanceID   string
+	DeviceSessionID string
+	IMSessionID     string
+	// InstallationGeneration fences a revoked and recreated installation binding.
+	InstallationGeneration uint64
+	// SessionGeneration fences routes created by an older login session.
+	SessionGeneration uint64
+	// AuthorizationFence is the Platform principal authority fence bound at token issue.
+	AuthorizationFence uint64
+	// ProtocolVersion is the negotiated WKProto version for realtime capabilities.
+	ProtocolVersion uint8
 	// DeviceFlag is the WuKong protocol device category.
 	DeviceFlag uint8
 	// DeviceLevel is the WuKong protocol device conflict level.

@@ -82,7 +82,7 @@ scrape_configs:
   }
   @demo_api_safe {
     method GET HEAD
-    path /route /user/* /channel/* /message/* /conversation/* /conversations/* /streammessage/* /web/*
+    path /route /user/* /channel/* /message/* /conversation/* /conversations/* /web/*
   }
   handle @demo_api_safe {
     basic_auth {
@@ -100,7 +100,7 @@ scrape_configs:
       }
     }
   }
-  @demo_api path /route /user/* /channel/* /message/* /conversation/* /conversations/* /streammessage/* /web/*
+  @demo_api path /route /user/* /channel/* /message/* /conversation/* /conversations/* /web/*
   handle @demo_api {
     basic_auth {
       {$WK_DEMO_BASIC_AUTH_USER} {$WK_DEMO_BASIC_AUTH_HASH}

@@ -401,7 +401,7 @@ func boundedMessageEventPath(path string) string {
 
 func boundedMessageEventType(eventType string) string {
 	switch eventType {
-	case "stream.open", "stream.delta", "stream.snapshot", "stream.close", "stream.error", "stream.cancel", "stream.finish":
+	case "open", "delta", "snapshot", "finish":
 		return eventType
 	default:
 		return "unknown"

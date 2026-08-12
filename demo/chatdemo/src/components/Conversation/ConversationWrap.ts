@@ -72,7 +72,7 @@ export class ConversationWrap {
         if(!this.lastMessage) {
             return ""
         }
-        // 尝试从流文本中获取摘要
+        // Prefer text materialized by typed message events.
         if (this.lastMessage.streamText) {
             const raw = this.lastMessage.streamText.trim()
             // spec/代码块内容 → 显示为卡片消息
@@ -84,9 +84,6 @@ export class ConversationWrap {
             if (text) {
                 return text.length > 30 ? text.substring(0, 30) + '...' : text
             }
-        }
-        if(this.lastMessage.setting.streamOn) {
-            return "[流消息]"
         }
         const digest = this.lastMessage.content?.conversationDigest
         if (digest) {

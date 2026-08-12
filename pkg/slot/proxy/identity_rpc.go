@@ -20,12 +20,14 @@ const (
 )
 
 type identityRPCRequest struct {
-	Op         string            `json:"op"`
-	SlotID     uint64            `json:"slot_id"`
-	UID        string            `json:"uid,omitempty"`
-	DeviceFlag int64             `json:"device_flag,omitempty"`
-	After      metadb.UserCursor `json:"after,omitempty"`
-	Limit      int               `json:"limit,omitempty"`
+	Op            string            `json:"op"`
+	SlotID        uint64            `json:"slot_id"`
+	UID           string            `json:"uid,omitempty"`
+	DeviceFlag    int64             `json:"device_flag,omitempty"`
+	DeviceID      string            `json:"device_id,omitempty"`
+	AppInstanceID string            `json:"app_instance_id,omitempty"`
+	After         metadb.UserCursor `json:"after,omitempty"`
+	Limit         int               `json:"limit,omitempty"`
 }
 
 type identityRPCResponse struct {
@@ -65,16 +67,18 @@ func (s *Store) getUserAuthoritative(ctx context.Context, slotID multiraft.SlotI
 	return *resp.User, nil
 }
 
-func (s *Store) getDeviceAuthoritative(ctx context.Context, slotID multiraft.SlotID, hashSlot uint16, uid string, deviceFlag int64) (metadb.Device, error) {
+func (s *Store) getDeviceAuthoritative(ctx context.Context, slotID multiraft.SlotID, hashSlot uint16, uid string, deviceFlag int64, deviceID, appInstanceID string) (metadb.Device, error) {
 	if s.shouldServeSlotLocally(slotID) {
-		return s.db.ForHashSlot(hashSlot).GetDevice(ctx, uid, deviceFlag)
+		return s.db.ForHashSlot(hashSlot).GetDevice(ctx, uid, deviceFlag, deviceID, appInstanceID)
 	}
 
 	resp, err := s.callIdentityRPC(ctx, slotID, identityRPCRequest{
-		Op:         identityRPCGetDevice,
-		SlotID:     uint64(slotID),
-		UID:        uid,
-		DeviceFlag: deviceFlag,
+		Op:            identityRPCGetDevice,
+		SlotID:        uint64(slotID),
+		UID:           uid,
+		DeviceFlag:    deviceFlag,
+		DeviceID:      deviceID,
+		AppInstanceID: appInstanceID,
 	})
 	if err != nil {
 		return metadb.Device{}, err
@@ -143,7 +147,7 @@ func (s *Store) handleIdentityRPC(ctx context.Context, body []byte) ([]byte, err
 		})
 	case identityRPCGetDevice:
 		hashSlot := hashSlotForKey(s.cluster, req.UID)
-		device, err := s.db.ForHashSlot(hashSlot).GetDevice(ctx, req.UID, req.DeviceFlag)
+		device, err := s.db.ForHashSlot(hashSlot).GetDevice(ctx, req.UID, req.DeviceFlag, req.DeviceID, req.AppInstanceID)
 		if errors.Is(err, metadb.ErrNotFound) {
 			return encodeIdentityRPCResponse(identityRPCResponse{Status: rpcStatusNotFound})
 		}

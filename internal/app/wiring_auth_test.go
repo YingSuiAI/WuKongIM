@@ -24,13 +24,13 @@ func TestVerifyWKProtoToken(t *testing.T) {
 	}{
 		{
 			name:      "matching stored token returns stored device level",
-			cluster:   &authMetadataCluster{device: metadb.Device{Token: storedToken, DeviceLevel: 7}},
+			cluster:   &authMetadataCluster{device: metadb.Device{Token: storedToken, DeviceLevel: 7, AppInstanceID: "app-1", DeviceSessionID: "ds-1", IMSessionID: "im-1", InstallationGeneration: 1, SessionGeneration: 1, AuthorizationFence: 1}},
 			token:     storedToken,
 			wantLevel: frame.DeviceLevel(7),
 		},
 		{
 			name:       "mismatch fails without leaking token",
-			cluster:    &authMetadataCluster{device: metadb.Device{Token: storedToken, DeviceLevel: 1}},
+			cluster:    &authMetadataCluster{device: metadb.Device{Token: storedToken, DeviceLevel: 1, AppInstanceID: "app-1", DeviceSessionID: "ds-1", IMSessionID: "im-1", InstallationGeneration: 1, SessionGeneration: 1, AuthorizationFence: 1}},
 			token:      presentedToken,
 			wantErr:    true,
 			wantNoLeak: presentedToken,
@@ -58,7 +58,7 @@ func TestVerifyWKProtoToken(t *testing.T) {
 		},
 		{
 			name:    "empty presented token fails closed",
-			cluster: &authMetadataCluster{device: metadb.Device{Token: storedToken, DeviceLevel: 1}},
+			cluster: &authMetadataCluster{device: metadb.Device{Token: storedToken, DeviceLevel: 1, AppInstanceID: "app-1", DeviceSessionID: "ds-1", IMSessionID: "im-1", InstallationGeneration: 1, SessionGeneration: 1, AuthorizationFence: 1}},
 			token:   "",
 			wantErr: true,
 		},
@@ -67,7 +67,7 @@ func TestVerifyWKProtoToken(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			app := &App{cluster: tt.cluster}
-			level, err := app.verifyWKProtoToken("uid-1", frame.WEB, tt.token)
+			level, err := app.verifyWKProtoToken("uid-1", frame.WEB, "device-1", "app-1", 1, tt.token)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatal("verifyWKProtoToken() error = nil, want failure")
@@ -80,8 +80,8 @@ func TestVerifyWKProtoToken(t *testing.T) {
 			if err != nil {
 				t.Fatalf("verifyWKProtoToken() error = %v", err)
 			}
-			if level != tt.wantLevel {
-				t.Fatalf("verifyWKProtoToken() level = %d, want %d", level, tt.wantLevel)
+			if level.DeviceLevel != tt.wantLevel {
+				t.Fatalf("verifyWKProtoToken() level = %d, want %d", level.DeviceLevel, tt.wantLevel)
 			}
 		})
 	}
@@ -104,14 +104,14 @@ func (*authMetadataCluster) GetUserMetadata(context.Context, string) (metadb.Use
 
 func (*authMetadataCluster) UpsertDeviceMetadata(context.Context, metadb.Device) error { return nil }
 
-func (c *authMetadataCluster) GetDeviceMetadata(context.Context, string, int64) (metadb.Device, error) {
+func (c *authMetadataCluster) GetDeviceMetadata(context.Context, string, int64, string, string) (metadb.Device, error) {
 	if c.readErr != nil {
 		return metadb.Device{}, c.readErr
 	}
 	return c.device, nil
 }
 
-func (c *authMetadataCluster) GetDeviceMetadataAuthoritative(context.Context, string, int64) (metadb.Device, error) {
+func (c *authMetadataCluster) GetDeviceMetadataAuthoritative(context.Context, string, int64, string, string) (metadb.Device, error) {
 	if c.readErr != nil {
 		return metadb.Device{}, c.readErr
 	}

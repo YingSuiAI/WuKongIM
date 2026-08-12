@@ -56,7 +56,7 @@ func TestWebhookConfigSnapshotUsesNormalizedStartupConfig(t *testing.T) {
 		Enabled:                   true,
 		HTTPAddr:                  "http://127.0.0.1:8080/webhook",
 		FocusEvents:               []string{runtimewebhook.EventMsgNotify},
-		SupportedEvents:           []string{runtimewebhook.EventMsgNotify, runtimewebhook.EventMsgOffline, runtimewebhook.EventUserOnlineStatus},
+		SupportedEvents:           []string{runtimewebhook.EventMsgNotify, runtimewebhook.EventMsgOffline, runtimewebhook.EventPresenceLease},
 		QueueSize:                 2048,
 		Workers:                   8,
 		MsgNotifyBatchMaxItems:    100,
@@ -86,7 +86,7 @@ func TestWebhookConfigSnapshotReportsDisabledDefaults(t *testing.T) {
 		Enabled:                   false,
 		HTTPAddr:                  "",
 		FocusEvents:               []string{},
-		SupportedEvents:           []string{runtimewebhook.EventMsgNotify, runtimewebhook.EventMsgOffline, runtimewebhook.EventUserOnlineStatus},
+		SupportedEvents:           []string{runtimewebhook.EventMsgNotify, runtimewebhook.EventMsgOffline, runtimewebhook.EventPresenceLease},
 		QueueSize:                 1024,
 		Workers:                   16,
 		MsgNotifyBatchMaxItems:    100,
@@ -101,10 +101,10 @@ func TestWebhookConfigSnapshotReportsDisabledDefaults(t *testing.T) {
 	}, snapshot)
 }
 
-func TestWirePresencePassesWebhookOnlineStatusObserver(t *testing.T) {
+func TestWirePresencePassesWebhookLeaseObserver(t *testing.T) {
 	cluster := newFakePresenceCluster(1, nil)
 	cluster.snapshot = readyFakeClusterSnapshot(1, 16)
-	observer := &recordingOnlineStatusObserverForWebhookTest{}
+	observer := &recordingLeaseObserverForWebhookTest{}
 	app := &App{
 		cluster:         cluster,
 		online:          online.NewRegistry(online.RegistryOptions{}),
@@ -122,12 +122,14 @@ func TestWirePresencePassesWebhookOnlineStatusObserver(t *testing.T) {
 	})
 
 	err := app.presence.Activate(context.Background(), presence.ActivateCommand{
-		UID:       "u1",
-		SessionID: 11,
+		UID: "u1", DeviceID: "device-1", AppInstanceID: "app-1", SessionGeneration: 3,
+		ConnectedUnix: 100, SessionID: 11,
 	})
 
 	require.NoError(t, err)
-	require.Equal(t, []presence.OnlineStatusEvent{{UID: "u1", Online: true, Value: "u1-0-1-11-1-1"}}, observer.events)
+	require.Len(t, observer.events, 1)
+	require.Equal(t, "connected", observer.events[0].Kind)
+	require.Equal(t, "app-1", observer.events[0].AppInstanceID)
 }
 
 func TestComposePersistAfterEnqueuersCallsBoth(t *testing.T) {
@@ -268,10 +270,10 @@ func TestWebhookPresenceObserverIsBestEffort(t *testing.T) {
 	runtime := &recordingWebhookRuntime{}
 	observer := webhookPresenceObserver{runtime: runtime}
 
-	err := observer.ObserveOnlineStatus(context.Background(), presence.OnlineStatusEvent{Value: "u1-1"})
+	err := observer.ObserveLease(context.Background(), presence.LeaseEvent{PrincipalUID: "u1", ConnectionID: "1:1:1", Kind: "connected"})
 
 	require.NoError(t, err)
-	require.Equal(t, []runtimewebhook.OnlineStatus{{Value: "u1-1"}}, runtime.online)
+	require.Equal(t, []runtimewebhook.PresenceLease{{PrincipalUID: "u1", ConnectionID: "1:1:1", Kind: "connected"}}, runtime.online)
 }
 
 func TestWebhookLifecycleStartsBeforeChannelAppendAndStopsAfterDelivery(t *testing.T) {
@@ -317,7 +319,7 @@ func TestWebhookLifecycleStartsBeforeChannelAppendAndStopsAfterDelivery(t *testi
 type recordingWebhookRuntime struct {
 	notify  []runtimewebhook.Message
 	offline []runtimewebhook.OfflineMessage
-	online  []runtimewebhook.OnlineStatus
+	online  []runtimewebhook.PresenceLease
 }
 
 func (r *recordingWebhookRuntime) Notify(_ context.Context, msg runtimewebhook.Message) {
@@ -328,15 +330,15 @@ func (r *recordingWebhookRuntime) Offline(_ context.Context, msg runtimewebhook.
 	r.offline = append(r.offline, msg)
 }
 
-func (r *recordingWebhookRuntime) OnlineStatus(_ context.Context, status runtimewebhook.OnlineStatus) {
+func (r *recordingWebhookRuntime) PresenceLease(_ context.Context, status runtimewebhook.PresenceLease) {
 	r.online = append(r.online, status)
 }
 
-type recordingOnlineStatusObserverForWebhookTest struct {
-	events []presence.OnlineStatusEvent
+type recordingLeaseObserverForWebhookTest struct {
+	events []presence.LeaseEvent
 }
 
-func (r *recordingOnlineStatusObserverForWebhookTest) ObserveOnlineStatus(_ context.Context, event presence.OnlineStatusEvent) error {
+func (r *recordingLeaseObserverForWebhookTest) ObserveLease(_ context.Context, event presence.LeaseEvent) error {
 	r.events = append(r.events, event)
 	return nil
 }

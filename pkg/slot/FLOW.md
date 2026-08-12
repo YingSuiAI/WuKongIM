@@ -122,15 +122,12 @@ entry 的 hash slot 都属于当前物理 Slot，并用同一个 WriteBatch 原�
 `AppendMessageEvent` 是普通 Slot FSM 命令，但它实现 `resultCommand`，因此
 `ApplyBatch` 会返回 reducer 产生的 `MessageEventAppendResult` 编码结果；调用方只有
 显式走 result proposal path 时才支付返回结果的序列化和传输成本。上层
-`pkg/cluster.Node` 会把 `stream.open`/`stream.delta`/`stream.snapshot` 先缓存在
-Slot leader 节点内，只在 terminal stream event 到达时提交 durable projection；
-`stream.finish` 会由 cluster 层先把仍未终态的缓存 lane 刷成 compact terminal
-state，并与 reserved finish marker 一起编码成一个 batch command/result
-proposal。投影只保存每条消息各 event lane 的压缩状态和消息级 cursor，不保存原始事件日志，
-`/message/eventsync` 的逐事件增量接口不在这一层实现。
+`pkg/cluster.Node` 会把 `open`/`delta`/`snapshot` 先缓存在 Slot leader 节点内；
+`finish` 会把同一 run 的缓存 lane compact snapshot 与真实 finish 一起编码为
+一个 batch command/result proposal。投影用独立 `run_id` 和原始 `event_key`
+保存 lane 状态与 run cursor，不拼接复合 key，也不保存原始事件日志。
 同一个 channel-owned hash slot 内的 `AppendMessageEventsBatch` 可以携带多个
-`client_msg_no`，用于上层 Slot leader 把同 channel 的并发 `stream.finish`
-合并成一次 durable proposal。FSM 对 batch 中每个 event 都产生
+`client_msg_no`，用于上层 Slot leader 提交原子 finish batch。FSM 对 batch 中每个 event 都产生
 `MessageEventAppendResult`，batch apply result 使用多结果编码返回；旧的单结果
 decoder 在多结果 payload 上仍返回最后一条结果，以保持已有单 stream finish 路径兼容。
 

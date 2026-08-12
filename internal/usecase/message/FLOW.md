@@ -109,8 +109,7 @@ SyncChannelMessages(query)
   -> call ChannelMessageReader.SyncMessages with a normalized ChannelID
   -> treat missing channel runtime/storage as an empty page
   -> clone payloads before returning SyncedMessage values to access adapters
-  -> when event_summary_mode is set, or include_event_meta asks for default
-     full metadata, batch-read MessageEventStore states for stream messages by
+  -> when include_event_meta is set, batch-read MessageEventStore states by
      (channel_id, channel_type, client_msg_no) and attach compact event_meta
 ```
 
@@ -121,49 +120,39 @@ Leader and returns item-aligned pages/errors; one unavailable Channel need not
 discard successful siblings. Neither single nor batch pull performs a
 subscriber lookup or changes membership state.
 
-The sync usecase returns `SyncedMessage` DTOs with the fields needed by legacy
-HTTP responses. Concrete storage adapters may return zero values for fields that
-the current Channel write path does not persist yet. Message event enrichment is
-page-batched for messages carrying the legacy stream setting bit and capped per
-message so a high-limit sync request does not issue event-state reads for
-ordinary messages or return unbounded lane state.
+The sync usecase returns `SyncedMessage` DTOs with the fields needed by the HTTP
+response. Message event enrichment is page-batched for requested anchors with a
+non-empty `client_msg_no` and capped per message so a high-limit sync request
+does not return unbounded lane state. Removed legacy stream fields no longer
+gate or duplicate event projection state.
 
 ## AppendMessageEvent Flow
 
 ```text
 AppendMessageEvent(event)
-  -> validate required channel_id, channel_type, client_msg_no, event_id, event_type
+  -> validate required channel, anchor, run, fence, sequence, event, and sender fields
   -> trim fields, lower-case event_type, default empty event_key to "main"
-  -> force stream.finish onto the reserved finish event key
   -> canonicalize person-channel and agent-channel IDs using from_uid
+  -> read the committed anchor and match channel/message/client/sender/run/fence
   -> stamp updated_at when absent
   -> call MessageEventStore.AppendMessageEvent
-  -> return the projected lane status and the assigned msg_event_seq when durable
+  -> return the original lane key and Platform authority sequence result
 ```
 
-`AppendMessageEvent` leaves stream buffering policy to the configured
-`MessageEventStore`. The cluster-backed store keeps `stream.open`,
-`stream.delta`, and `stream.snapshot` updates in a bounded Slot-leader cache and
-only proposes a durable projection when a terminal event
-(`stream.close`/`stream.error`/`stream.cancel`/`stream.finish`) arrives. Cache
-hits may return `msg_event_seq=0` because no Slot FSM cursor has advanced yet;
-terminal responses return the durable reducer-assigned message event sequence.
-When `stream.finish` completes a message-level stream, the cluster store flushes
-all still-open cached event lanes and the reserved finish marker in one Slot FSM
-batch proposal. If Slot leadership changes before finish and the new leader has
+`AppendMessageEvent` leaves buffering policy to the configured store. The
+cluster-backed store keeps `open`, `delta`, and `snapshot` updates in a bounded
+Slot-leader cache. A `finish` event atomically flushes each run lane's compact
+snapshot and advances the durable run cursor to the Platform-provided authority
+sequence. If Slot leadership changes before finish and the new leader has
 no cached lanes, the cluster store fails the finish closed instead of writing a
 completed projection that silently drops cache-only deltas; callers must replay
-the stream deltas or provide a complete finish snapshot before retrying finish.
+the deltas or provide a complete finish snapshot before retrying finish.
 Cache pressure is reported as typed backpressure rather than silently evicting
 active streams.
 
-This phase treats `(channel_id, channel_type, client_msg_no)` as the projection
-anchor and does not perform a routed base-message existence check before
-appending event state. A future anchor policy should use a cluster-routed
-message lookup rather than a node-local idempotency index so `/message/event`
-does not depend on which node accepted the request. Empty `from_uid` is also
-kept as an ordinary empty sender at this usecase boundary; any system-UID
-defaulting must be owned by the access/app configuration layer.
+The projection state key is `(channel_id, channel_type, client_msg_no, run_id,
+event_key)`. `run_id` and the raw lane `event_key` remain independent values;
+neither is concatenated or parsed with a delimiter.
 
 ## Message Event Projection Ports
 
@@ -172,9 +161,8 @@ projections. It accepts one event update, may satisfy in-flight stream updates
 from cache, returns the assigned message-level `msg_event_seq` once durable, and
 reads compact event lane states in batch for `/channel/messagesync` enrichment.
 The usecase DTOs are independent from the concrete Slot/metadb storage types;
-cluster adapters perform mapping and payload cloning. Fine-grained
-`/message/eventsync` replay is intentionally not part of this port in this
-phase.
+cluster adapters perform mapping and payload cloning. Recovery reads compact
+snapshots through message sync; raw event history is not stored.
 
 ## Import Boundary
 

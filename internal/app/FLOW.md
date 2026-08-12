@@ -293,7 +293,7 @@ New(Config)
      sends (trusted classes bypass only nonterminal permission checks),
      the optional plugin Send hook usecase when plugins are enabled, the
      cluster committed message reader when exposed for channel message sync, and
-     the cluster message event projection store when exposed for `/message/event`
+     the cluster message event projection store when exposed for service-only `/message/events:append`
      and `/channel/messagesync` event metadata enrichment
   -> when the cluster exposes CMD memberships and CMD Channel committed reads,
      create internal/usecase/cmdsync with infra/cluster CMDSyncStore

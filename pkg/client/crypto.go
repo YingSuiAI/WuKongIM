@@ -28,13 +28,16 @@ func newCryptoState() (*cryptoState, error) {
 
 func (s *cryptoState) connectPacket(opts ConnectOptions) *frame.ConnectPacket {
 	return &frame.ConnectPacket{
-		Version:         frame.LatestVersion,
-		ClientKey:       wkprotoenc.EncodePublicKey(s.public),
-		DeviceID:        opts.DeviceID,
-		DeviceFlag:      opts.DeviceFlag,
-		ClientTimestamp: time.Now().UnixMilli(),
-		UID:             opts.UID,
-		Token:           opts.Token,
+		Version:                frame.LatestVersion,
+		ClientKey:              wkprotoenc.EncodePublicKey(s.public),
+		DeviceID:               opts.DeviceID,
+		AppInstanceID:          opts.AppInstanceID,
+		InstallationGeneration: opts.InstallationGeneration,
+		SessionGeneration:      opts.SessionGeneration,
+		DeviceFlag:             opts.DeviceFlag,
+		ClientTimestamp:        time.Now().UnixMilli(),
+		UID:                    opts.UID,
+		Token:                  opts.Token,
 	}
 }
 

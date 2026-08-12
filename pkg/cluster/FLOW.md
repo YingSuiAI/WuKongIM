@@ -430,24 +430,17 @@ physical Slot, bounds concurrent Slot groups, and performs at most one
 authoritative `RPCSlotPermissionMetadataBatch` call per represented Slot while
 preserving input alignment. Policy remains outside `pkg/cluster` and
 `pkg/slot`.
-Message event appends also route by channel ID. `stream.open`,
-`stream.delta`, and `stream.snapshot` are forwarded to the current Slot leader's
+Message event appends also route by channel ID. `open`, `delta`, and `snapshot`
+are forwarded to the current Slot leader's
 bounded node-local stream cache and return cache state without advancing the
-Slot FSM cursor. Terminal stream events
-(`stream.close`/`stream.error`/`stream.cancel`/`stream.finish`) merge the cached
-snapshot into the terminal payload and submit durable Slot FSM commands through
-the result proposal path. `stream.finish` first flushes every still-open cached
-lane as a synthesized `stream.close`, then writes the reserved finish marker in
-one Slot FSM batch command/result proposal, so only completed streams advance the
-Slot FSM cursor. Concurrent `stream.finish` requests for the same channel are
-coalesced on the Slot leader for a short bounded window: the leader keeps each
-stream's cache merge local, combines the prepared terminal updates into one
-channel-owned Slot FSM batch proposal, then demultiplexes the returned per-event
-results back to each caller. The coalescer never crosses channel or hash-slot
-ownership, does not acknowledge before the durable proposal result is known, and
-does not change cache-only `stream.delta` behavior. If a Slot-leader change
+Slot FSM cursor. `finish` first projects every still-open lane of the same run,
+then writes the real finish event in one Slot FSM batch proposal. Concurrent
+different finishes for one anchor/run are serialized so one becomes the durable
+winner and the other returns a terminal conflict. The coalescer never crosses
+anchor/run ownership and does not acknowledge before the durable proposal result
+is known. If a Slot-leader change
 removes the node that owns open stream cache, that old leader clears its
-affected hash-slot cache on route-authority loss. A later `stream.finish` on the
+affected hash-slot cache on route-authority loss. A later `finish` on the
 new leader fails closed with
 `ErrMessageEventStreamCacheMiss` unless the finish payload carries a complete
 snapshot, preventing a silent durable finish that drops cache-only lanes.
@@ -461,7 +454,7 @@ pressure observations from this path. Cache-only stream updates report the
 writes report either `durable` or `finish_batch`, cache-miss finishes report
 `finish_batch/cache_miss`, and successful `finish_batch` observations carry the
 number of flushed lane updates in one proposal. Optional stage observers split
-`stream.finish` append stages (`finish_cache_open`, `finish_batch_build`,
+`finish` append stages (`finish_cache_open`, `finish_batch_build`,
 `finish_cache_remove`) and durable proposal stages (`encode`,
 `slot_propose_wait`, `slot_propose_submit`, `slot_future_wait`,
 `slot_control_wait`, `slot_raft_commit_wait`, `slot_fsm_apply`,
@@ -474,7 +467,8 @@ the hot path.
 `(channel_id, channel_type, client_msg_no)` key to the current channel hash slot
 leader and returns compact lane states for messagesync-style summaries,
 overlaying in-flight Slot-leader cache states on top of durable rows when
-present. It does not implement `/message/eventsync`.
+present. Projection state keys keep `run_id` and the raw `event_key` as separate
+components; no delimiter encoding is used.
 `GetChannelRuntimeMeta` reads authoritative channel runtime metadata from the
 channel's current hash-slot route, and `AdvanceChannelRetentionThroughSeq`
 proposes a fenced Slot FSM command that only advances the channel message

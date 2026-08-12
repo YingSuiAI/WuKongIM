@@ -9,10 +9,17 @@ import (
 )
 
 type updateTokenRequest struct {
-	UID         string `json:"uid"`
-	Token       string `json:"token"`
-	DeviceFlag  uint8  `json:"device_flag"`
-	DeviceLevel uint8  `json:"device_level"`
+	UID                    string `json:"uid"`
+	DeviceID               string `json:"device_id"`
+	AppInstanceID          string `json:"app_instance_id"`
+	DeviceSessionID        string `json:"device_session_id"`
+	IMSessionID            string `json:"im_session_id"`
+	InstallationGeneration uint64 `json:"installation_generation"`
+	SessionGeneration      uint64 `json:"session_generation"`
+	AuthorizationFence     uint64 `json:"authorization_fence"`
+	Token                  string `json:"token"`
+	DeviceFlag             uint8  `json:"device_flag"`
+	DeviceLevel            uint8  `json:"device_level"`
 }
 
 func (s *Server) handleUpdateToken(c *gin.Context) {
@@ -26,10 +33,17 @@ func (s *Server) handleUpdateToken(c *gin.Context) {
 		return
 	}
 	err := s.users.UpdateToken(c.Request.Context(), userusecase.UpdateTokenCommand{
-		UID:         req.UID,
-		Token:       req.Token,
-		DeviceFlag:  protocolmeta.DeviceFlag(req.DeviceFlag),
-		DeviceLevel: protocolmeta.DeviceLevel(req.DeviceLevel),
+		UID:                    req.UID,
+		DeviceID:               req.DeviceID,
+		AppInstanceID:          req.AppInstanceID,
+		DeviceSessionID:        req.DeviceSessionID,
+		IMSessionID:            req.IMSessionID,
+		InstallationGeneration: req.InstallationGeneration,
+		SessionGeneration:      req.SessionGeneration,
+		AuthorizationFence:     req.AuthorizationFence,
+		Token:                  req.Token,
+		DeviceFlag:             protocolmeta.DeviceFlag(req.DeviceFlag),
+		DeviceLevel:            protocolmeta.DeviceLevel(req.DeviceLevel),
 	})
 	if err != nil {
 		writeJSONError(c, err.Error())

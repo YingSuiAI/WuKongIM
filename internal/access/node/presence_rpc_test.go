@@ -593,16 +593,23 @@ func testPresenceTarget() presence.RouteTarget {
 
 func testPresenceRoute(uid string, sessionID uint64) presence.Route {
 	return presence.Route{
-		UID:           uid,
-		OwnerNodeID:   13,
-		OwnerBootID:   23,
-		OwnerSeq:      sessionID + 1000,
-		SessionID:     sessionID,
-		DeviceID:      fmt.Sprintf("device-%d", sessionID),
-		DeviceFlag:    1,
-		DeviceLevel:   2,
-		Listener:      "tcp",
-		ConnectedUnix: 1777777777 + int64(sessionID),
+		UID:                    uid,
+		OwnerNodeID:            13,
+		OwnerBootID:            23,
+		OwnerSeq:               sessionID + 1000,
+		SessionID:              sessionID,
+		DeviceID:               fmt.Sprintf("device-%d", sessionID),
+		AppInstanceID:          fmt.Sprintf("install-%d", sessionID),
+		DeviceSessionID:        fmt.Sprintf("device-session-%d", sessionID),
+		IMSessionID:            fmt.Sprintf("im-session-%d", sessionID),
+		InstallationGeneration: 3,
+		SessionGeneration:      5,
+		AuthorizationFence:     7,
+		ProtocolVersion:        6,
+		DeviceFlag:             1,
+		DeviceLevel:            2,
+		Listener:               "tcp",
+		ConnectedUnix:          1777777777 + int64(sessionID),
 	}
 }
 

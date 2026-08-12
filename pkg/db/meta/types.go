@@ -18,7 +18,18 @@ type MessageEventAppend struct {
 	// ChannelType identifies the channel namespace.
 	ChannelType int64
 	// ClientMsgNo identifies the message inside the channel.
-	ClientMsgNo string
+	ClientMsgNo        string
+	RunID              string
+	AuthorizationFence string
+	// AuthoritySequence is allocated durably by Platform for this anchor/run.
+	// WuKong validates and projects it; it never allocates this sequence.
+	AuthoritySequence uint64
+	// MsgEventSeq is the WuKong transport sequence assigned before a cached
+	// event is flushed. Zero asks durable storage to allocate the next value.
+	MsgEventSeq uint64
+	// ProjectionOnly persists one compact lane snapshot inside an atomic finish batch
+	// without advancing the run cursor or creating an idempotency record.
+	ProjectionOnly bool
 	// EventID is the idempotency key for this event lane.
 	EventID string
 	// EventKey identifies the projected event lane for this message.
@@ -37,12 +48,16 @@ type MessageEventAppend struct {
 
 // MessageEventAppendResult reports the durable state after applying an event.
 type MessageEventAppendResult struct {
+	// Applied reports whether this call created the durable/cache transition.
+	// Exact idempotent replays return the original result with Applied=false.
+	Applied bool
 	// ChannelID identifies the channel that owns the message.
 	ChannelID string
 	// ChannelType identifies the channel namespace.
 	ChannelType int64
 	// ClientMsgNo identifies the message inside the channel.
 	ClientMsgNo string
+	RunID       string
 	// EventID is the applied or idempotently observed event id.
 	EventID string
 	// EventKey identifies the projected event lane for this message.
@@ -63,12 +78,16 @@ type MessageEventState struct {
 	ChannelType int64
 	// ClientMsgNo identifies the message inside the channel.
 	ClientMsgNo string
+	// RunID identifies the Agent run that owns this lane.
+	RunID string
 	// EventKey identifies the projected event lane for this message.
 	EventKey string
 	// Status records whether the event lane is open or terminal.
 	Status string
 	// LastMsgEventSeq is the latest per-message event sequence applied to this lane.
 	LastMsgEventSeq uint64
+	// LastAuthoritySequence is the Platform ledger watermark represented by this lane.
+	LastAuthoritySequence uint64
 	// LastEventID is the latest idempotency key applied to this lane.
 	LastEventID string
 	// LastEventType is the latest event type applied to this lane.
@@ -95,8 +114,14 @@ type MessageEventCursor struct {
 	ChannelType int64
 	// ClientMsgNo identifies the message inside the channel.
 	ClientMsgNo string
-	// LastMsgEventSeq is the latest event sequence allocated for the message.
+	// RunID scopes the Platform authority sequence within the anchor.
+	RunID string
+	// LastMsgEventSeq is the latest WuKong transport sequence allocated for the run.
 	LastMsgEventSeq uint64
+	// LastAuthoritySequence is the latest Platform ledger sequence accepted for the run.
+	LastAuthoritySequence uint64
+	// Terminal rejects every non-exact event after finish for this run.
+	Terminal bool
 	// UpdatedAt records when this cursor row was last advanced.
 	UpdatedAt int64
 }
@@ -115,8 +140,18 @@ type MessageEventApplied struct {
 	EventKey string
 	// MsgEventSeq is the message-level sequence assigned to the event.
 	MsgEventSeq uint64
+	// AuthoritySequence is the Platform ledger sequence bound to this event.
+	AuthoritySequence uint64
 	// Status is the lane status immediately after the event was applied.
 	Status string
+	// RunID and the remaining event fields bind event_id to the exact normalized input.
+	RunID              string
+	AuthorizationFence string
+	ProjectionOnly     bool
+	EventType          string
+	Visibility         string
+	OccurredAt         int64
+	Payload            []byte
 	// UpdatedAt records when this idempotency row was created.
 	UpdatedAt int64
 }

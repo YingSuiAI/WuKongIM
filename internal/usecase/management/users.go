@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"hash/crc32"
+	"sort"
 	"strings"
 	"time"
 
@@ -25,8 +26,8 @@ type UserReader interface {
 	ScanUsersSlotPage(ctx context.Context, slotID uint32, after metadb.UserCursor, limit int) ([]metadb.User, metadb.UserCursor, bool, error)
 	// GetUser returns one durable user metadata row.
 	GetUser(ctx context.Context, uid string) (metadb.User, error)
-	// GetDevice returns one durable device token row.
-	GetDevice(ctx context.Context, uid string, deviceFlag int64) (metadb.Device, error)
+	// ListDevicesByUID returns every durable installation row for one user.
+	ListDevicesByUID(ctx context.Context, uid string) ([]metadb.Device, error)
 }
 
 // UserOperator exposes user mutations reused by manager actions.
@@ -101,6 +102,8 @@ type UserListItem struct {
 
 // UserDevice is the manager-facing stored-device summary DTO.
 type UserDevice struct {
+	// DeviceID is the stored installation identifier.
+	DeviceID string
 	// DeviceFlag is the stable manager-facing device flag.
 	DeviceFlag string
 	// DeviceLevel is the stable manager-facing device level.
@@ -161,6 +164,8 @@ type UserDetail struct {
 type KickUserRequest struct {
 	// UID is the user identifier to kick.
 	UID string
+	// DeviceID identifies the installation to force offline.
+	DeviceID string
 	// DeviceFlag is all, app, web, or pc.
 	DeviceFlag string
 }
@@ -178,7 +183,10 @@ type KickUserResponse struct {
 // ResetUserTokenRequest configures a manager token reset action.
 type ResetUserTokenRequest struct {
 	// UID is the user identifier.
-	UID string
+	UID               string
+	DeviceID          string
+	AppInstanceID     string
+	SessionGeneration uint64
 	// DeviceFlag is app, web, pc, or system.
 	DeviceFlag string
 	// DeviceLevel is master or slave.
@@ -342,14 +350,15 @@ func (a *App) KickUser(ctx context.Context, req KickUserRequest) (KickUserRespon
 		return KickUserResponse{}, fmt.Errorf("management: user operator not configured")
 	}
 	uid := strings.TrimSpace(req.UID)
-	if uid == "" {
+	deviceID := strings.TrimSpace(req.DeviceID)
+	if uid == "" || deviceID == "" {
 		return KickUserResponse{}, metadb.ErrInvalidArgument
 	}
 	label, quitFlag, matchFlags, err := parseKickUserDeviceFlag(req.DeviceFlag)
 	if err != nil {
 		return KickUserResponse{}, err
 	}
-	if err := a.userOperator.DeviceQuit(ctx, userusecase.DeviceQuitCommand{UID: uid, DeviceFlag: quitFlag}); err != nil {
+	if err := a.userOperator.DeviceQuit(ctx, userusecase.DeviceQuitCommand{UID: uid, DeviceID: deviceID, DeviceFlag: quitFlag}); err != nil {
 		return KickUserResponse{}, err
 	}
 	routesByUID, err := a.userRoutes(ctx, []string{uid})
@@ -358,7 +367,7 @@ func (a *App) KickUser(ctx context.Context, req KickUserRequest) (KickUserRespon
 	}
 	if a.userActions != nil {
 		for _, route := range routesByUID[uid] {
-			if !matchFlags[protocolmeta.DeviceFlag(route.DeviceFlag)] {
+			if route.DeviceID != deviceID || !matchFlags[protocolmeta.DeviceFlag(route.DeviceFlag)] {
 				continue
 			}
 			if err := a.userActions.ApplyRouteAction(ctx, presence.RouteAction{
@@ -401,7 +410,8 @@ func (a *App) ResetUserToken(ctx context.Context, req ResetUserTokenRequest) (Re
 		}
 	}
 	if err := a.userOperator.UpdateToken(ctx, userusecase.UpdateTokenCommand{
-		UID: uid, Token: token, DeviceFlag: flag, DeviceLevel: level,
+		UID: uid, DeviceID: req.DeviceID, AppInstanceID: req.AppInstanceID, SessionGeneration: req.SessionGeneration,
+		Token: token, DeviceFlag: flag, DeviceLevel: level,
 	}); err != nil {
 		return ResetUserTokenResponse{}, err
 	}
@@ -455,75 +465,76 @@ func (a *App) managerUserListItemWithRoutes(ctx context.Context, snapshot contro
 }
 
 func (a *App) userDeviceCounts(ctx context.Context, uid string) (int, int, error) {
-	deviceCount := 0
-	tokenSetCount := 0
-	for _, flag := range managerUserDeviceFlags() {
-		device, ok, err := a.userDevice(ctx, uid, flag)
-		if err != nil {
-			return 0, 0, err
-		}
-		if !ok {
-			continue
-		}
-		deviceCount++
+	devices, err := a.users.ListDevicesByUID(ctx, uid)
+	if err != nil {
+		return 0, 0, err
+	}
+	tokenSet := 0
+	for _, device := range devices {
 		if device.Token != "" {
-			tokenSetCount++
+			tokenSet++
 		}
 	}
-	return deviceCount, tokenSetCount, nil
+	return len(devices), tokenSet, nil
 }
 
 func (a *App) userDevices(ctx context.Context, uid string, routes []presence.Route) ([]UserDevice, error) {
-	routeCounts := make(map[protocolmeta.DeviceFlag]int)
-	routeLevels := make(map[protocolmeta.DeviceFlag]protocolmeta.DeviceLevel)
+	type installationKey struct {
+		deviceID string
+		flag     protocolmeta.DeviceFlag
+	}
+	routeCounts := make(map[installationKey]int)
+	routeLevels := make(map[installationKey]protocolmeta.DeviceLevel)
 	for _, route := range routes {
-		flag := protocolmeta.DeviceFlag(route.DeviceFlag)
-		routeCounts[flag]++
-		if _, ok := routeLevels[flag]; !ok {
-			routeLevels[flag] = protocolmeta.DeviceLevel(route.DeviceLevel)
+		key := installationKey{deviceID: route.DeviceID, flag: protocolmeta.DeviceFlag(route.DeviceFlag)}
+		routeCounts[key]++
+		if _, ok := routeLevels[key]; !ok {
+			routeLevels[key] = protocolmeta.DeviceLevel(route.DeviceLevel)
 		}
 	}
 
-	out := make([]UserDevice, 0, len(managerUserDeviceFlags()))
-	for _, flag := range managerUserDeviceFlags() {
-		device, ok, err := a.userDevice(ctx, uid, flag)
+	out := make([]UserDevice, 0, len(routeCounts))
+	for key, onlineCount := range routeCounts {
+		device, ok, err := a.userDevice(ctx, uid, key.flag, key.deviceID)
 		if err != nil {
 			return nil, err
 		}
-		onlineCount := routeCounts[flag]
-		if !ok && onlineCount == 0 {
-			continue
-		}
 		level := protocolmeta.DeviceLevel(device.DeviceLevel)
 		if !ok {
-			level = routeLevels[flag]
+			level = routeLevels[key]
 		}
 		out = append(out, UserDevice{
-			DeviceFlag:         managerDeviceFlag(flag),
+			DeviceID:           key.deviceID,
+			DeviceFlag:         managerDeviceFlag(key.flag),
 			DeviceLevel:        managerConnectionDeviceLevel(level),
 			TokenSet:           ok && device.Token != "",
 			Online:             onlineCount > 0,
 			OnlineSessionCount: onlineCount,
 		})
 	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].DeviceFlag != out[j].DeviceFlag {
+			return out[i].DeviceFlag < out[j].DeviceFlag
+		}
+		return out[i].DeviceID < out[j].DeviceID
+	})
 	return out, nil
 }
 
-func (a *App) userDevice(ctx context.Context, uid string, flag protocolmeta.DeviceFlag) (metadb.Device, bool, error) {
+func (a *App) userDevice(ctx context.Context, uid string, flag protocolmeta.DeviceFlag, deviceID string) (metadb.Device, bool, error) {
 	if a == nil || a.users == nil {
 		return metadb.Device{}, false, nil
 	}
-	device, err := a.users.GetDevice(ctx, uid, int64(flag))
+	devices, err := a.users.ListDevicesByUID(ctx, uid)
 	if err != nil {
-		if err == metadb.ErrNotFound {
-			return metadb.Device{}, false, nil
-		}
 		return metadb.Device{}, false, err
 	}
-	if device.UID == "" {
-		return metadb.Device{}, false, nil
+	for _, device := range devices {
+		if device.DeviceFlag == int64(flag) && device.DeviceID == deviceID {
+			return device, true, nil
+		}
 	}
-	return device, true, nil
+	return metadb.Device{}, false, nil
 }
 
 func (a *App) userRoutes(ctx context.Context, uids []string) (map[string][]presence.Route, error) {

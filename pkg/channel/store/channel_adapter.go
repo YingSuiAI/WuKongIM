@@ -856,7 +856,7 @@ func fromDBMessage(msg channel.Message) ch.Message {
 	return ch.Message{MessageID: msg.MessageID, MessageSeq: msg.MessageSeq, ChannelID: msg.ChannelID, ChannelType: msg.ChannelType, Setting: uint8(msg.Setting), FromUID: msg.FromUID, ClientMsgNo: msg.ClientMsgNo, Payload: cloneBytes(msg.Payload), ServerTimestampMS: msg.ServerTimestampMS, SyncOnce: msg.Framer.SyncOnce}
 }
 
-const durableMessageHeaderSize = 45
+const durableMessageHeaderSize = 36
 
 var durableServerTimestampMagic = [...]byte{'w', 'k', 't', 's'}
 
@@ -864,22 +864,20 @@ const durableServerTimestampSize = 12
 
 func encodeDBCompatibleMessage(message channel.Message) ([]byte, error) {
 	payloadHash := hashPayload(message.Payload)
-	size := durableMessageHeaderSize + 4 + len(message.MsgKey) + 4 + len(message.ClientMsgNo) + 4 + len(message.StreamNo) + 4 + len(message.ChannelID) + 4 + len(message.Topic) + 4 + len(message.FromUID) + 4 + len(message.Payload)
+	size := durableMessageHeaderSize + 4 + len(message.MsgKey) + 4 + len(message.ClientMsgNo) + 4 + len(message.ChannelID) + 4 + len(message.Topic) + 4 + len(message.FromUID) + 4 + len(message.Payload)
 	if message.ServerTimestampMS != 0 {
 		size += durableServerTimestampSize
 	}
 	payload := make([]byte, 0, size)
 	payload = append(payload, channel.DurableMessageCodecVersion)
 	payload = binary.BigEndian.AppendUint64(payload, message.MessageID)
-	payload = append(payload, encodeDBCompatibleFramerFlags(message.Framer), byte(message.Setting), byte(message.StreamFlag), message.ChannelType)
+	payload = append(payload, encodeDBCompatibleFramerFlags(message.Framer), byte(message.Setting), message.ChannelType)
 	payload = binary.BigEndian.AppendUint32(payload, message.Expire)
 	payload = binary.BigEndian.AppendUint64(payload, message.ClientSeq)
-	payload = binary.BigEndian.AppendUint64(payload, message.StreamID)
 	payload = binary.BigEndian.AppendUint32(payload, uint32(message.Timestamp))
 	payload = binary.BigEndian.AppendUint64(payload, payloadHash)
 	payload = appendSizedString(payload, message.MsgKey)
 	payload = appendSizedString(payload, message.ClientMsgNo)
-	payload = appendSizedString(payload, message.StreamNo)
 	payload = appendSizedString(payload, message.ChannelID)
 	payload = appendSizedString(payload, message.Topic)
 	payload = appendSizedString(payload, message.FromUID)
@@ -899,12 +897,10 @@ func decodeDBCompatibleMessage(payload []byte) (channel.Message, error) {
 		MessageID:   binary.BigEndian.Uint64(payload[1:9]),
 		Framer:      decodeDBCompatibleFramerFlags(payload[9]),
 		Setting:     frame.Setting(payload[10]),
-		StreamFlag:  frame.StreamFlag(payload[11]),
-		ChannelType: payload[12],
-		Expire:      binary.BigEndian.Uint32(payload[13:17]),
-		ClientSeq:   binary.BigEndian.Uint64(payload[17:25]),
-		StreamID:    binary.BigEndian.Uint64(payload[25:33]),
-		Timestamp:   int32(binary.BigEndian.Uint32(payload[33:37])),
+		ChannelType: payload[11],
+		Expire:      binary.BigEndian.Uint32(payload[12:16]),
+		ClientSeq:   binary.BigEndian.Uint64(payload[16:24]),
+		Timestamp:   int32(binary.BigEndian.Uint32(payload[24:28])),
 	}
 	pos := durableMessageHeaderSize
 	var b []byte
@@ -917,10 +913,6 @@ func decodeDBCompatibleMessage(payload []byte) (channel.Message, error) {
 		return channel.Message{}, err
 	}
 	msg.ClientMsgNo = string(b)
-	if b, pos, err = readSizedBytes(payload, pos); err != nil {
-		return channel.Message{}, err
-	}
-	msg.StreamNo = string(b)
 	if b, pos, err = readSizedBytes(payload, pos); err != nil {
 		return channel.Message{}, err
 	}

@@ -42,23 +42,6 @@ func decodeRecv(f frame.Frame, data []byte, version uint8) (frame.Frame, error) 
 	if recvPacket.ClientMsgNo, err = dec.String(); err != nil {
 		return nil, errors.Wrap(err, "解码ClientMsgNo失败！")
 	}
-	// 流消息
-	if version < 5 { // 5版本后不再支持recv里不再需要streamNo和streamId
-		if version >= 2 && recvPacket.Setting.IsSet(frame.SettingStream) {
-			var streamFlag uint8
-			if streamFlag, err = dec.Uint8(); err != nil {
-				return nil, errors.Wrap(err, "解码StreamFlag失败！")
-			}
-			recvPacket.StreamFlag = frame.StreamFlag(streamFlag)
-
-			if recvPacket.StreamNo, err = dec.String(); err != nil {
-				return nil, errors.Wrap(err, "解码StreamNo失败！")
-			}
-			if recvPacket.StreamId, err = dec.Uint64(); err != nil {
-				return nil, errors.Wrap(err, "解码StreamId失败！")
-			}
-		}
-	}
 	// 消息全局唯一ID
 	if recvPacket.MessageID, err = dec.Int64(); err != nil {
 		return nil, errors.Wrap(err, "解码MessageId失败！")
@@ -115,15 +98,6 @@ func encodeRecv(recvPacket *frame.RecvPacket, enc *Encoder, version uint8) error
 	}
 	// 客户端唯一标示
 	enc.WriteString(recvPacket.ClientMsgNo)
-	// 流消息
-	if version < 5 { // 5版本后不再支持recv里不再需要streamNo和streamId
-		if version >= 2 && recvPacket.Setting.IsSet(frame.SettingStream) {
-			enc.WriteUint8(uint8(recvPacket.StreamFlag))
-			enc.WriteString(recvPacket.StreamNo)
-			enc.WriteUint64(recvPacket.StreamId)
-		}
-	}
-
 	// 消息唯一ID
 	enc.WriteInt64(recvPacket.MessageID)
 	// 消息有序ID
@@ -152,13 +126,6 @@ func encodeRecvSize(packet *frame.RecvPacket, version uint8) int {
 		size += frame.ExpireByteSize
 	}
 	size += len(packet.ClientMsgNo) + frame.StringFixLenByteSize
-	if version < 5 { // 5版本后不再支持recv里不再需要streamNo和streamId
-		if version >= 2 && packet.Setting.IsSet(frame.SettingStream) {
-			size += frame.StreamFlagByteSize
-			size += len(packet.StreamNo) + frame.StringFixLenByteSize
-			size += frame.StreamIdByteSize
-		}
-	}
 	size += frame.MessageIDByteSize
 	size += messageSeqSize(version)
 	size += frame.TimestampByteSize

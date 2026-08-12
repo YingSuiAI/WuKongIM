@@ -413,6 +413,13 @@ func appendPresenceRoute(dst []byte, route presence.Route) []byte {
 	dst = appendUvarint(dst, route.OwnerSeq)
 	dst = appendUvarint(dst, route.SessionID)
 	dst = appendString(dst, route.DeviceID)
+	dst = appendString(dst, route.AppInstanceID)
+	dst = appendString(dst, route.DeviceSessionID)
+	dst = appendString(dst, route.IMSessionID)
+	dst = appendUvarint(dst, route.InstallationGeneration)
+	dst = appendUvarint(dst, route.SessionGeneration)
+	dst = appendUvarint(dst, route.AuthorizationFence)
+	dst = append(dst, route.ProtocolVersion)
 	dst = append(dst, route.DeviceFlag, route.DeviceLevel)
 	dst = appendString(dst, route.Listener)
 	dst = appendVarint(dst, route.ConnectedUnix)
@@ -439,6 +446,27 @@ func readPresenceRoute(body []byte, offset int) (presence.Route, int, error) {
 		return presence.Route{}, offset, err
 	}
 	if route.DeviceID, offset, err = readString(body, offset); err != nil {
+		return presence.Route{}, offset, err
+	}
+	if route.AppInstanceID, offset, err = readString(body, offset); err != nil {
+		return presence.Route{}, offset, err
+	}
+	if route.DeviceSessionID, offset, err = readString(body, offset); err != nil {
+		return presence.Route{}, offset, err
+	}
+	if route.IMSessionID, offset, err = readString(body, offset); err != nil {
+		return presence.Route{}, offset, err
+	}
+	if route.InstallationGeneration, offset, err = readUvarint(body, offset); err != nil {
+		return presence.Route{}, offset, err
+	}
+	if route.SessionGeneration, offset, err = readUvarint(body, offset); err != nil {
+		return presence.Route{}, offset, err
+	}
+	if route.AuthorizationFence, offset, err = readUvarint(body, offset); err != nil {
+		return presence.Route{}, offset, err
+	}
+	if route.ProtocolVersion, offset, err = readByte(body, offset, "presence protocol version"); err != nil {
 		return presence.Route{}, offset, err
 	}
 	if route.DeviceFlag, offset, err = readByte(body, offset, "presence device flag"); err != nil {

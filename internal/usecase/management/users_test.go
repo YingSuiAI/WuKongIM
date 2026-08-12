@@ -24,11 +24,11 @@ func TestListUsersAggregatesDeviceAndPresenceSummary(t *testing.T) {
 			done:   true,
 		},
 	}
-	reader.devices[managementDeviceKey{"u1", int64(frame.APP)}] = metadb.Device{
-		UID: "u1", DeviceFlag: int64(frame.APP), Token: "token-1", DeviceLevel: int64(frame.DeviceLevelMaster),
+	reader.devices[managementDeviceKey{"u1", int64(frame.APP), "d1"}] = metadb.Device{
+		UID: "u1", DeviceFlag: int64(frame.APP), DeviceID: "d1", Token: "token-1", DeviceLevel: int64(frame.DeviceLevelMaster),
 	}
 	presenceDir := &fakeManagementPresence{routes: map[string][]presence.Route{
-		"u1": {{UID: "u1", OwnerNodeID: 2, SessionID: 10, DeviceFlag: uint8(frame.APP), DeviceLevel: uint8(frame.DeviceLevelMaster)}},
+		"u1": {{UID: "u1", OwnerNodeID: 2, SessionID: 10, DeviceID: "d1", DeviceFlag: uint8(frame.APP), DeviceLevel: uint8(frame.DeviceLevelMaster)}},
 	}}
 	app := New(Options{
 		Cluster:      fakeNodeSnapshotReader{snapshot: snapshot},
@@ -130,8 +130,8 @@ func TestGetUserReturnsDetailWithDevicesAndConnections(t *testing.T) {
 	snapshot := singleUserSlotSnapshot()
 	reader := newFakeManagementUserReader()
 	reader.users["u1"] = metadb.User{UID: "u1"}
-	reader.devices[managementDeviceKey{"u1", int64(frame.APP)}] = metadb.Device{
-		UID: "u1", DeviceFlag: int64(frame.APP), Token: "token-1", DeviceLevel: int64(frame.DeviceLevelMaster),
+	reader.devices[managementDeviceKey{"u1", int64(frame.APP), "d1"}] = metadb.Device{
+		UID: "u1", DeviceFlag: int64(frame.APP), DeviceID: "d1", Token: "token-1", DeviceLevel: int64(frame.DeviceLevelMaster),
 	}
 	presenceDir := &fakeManagementPresence{routes: map[string][]presence.Route{
 		"u1": {{
@@ -152,7 +152,7 @@ func TestGetUserReturnsDetailWithDevicesAndConnections(t *testing.T) {
 	if got.UID != "u1" || got.SlotID != 1 || got.HashSlot != routing.HashSlotForKey("u1", snapshot.HashSlots.Count) || !got.Online {
 		t.Fatalf("detail identity = %#v, want u1 online in slot 1", got)
 	}
-	wantDevices := []UserDevice{{DeviceFlag: "app", DeviceLevel: "master", TokenSet: true, Online: true, OnlineSessionCount: 1}}
+	wantDevices := []UserDevice{{DeviceID: "d1", DeviceFlag: "app", DeviceLevel: "master", TokenSet: true, Online: true, OnlineSessionCount: 1}}
 	if !sameUserDevices(got.Devices, wantDevices) {
 		t.Fatalf("devices = %#v, want %#v", got.Devices, wantDevices)
 	}
@@ -167,21 +167,21 @@ func TestKickUserClearsTokenAndAppliesRouteActions(t *testing.T) {
 	actions := &fakeManagementRouteActions{}
 	presenceDir := &fakeManagementPresence{routes: map[string][]presence.Route{
 		"u1": {
-			{UID: "u1", OwnerNodeID: 2, OwnerBootID: 9, SessionID: 10, DeviceFlag: uint8(frame.APP)},
-			{UID: "u1", OwnerNodeID: 3, OwnerBootID: 8, SessionID: 11, DeviceFlag: uint8(frame.WEB)},
-			{UID: "u1", OwnerNodeID: 4, OwnerBootID: 7, SessionID: 12, DeviceFlag: uint8(frame.SYSTEM)},
+			{UID: "u1", OwnerNodeID: 2, OwnerBootID: 9, SessionID: 10, DeviceID: "d1", DeviceFlag: uint8(frame.APP)},
+			{UID: "u1", OwnerNodeID: 3, OwnerBootID: 8, SessionID: 11, DeviceID: "d1", DeviceFlag: uint8(frame.WEB)},
+			{UID: "u1", OwnerNodeID: 4, OwnerBootID: 7, SessionID: 12, DeviceID: "d1", DeviceFlag: uint8(frame.SYSTEM)},
 		},
 	}}
 	app := New(Options{UserOperator: operator, UserPresence: presenceDir, UserActions: actions})
 
-	got, err := app.KickUser(context.Background(), KickUserRequest{UID: "u1", DeviceFlag: "all"})
+	got, err := app.KickUser(context.Background(), KickUserRequest{UID: "u1", DeviceID: "d1", DeviceFlag: "all"})
 	if err != nil {
 		t.Fatalf("KickUser() error = %v", err)
 	}
 	if got != (KickUserResponse{UID: "u1", DeviceFlag: "all", Changed: true}) {
 		t.Fatalf("KickUser() = %#v, want all changed", got)
 	}
-	if len(operator.deviceQuitCalls) != 1 || operator.deviceQuitCalls[0] != (userusecase.DeviceQuitCommand{UID: "u1", DeviceFlag: -1}) {
+	if len(operator.deviceQuitCalls) != 1 || operator.deviceQuitCalls[0] != (userusecase.DeviceQuitCommand{UID: "u1", DeviceID: "d1", DeviceFlag: -1}) {
 		t.Fatalf("deviceQuitCalls = %#v, want all-device quit", operator.deviceQuitCalls)
 	}
 	wantActions := []presence.RouteAction{
@@ -198,7 +198,7 @@ func TestResetUserTokenGeneratesTokenAndUpdatesDevice(t *testing.T) {
 	app := New(Options{UserOperator: operator})
 
 	got, err := app.ResetUserToken(context.Background(), ResetUserTokenRequest{
-		UID: "u1", DeviceFlag: "app", DeviceLevel: "master",
+		UID: "u1", DeviceID: "d1", AppInstanceID: "app-1", SessionGeneration: 2, DeviceFlag: "app", DeviceLevel: "master",
 	})
 	if err != nil {
 		t.Fatalf("ResetUserToken() error = %v", err)
@@ -209,7 +209,7 @@ func TestResetUserTokenGeneratesTokenAndUpdatesDevice(t *testing.T) {
 	if len(operator.updateTokenCalls) != 1 {
 		t.Fatalf("updateTokenCalls = %#v, want one call", operator.updateTokenCalls)
 	}
-	want := userusecase.UpdateTokenCommand{UID: "u1", Token: got.Token, DeviceFlag: protocolmeta.DeviceFlagApp, DeviceLevel: protocolmeta.DeviceLevelMaster}
+	want := userusecase.UpdateTokenCommand{UID: "u1", DeviceID: "d1", AppInstanceID: "app-1", SessionGeneration: 2, Token: got.Token, DeviceFlag: protocolmeta.DeviceFlagApp, DeviceLevel: protocolmeta.DeviceLevelMaster}
 	if operator.updateTokenCalls[0] != want {
 		t.Fatalf("updateTokenCalls[0] = %#v, want %#v", operator.updateTokenCalls[0], want)
 	}
@@ -237,6 +237,7 @@ type fakeManagementUserPage struct {
 type managementDeviceKey struct {
 	uid        string
 	deviceFlag int64
+	deviceID   string
 }
 
 func newFakeManagementUserReader() *fakeManagementUserReader {
@@ -264,12 +265,22 @@ func (f *fakeManagementUserReader) GetUser(_ context.Context, uid string) (metad
 	return user, nil
 }
 
-func (f *fakeManagementUserReader) GetDevice(_ context.Context, uid string, deviceFlag int64) (metadb.Device, error) {
-	device, ok := f.devices[managementDeviceKey{uid, deviceFlag}]
+func (f *fakeManagementUserReader) GetDevice(_ context.Context, uid string, deviceFlag int64, deviceID string) (metadb.Device, error) {
+	device, ok := f.devices[managementDeviceKey{uid, deviceFlag, deviceID}]
 	if !ok {
 		return metadb.Device{}, metadb.ErrNotFound
 	}
 	return device, nil
+}
+
+func (f *fakeManagementUserReader) ListDevicesByUID(_ context.Context, uid string) ([]metadb.Device, error) {
+	var out []metadb.Device
+	for key, device := range f.devices {
+		if key.uid == uid {
+			out = append(out, device)
+		}
+	}
+	return out, nil
 }
 
 type fakeManagementPresence struct {

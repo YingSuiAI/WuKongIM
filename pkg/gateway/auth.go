@@ -13,16 +13,31 @@ type AuthenticatorFunc = gatewaytypes.AuthenticatorFunc
 type AuthResult = gatewaytypes.AuthResult
 
 const (
-	SessionValueUID               = gatewaytypes.SessionValueUID
-	SessionValueDeviceID          = gatewaytypes.SessionValueDeviceID
-	SessionValueDeviceFlag        = gatewaytypes.SessionValueDeviceFlag
-	SessionValueDeviceLevel       = gatewaytypes.SessionValueDeviceLevel
-	SessionValueProtocolVersion   = gatewaytypes.SessionValueProtocolVersion
-	SessionValueEncryptionEnabled = gatewaytypes.SessionValueEncryptionEnabled
-	SessionValueAESKey            = gatewaytypes.SessionValueAESKey
-	SessionValueAESIV             = gatewaytypes.SessionValueAESIV
-	SessionValueCrypto            = gatewaytypes.SessionValueCrypto
+	SessionValueUID                    = gatewaytypes.SessionValueUID
+	SessionValueDeviceID               = gatewaytypes.SessionValueDeviceID
+	SessionValueAppInstanceID          = gatewaytypes.SessionValueAppInstanceID
+	SessionValueDeviceSessionID        = gatewaytypes.SessionValueDeviceSessionID
+	SessionValueIMSessionID            = gatewaytypes.SessionValueIMSessionID
+	SessionValueInstallationGeneration = gatewaytypes.SessionValueInstallationGeneration
+	SessionValueSessionGeneration      = gatewaytypes.SessionValueSessionGeneration
+	SessionValueAuthorizationFence     = gatewaytypes.SessionValueAuthorizationFence
+	SessionValueDeviceFlag             = gatewaytypes.SessionValueDeviceFlag
+	SessionValueDeviceLevel            = gatewaytypes.SessionValueDeviceLevel
+	SessionValueProtocolVersion        = gatewaytypes.SessionValueProtocolVersion
+	SessionValueEncryptionEnabled      = gatewaytypes.SessionValueEncryptionEnabled
+	SessionValueAESKey                 = gatewaytypes.SessionValueAESKey
+	SessionValueAESIV                  = gatewaytypes.SessionValueAESIV
+	SessionValueCrypto                 = gatewaytypes.SessionValueCrypto
 )
+
+// VerifiedCredential contains server-authoritative claims attached after token verification.
+type VerifiedCredential struct {
+	DeviceLevel            frame.DeviceLevel
+	DeviceSessionID        string
+	IMSessionID            string
+	InstallationGeneration uint64
+	AuthorizationFence     uint64
+}
 
 type WKProtoAuthOptions struct {
 	TokenAuthOn       bool
@@ -32,7 +47,7 @@ type WKProtoAuthOptions struct {
 	Now               func() time.Time
 
 	IsVisitor   func(uid string) bool
-	VerifyToken func(uid string, deviceFlag frame.DeviceFlag, token string) (frame.DeviceLevel, error)
+	VerifyToken func(uid string, deviceFlag frame.DeviceFlag, deviceID string, appInstanceID string, sessionGeneration uint64, token string) (VerifiedCredential, error)
 	IsBanned    func(uid string) (bool, error)
 }
 
@@ -55,22 +70,30 @@ func NewWKProtoAuthenticator(opts WKProtoAuthOptions) Authenticator {
 				Connack: &frame.ConnackPacket{ReasonCode: frame.ReasonAuthFail},
 			}, nil
 		}
+		if connect.Version != frame.LatestVersion {
+			return &AuthResult{
+				Connack: &frame.ConnackPacket{Framer: frame.Framer{HasServerVersion: true}, ReasonCode: frame.ReasonAuthFail, ServerVersion: frame.LatestVersion},
+			}, nil
+		}
 
-		deviceLevel := frame.DeviceLevelSlave
+		credential := VerifiedCredential{DeviceLevel: frame.DeviceLevelSlave}
 		if opts.TokenAuthOn && !isVisitor(opts.IsVisitor, connect.UID) {
-			if connect.Token == "" || opts.VerifyToken == nil {
+			if connect.Token == "" || connect.DeviceID == "" || connect.AppInstanceID == "" || connect.InstallationGeneration == 0 || connect.SessionGeneration == 0 || opts.VerifyToken == nil {
 				return &AuthResult{
 					Connack: &frame.ConnackPacket{ReasonCode: frame.ReasonAuthFail},
 				}, nil
 			}
 
-			level, err := opts.VerifyToken(connect.UID, connect.DeviceFlag, connect.Token)
+			verified, err := opts.VerifyToken(connect.UID, connect.DeviceFlag, connect.DeviceID, connect.AppInstanceID, connect.SessionGeneration, connect.Token)
 			if err != nil {
 				return &AuthResult{
 					Connack: &frame.ConnackPacket{ReasonCode: frame.ReasonAuthFail},
 				}, nil
 			}
-			deviceLevel = level
+			if verified.DeviceSessionID == "" || verified.IMSessionID == "" || verified.InstallationGeneration == 0 || verified.InstallationGeneration != connect.InstallationGeneration || verified.AuthorizationFence == 0 {
+				return &AuthResult{Connack: &frame.ConnackPacket{ReasonCode: frame.ReasonAuthFail}}, nil
+			}
+			credential = verified
 		}
 
 		if opts.IsBanned != nil {
@@ -87,9 +110,6 @@ func NewWKProtoAuthenticator(opts WKProtoAuthOptions) Authenticator {
 		}
 
 		serverVersion := connect.Version
-		if serverVersion == 0 || serverVersion > frame.LatestVersion {
-			serverVersion = frame.LatestVersion
-		}
 
 		connack := &frame.ConnackPacket{
 			ReasonCode:    frame.ReasonSuccess,
@@ -100,11 +120,17 @@ func NewWKProtoAuthenticator(opts WKProtoAuthOptions) Authenticator {
 		connack.HasServerVersion = connect.Version > 3
 
 		sessionValues := map[string]any{
-			SessionValueUID:             connect.UID,
-			SessionValueDeviceID:        connect.DeviceID,
-			SessionValueDeviceFlag:      connect.DeviceFlag,
-			SessionValueDeviceLevel:     deviceLevel,
-			SessionValueProtocolVersion: serverVersion,
+			SessionValueUID:                    connect.UID,
+			SessionValueDeviceID:               connect.DeviceID,
+			SessionValueAppInstanceID:          connect.AppInstanceID,
+			SessionValueDeviceSessionID:        credential.DeviceSessionID,
+			SessionValueIMSessionID:            credential.IMSessionID,
+			SessionValueInstallationGeneration: credential.InstallationGeneration,
+			SessionValueSessionGeneration:      connect.SessionGeneration,
+			SessionValueAuthorizationFence:     credential.AuthorizationFence,
+			SessionValueDeviceFlag:             connect.DeviceFlag,
+			SessionValueDeviceLevel:            credential.DeviceLevel,
+			SessionValueProtocolVersion:        serverVersion,
 		}
 		if encryptionEnabled {
 			if connect.ClientKey == "" {

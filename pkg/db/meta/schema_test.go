@@ -91,13 +91,13 @@ func TestMetaSchemaValidateAllTables(t *testing.T) {
 		if table.ID == TableIDMessageEventState &&
 			table.Primary.ID == messageEventStatePrimaryIndexID &&
 			table.Primary.Name == "pk_message_event_state" &&
-			len(table.Primary.Columns) == 4 {
+			len(table.Primary.Columns) == 5 {
 			messageEventStatePrimaryRegistered = true
 		}
 		if table.ID == TableIDMessageEventCursor &&
 			table.Primary.ID == messageEventCursorPrimaryIndexID &&
 			table.Primary.Name == "pk_message_event_cursor" &&
-			len(table.Primary.Columns) == 3 {
+			len(table.Primary.Columns) == 4 {
 			messageEventCursorPrimaryRegistered = true
 		}
 		if table.ID == TableIDMessageEventApplied &&

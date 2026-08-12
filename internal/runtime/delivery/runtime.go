@@ -37,6 +37,8 @@ var (
 	ErrPresenceResolverUnavailable = errors.New("internal/runtime/delivery: presence resolver unavailable")
 	// ErrOwnerPushNotLocal reports an owner-local push addressed to another node.
 	ErrOwnerPushNotLocal = errors.New("internal/runtime/delivery: owner push is not local")
+	// ErrRemoteEventPusherUnavailable reports a remote EVENT without a transport.
+	ErrRemoteEventPusherUnavailable = errors.New("internal/runtime/delivery: remote event pusher unavailable")
 	// ErrOwnerPushRetryExhausted reports routes still retryable after the final attempt.
 	ErrOwnerPushRetryExhausted = errors.New("internal/runtime/delivery: owner push retry exhausted")
 	// ErrOwnerPushPanic reports a recovered owner adapter panic.
@@ -63,6 +65,8 @@ type RuntimeOptions struct {
 	Presence PlanPresenceResolver
 	// RemoteOwnerPusher forwards grouped routes to non-local owner nodes.
 	RemoteOwnerPusher RemoteOwnerPusher
+	// RemoteEventPusher forwards typed EVENT frames to remote owners.
+	RemoteEventPusher RemoteEventPusher
 	// SessionWriter performs final exact owner-local session writes.
 	SessionWriter LocalSessionWriter
 	// OfflineRecipientsObserver receives durable-only offline batches.
@@ -108,6 +112,8 @@ type Runtime struct {
 	presence PlanPresenceResolver
 	// remoteOwnerPusher transports exact owner groups to peer runtimes.
 	remoteOwnerPusher RemoteOwnerPusher
+	// remoteEventPusher transports typed EVENT groups to peer runtimes.
+	remoteEventPusher RemoteEventPusher
 	// sessionWriter owns final exact-session validation and physical writes.
 	sessionWriter LocalSessionWriter
 	// offlineRecipientsObserver receives durable-only auxiliary effects.
@@ -197,6 +203,7 @@ func NewRuntime(opts RuntimeOptions) *Runtime {
 		localNodeID:               opts.LocalNodeID,
 		presence:                  opts.Presence,
 		remoteOwnerPusher:         opts.RemoteOwnerPusher,
+		remoteEventPusher:         opts.RemoteEventPusher,
 		sessionWriter:             opts.SessionWriter,
 		offlineRecipientsObserver: opts.OfflineRecipientsObserver,
 		queue:                     newOrderedPlanQueue(queueSize, workers),
@@ -661,6 +668,82 @@ func (r *Runtime) PushOwner(ctx context.Context, push onlinedelivery.OwnerPush) 
 	r.mu.Unlock()
 	defer r.ownerPushes.Done()
 	return r.pushOwnerLocal(ctx, push)
+}
+
+// PushEventOwner writes one typed realtime event to exact owner-local routes.
+func (r *Runtime) PushEventOwner(ctx context.Context, push onlinedelivery.EventPush) (onlinedelivery.OwnerPushResult, error) {
+	if r == nil || r.sessionWriter == nil {
+		return onlinedelivery.OwnerPushResult{}, ErrRuntimeClosed
+	}
+	writer, ok := r.sessionWriter.(eventSessionWriter)
+	if !ok {
+		return onlinedelivery.OwnerPushResult{}, ErrSessionWriterUnavailable
+	}
+	if push.OwnerNodeID == 0 || push.OwnerNodeID != r.localNodeID || push.EventID == "" || push.EventType == "" {
+		return onlinedelivery.OwnerPushResult{}, ErrInvalidPlan
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	var result onlinedelivery.OwnerPushResult
+	for _, route := range push.Routes {
+		writeResult := writer.WriteEventSession(ctx, push, route)
+		switch writeResult.Disposition {
+		case SessionWriteAccepted:
+			result.Accepted = append(result.Accepted, route)
+		case SessionWriteRetryable:
+			result.Retryable = append(result.Retryable, route)
+		default:
+			result.Dropped = append(result.Dropped, route)
+		}
+	}
+	return result, nil
+}
+
+// PushEvent routes one typed realtime event to its exact owner routes.
+func (r *Runtime) PushEvent(ctx context.Context, push onlinedelivery.EventPush) (onlinedelivery.OwnerPushResult, error) {
+	if r == nil {
+		return onlinedelivery.OwnerPushResult{}, ErrRuntimeClosed
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	backoff := r.retryInitialBackoff
+	var result onlinedelivery.OwnerPushResult
+	for attempt := 1; attempt <= r.retryMaxAttempts; attempt++ {
+		var err error
+		if push.OwnerNodeID == r.localNodeID {
+			result, err = r.PushEventOwner(ctx, push)
+		} else if r.remoteEventPusher == nil {
+			err = ErrRemoteEventPusherUnavailable
+		} else {
+			result, err = r.remoteEventPusher.PushEventOwner(ctx, push)
+		}
+		if err == nil && len(result.Retryable) == 0 {
+			return result, nil
+		}
+		if err == nil {
+			push.Routes = result.Retryable
+		}
+		if attempt == r.retryMaxAttempts {
+			if err != nil {
+				return result, errors.Join(ErrOwnerPushRetryExhausted, err)
+			}
+			return result, ErrOwnerPushRetryExhausted
+		}
+		timer := time.NewTimer(backoff)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			timer.Stop()
+			return result, ctx.Err()
+		}
+		backoff *= 2
+		if backoff > r.retryMaxBackoff {
+			backoff = r.retryMaxBackoff
+		}
+	}
+	return result, nil
 }
 
 // pushOwnerLocal owns the complete reserve-write-finish-or-rollback ACK

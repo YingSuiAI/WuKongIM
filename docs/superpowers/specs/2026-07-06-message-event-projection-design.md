@@ -23,7 +23,7 @@ or realtime `EventPacket` fanout.
 - Add a compatible `POST /message/event` HTTP route.
 - Store one projection state per `(channel_id, channel_type, client_msg_no, event_key)`.
 - Assign a message-scoped `msg_event_seq` for every accepted event append.
-- Keep `stream.delta` as a reducer update, not a durable per-event row.
+- Keep `event.delta` as a reducer update, not a durable per-event row.
 - Enrich `SyncChannelMessages` results with `event_meta`, `event_sync_hint`,
   and legacy stream fields (`stream_data`, `end`, `end_reason`, `error`) when a
   main event key exists.
@@ -113,12 +113,12 @@ Constants should use the legacy-compatible names:
 ```text
 event_key default: main
 event statuses: open, closed, error, cancelled
-event types: stream.delta, stream.snapshot, stream.close, stream.error,
-             stream.cancel, stream.finish
+event types: event.delta, event.snapshot, event.complete, event.error,
+             event.cancel, event.terminal
 visibility: public, private, restricted
 ```
 
-`stream.finish` maps to the special event key `__finish__` and marks the
+`event.terminal` maps to the special event key `__finish__` and marks the
 message as completed in `event_meta`, but does not count as a normal lane in
 the returned `events` list.
 
@@ -129,16 +129,16 @@ The reducer is pure and should be unit-tested without storage:
 - Empty `event_key` becomes `main`.
 - Empty `occurred_at` becomes the server time at the usecase or storage
   boundary.
-- `stream.delta` opens the key if needed and merges text deltas of the shape
+- `event.delta` opens the key if needed and merges text deltas of the shape
   `{"kind":"text","delta":"..."}` into `{"kind":"text","text":"..."}`.
 - Non-text deltas replace `snapshot_payload` with the event payload.
-- `stream.snapshot` replaces `snapshot_payload`.
-- `stream.close` sets `closed`, optionally extracts `snapshot`, and records
+- `event.snapshot` replaces `snapshot_payload`.
+- `event.complete` sets `closed`, optionally extracts `snapshot`, and records
   `end_reason`.
-- `stream.error` sets `error`, optionally extracts `snapshot`, and records
+- `event.error` sets `error`, optionally extracts `snapshot`, and records
   `error`.
-- `stream.cancel` sets `cancelled`, optionally extracts `snapshot`.
-- `stream.finish` sets `closed` on `__finish__`.
+- `event.cancel` sets `cancelled`, optionally extracts `snapshot`.
+- `event.terminal` sets `closed` on `__finish__`.
 - Repeating the last `event_id` for the same event key is idempotent and returns
   the existing `LastMsgEventSeq`.
 - Appending a new event after a terminal status returns the existing terminal
@@ -173,7 +173,7 @@ Request fields:
   "from_uid": "u1",
   "client_msg_no": "cmn_abc_001",
   "event_id": "evt_0001",
-  "event_type": "stream.delta",
+  "event_type": "delta",
   "event_key": "main",
   "visibility": "public",
   "occurred_at": 1772860800000,

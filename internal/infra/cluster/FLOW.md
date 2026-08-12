@@ -203,10 +203,9 @@ shaping remains in `internal/access/api`.
 message.MessageEventAppend
   -> metadb.MessageEventAppend
   -> cluster Node.AppendMessageEvent
-  -> Slot leader stream cache for stream.open/delta/snapshot
-  -> terminal stream event merges cached snapshot and proposes a durable Slot FSM update
-     (stream.finish flushes open cached lanes and finish marker in one batch proposal)
-     (stream.finish without cached lanes or a complete snapshot fails closed on the cluster boundary)
+  -> Slot leader cache for open/delta/snapshot
+  -> finish flushes open run lanes and the real finish in one durable Slot FSM proposal
+     (finish without cached lanes or a complete snapshot fails on the cluster boundary)
   -> Slot FSM message event reducer
   -> message.MessageEventAppendResult
 
@@ -219,12 +218,11 @@ message event summary keys
 `MessageEventStore` adapts the message usecase event projection port to the
 cluster Slot metadata facade. It clones inbound payloads, maps cache or compact
 reducer results back to usecase DTOs, and keeps route/not-leader/backpressure
-errors in the same typed family used by channel append. Stream buffering policy
+errors in the same typed family used by channel append. Event buffering policy
 is implemented inside `pkg/cluster.Node` so all HTTP/API callers route
 in-flight deltas to the Slot leader cache before terminal events are proposed.
 The adapter does not validate HTTP request semantics, emit realtime event
-packets, or implement `/message/eventsync`; those remain in access/usecase
-layers or later phases.
+packets; realtime EVENT delivery is composed by the app facade after commit.
 
 ## CMD Sync Flow
 

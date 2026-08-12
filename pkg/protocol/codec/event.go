@@ -14,7 +14,7 @@ func decodeEvent(f frame.Frame, data []byte, _ uint8) (frame.Frame, error) {
 	if eventPacket.Type, err = dec.String(); err != nil {
 		return nil, err
 	}
-	if eventPacket.Timestamp, err = dec.Int64(); err != nil {
+	if eventPacket.Timestamp, err = dec.Uint64(); err != nil {
 		return nil, err
 	}
 	if eventPacket.Data, err = dec.BinaryAll(); err != nil {
@@ -27,7 +27,7 @@ func decodeEvent(f frame.Frame, data []byte, _ uint8) (frame.Frame, error) {
 func encodeEvent(eventPacket *frame.EventPacket, enc *Encoder, _ uint8) error {
 	enc.WriteString(eventPacket.Id)
 	enc.WriteString(eventPacket.Type)
-	enc.WriteInt64(eventPacket.Timestamp)
+	enc.WriteUint64(eventPacket.Timestamp)
 	enc.WriteBytes(eventPacket.Data)
 	return nil
 }

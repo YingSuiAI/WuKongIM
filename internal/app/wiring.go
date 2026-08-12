@@ -343,12 +343,12 @@ func (a *App) wirePresence() {
 		if a.presence == nil {
 			ownerBootID := newOwnerBootID()
 			a.presence = presence.New(presence.Options{
-				Local:                a.online,
-				Authority:            client,
-				OwnerActions:         client,
-				OnlineStatusObserver: a.webhookPresence,
-				OwnerNodeID:          presenceNode.NodeID(),
-				OwnerBootID:          ownerBootID,
+				Local:         a.online,
+				Authority:     client,
+				OwnerActions:  client,
+				LeaseObserver: a.webhookPresence,
+				OwnerNodeID:   presenceNode.NodeID(),
+				OwnerBootID:   ownerBootID,
 				HashSlot: func(uid string) (uint16, error) {
 					target, err := client.ResolveRouteTarget(uid)
 					if err != nil {
@@ -769,7 +769,10 @@ func (a *App) wireCMDSync() {
 
 func (a *App) wireAPIMessageFacade() {
 	if a.apiMessages == nil && a.messages != nil {
-		a.apiMessages = a.messages
+		a.apiMessages = &messageEventAPIFacade{
+			App: a.messages, delivery: a.onlineDelivery, presence: a.presenceAuthorityClient,
+			subscribers: a.channels, logger: a.logger,
+		}
 	}
 }
 
@@ -1213,23 +1216,26 @@ var errWKProtoTokenAuth = errors.New("internal/app: wkproto token authentication
 // token written by /user/token. It intentionally returns one generic error for
 // every lookup or comparison failure so authentication details (including
 // token values) never cross the gateway boundary.
-func (a *App) verifyWKProtoToken(uid string, deviceFlag frame.DeviceFlag, token string) (frame.DeviceLevel, error) {
+func (a *App) verifyWKProtoToken(uid string, deviceFlag frame.DeviceFlag, deviceID string, appInstanceID string, sessionGeneration uint64, token string) (gateway.VerifiedCredential, error) {
 	if a == nil || token == "" {
-		return frame.DeviceLevelSlave, errWKProtoTokenAuth
+		return gateway.VerifiedCredential{}, errWKProtoTokenAuth
 	}
 	node, ok := a.cluster.(clusterinfra.AuthoritativeDeviceMetadataNode)
 	if !ok || node == nil {
-		return frame.DeviceLevelSlave, errWKProtoTokenAuth
+		return gateway.VerifiedCredential{}, errWKProtoTokenAuth
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), wkProtoAuthLookupTimeout)
 	defer cancel()
-	device, err := node.GetDeviceMetadataAuthoritative(ctx, uid, int64(deviceFlag))
+	device, err := node.GetDeviceMetadataAuthoritative(ctx, uid, int64(deviceFlag), deviceID, appInstanceID)
 	if err != nil || device.Token == "" {
-		return frame.DeviceLevelSlave, errWKProtoTokenAuth
+		return gateway.VerifiedCredential{}, errWKProtoTokenAuth
 	}
 	if subtle.ConstantTimeCompare([]byte(token), []byte(device.Token)) != 1 {
-		return frame.DeviceLevelSlave, errWKProtoTokenAuth
+		return gateway.VerifiedCredential{}, errWKProtoTokenAuth
 	}
-	return frame.DeviceLevel(device.DeviceLevel), nil
+	if device.SessionGeneration != sessionGeneration || device.InstallationGeneration == 0 || device.AuthorizationFence == 0 {
+		return gateway.VerifiedCredential{}, errWKProtoTokenAuth
+	}
+	return gateway.VerifiedCredential{DeviceLevel: frame.DeviceLevel(device.DeviceLevel), DeviceSessionID: device.DeviceSessionID, IMSessionID: device.IMSessionID, InstallationGeneration: device.InstallationGeneration, AuthorizationFence: device.AuthorizationFence}, nil
 }

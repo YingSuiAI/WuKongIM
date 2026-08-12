@@ -7,14 +7,6 @@ import (
 	"github.com/valyala/bytebufferpool"
 )
 
-type StreamFlag uint8
-
-const (
-	StreamFlagStart StreamFlag = 0 // 开始
-	StreamFlagIng   StreamFlag = 1 // 进行中
-	StreamFlagEnd   StreamFlag = 2 // 结束
-)
-
 // RecvPacket 收到消息的包
 type RecvPacket struct {
 	Framer
@@ -24,11 +16,6 @@ type RecvPacket struct {
 	MessageID   int64  // 服务端的消息ID(全局唯一)
 	MessageSeq  uint64 // 消息序列号 （用户唯一，有序递增）
 	ClientMsgNo string // 客户端唯一标示
-
-	// 以下三个字段在5版本后不再支持
-	StreamNo   string     // 流式编号
-	StreamId   uint64     // 流式序列号
-	StreamFlag StreamFlag // 流式标示
 
 	Timestamp   int32  // 服务器消息时间戳(10位，到秒)
 	ChannelID   string // 频道ID
@@ -57,9 +44,6 @@ func (r *RecvPacket) Reset() {
 	r.MessageID = 0
 	r.MessageSeq = 0
 	r.ClientMsgNo = ""
-	r.StreamNo = ""
-	r.StreamId = 0
-	r.StreamFlag = 0
 	r.Timestamp = 0
 	r.ChannelID = ""
 	r.ChannelType = 0

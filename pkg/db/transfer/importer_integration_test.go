@@ -97,7 +97,7 @@ func TestImportBundleWritesCurrentStores(t *testing.T) {
 	if user.Token != "user-token" || user.DeviceFlag != 1 || user.DeviceLevel != 2 {
 		t.Fatalf("user = %+v, want imported token and defaults", user)
 	}
-	device, ok, err := store.Meta().HashSlot(userSlot).GetDevice(ctx, "u1", 1)
+	device, ok, err := store.Meta().HashSlot(userSlot).GetDevice(ctx, "u1", 1, "")
 	if err != nil || !ok {
 		t.Fatalf("GetDevice() ok=%v err=%v, want ok", ok, err)
 	}

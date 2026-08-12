@@ -37,7 +37,8 @@ func (a *App) Activate(ctx context.Context, cmd ActivateCommand) error {
 		a.rollbackLocal(cmd.SessionID)
 		return err
 	}
-	a.observeOnlineStatus(ctx, routeProjection)
+	a.local.MarkLeaseObserved(cmd.SessionID, cmd.ConnectedUnix)
+	a.observeLease(ctx, routeProjection, "connected", cmd.ConnectedUnix)
 	return nil
 }
 

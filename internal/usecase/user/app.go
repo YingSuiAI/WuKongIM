@@ -30,18 +30,44 @@ func (a *App) UpdateToken(ctx context.Context, cmd UpdateTokenCommand) error {
 	} else if err != nil {
 		return err
 	}
+	if a.deviceReader != nil {
+		existing, err := a.deviceReader.GetDevice(ctx, cmd.UID, int64(cmd.DeviceFlag), cmd.DeviceID, cmd.AppInstanceID)
+		if err == nil && deviceCredentialNewer(existing, cmd) {
+			return metadb.ErrStaleMeta
+		}
+		if err != nil && !errors.Is(err, metadb.ErrNotFound) {
+			return err
+		}
+	}
 	if err := a.devices.UpsertDevice(ctx, metadb.Device{
-		UID:         cmd.UID,
-		DeviceFlag:  int64(cmd.DeviceFlag),
-		Token:       cmd.Token,
-		DeviceLevel: int64(cmd.DeviceLevel),
+		UID:                    cmd.UID,
+		DeviceFlag:             int64(cmd.DeviceFlag),
+		DeviceID:               cmd.DeviceID,
+		AppInstanceID:          cmd.AppInstanceID,
+		DeviceSessionID:        cmd.DeviceSessionID,
+		IMSessionID:            cmd.IMSessionID,
+		InstallationGeneration: cmd.InstallationGeneration,
+		SessionGeneration:      cmd.SessionGeneration,
+		AuthorizationFence:     cmd.AuthorizationFence,
+		Token:                  cmd.Token,
+		DeviceLevel:            int64(cmd.DeviceLevel),
 	}); err != nil {
 		return err
 	}
 	if cmd.DeviceLevel == protocolmeta.DeviceLevelMaster {
-		a.kickLocalDevice(cmd.UID, cmd.DeviceFlag, updateTokenCloseDelay, updateTokenKickReason)
+		a.kickLocalInstallation(cmd.UID, cmd.DeviceFlag, cmd.DeviceID, cmd.SessionGeneration, updateTokenCloseDelay, updateTokenKickReason)
 	}
 	return nil
+}
+
+func deviceCredentialNewer(existing metadb.Device, incoming UpdateTokenCommand) bool {
+	if existing.InstallationGeneration != incoming.InstallationGeneration {
+		return existing.InstallationGeneration > incoming.InstallationGeneration
+	}
+	if existing.SessionGeneration != incoming.SessionGeneration {
+		return existing.SessionGeneration > incoming.SessionGeneration
+	}
+	return existing.AuthorizationFence > incoming.AuthorizationFence
 }
 
 // DeviceQuit clears stored device tokens and closes matching owner-local sessions.
@@ -49,8 +75,11 @@ func (a *App) DeviceQuit(ctx context.Context, cmd DeviceQuitCommand) error {
 	if a == nil || a.devices == nil || a.deviceReader == nil {
 		return ErrDeviceStoreRequired
 	}
+	if cmd.UID == "" || cmd.DeviceID == "" {
+		return metadb.ErrInvalidArgument
+	}
 	for _, flag := range deviceQuitFlags(cmd.DeviceFlag) {
-		if err := a.quitDevice(ctx, cmd.UID, flag); err != nil {
+		if err := a.quitDevice(ctx, cmd.UID, flag, cmd.DeviceID); err != nil {
 			return err
 		}
 	}
@@ -211,35 +240,37 @@ func (a *App) IsSystemUID(uid string) bool {
 	return ok
 }
 
-func (a *App) quitDevice(ctx context.Context, uid string, flag protocolmeta.DeviceFlag) error {
-	device, err := a.deviceReader.GetDevice(ctx, uid, int64(flag))
-	if errors.Is(err, metadb.ErrNotFound) {
-		return nil
+func (a *App) quitDevice(ctx context.Context, uid string, flag protocolmeta.DeviceFlag, deviceID string) error {
+	reader, ok := a.deviceReader.(interface {
+		ListDevicesByUID(context.Context, string) ([]metadb.Device, error)
+	})
+	if !ok {
+		return ErrDeviceStoreRequired
 	}
+	devices, err := reader.ListDevicesByUID(ctx, uid)
 	if err != nil {
 		return err
 	}
-	if device.UID == "" {
-		return nil
+	for _, device := range devices {
+		if device.DeviceFlag != int64(flag) || device.DeviceID != deviceID {
+			continue
+		}
+		device.Token = deviceQuitMissingToken
+		device.DeviceLevel = int64(protocolmeta.DeviceLevelMaster)
+		if err := a.devices.UpsertDevice(ctx, device); err != nil {
+			return err
+		}
+		a.kickLocalInstallation(uid, flag, deviceID, device.SessionGeneration, deviceQuitCloseDelay, "")
 	}
-	if err := a.devices.UpsertDevice(ctx, metadb.Device{
-		UID:         uid,
-		DeviceFlag:  int64(flag),
-		Token:       deviceQuitMissingToken,
-		DeviceLevel: int64(protocolmeta.DeviceLevelMaster),
-	}); err != nil {
-		return err
-	}
-	a.kickLocalDevice(uid, flag, deviceQuitCloseDelay, "")
 	return nil
 }
 
-func (a *App) kickLocalDevice(uid string, flag protocolmeta.DeviceFlag, delay time.Duration, reason string) {
+func (a *App) kickLocalInstallation(uid string, flag protocolmeta.DeviceFlag, deviceID string, throughGeneration uint64, delay time.Duration, reason string) {
 	if a == nil || a.online == nil || a.afterFunc == nil {
 		return
 	}
 	for _, session := range a.online.LocalSessionsByUID(uid) {
-		if session.Route.DeviceFlag != uint8(flag) || session.Session == nil {
+		if session.Route.DeviceFlag != uint8(flag) || session.Route.DeviceID != deviceID || session.Route.SessionGeneration > throughGeneration || session.Session == nil {
 			continue
 		}
 		sessionID := session.Route.SessionID

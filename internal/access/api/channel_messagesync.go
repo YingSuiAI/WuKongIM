@@ -16,7 +16,6 @@ type syncChannelMessagesRequest struct {
 	Limit            int                     `json:"limit"`
 	PullMode         messageusecase.PullMode `json:"pull_mode"`
 	IncludeEventMeta int                     `json:"include_event_meta"`
-	EventSummaryMode string                  `json:"event_summary_mode"`
 }
 
 type syncChannelMessagesResponse struct {
@@ -64,7 +63,6 @@ func (s *Server) handleChannelMessageSync(c *gin.Context) {
 		Limit:            req.Limit,
 		PullMode:         req.PullMode,
 		IncludeEventMeta: req.IncludeEventMeta != 0,
-		EventSummaryMode: req.EventSummaryMode,
 	})
 	if err != nil {
 		writeJSONError(c, err.Error())
@@ -105,7 +103,6 @@ func (s *Server) handleChannelMessageSyncBatch(c *gin.Context) {
 			Limit:            item.Limit,
 			PullMode:         item.PullMode,
 			IncludeEventMeta: item.IncludeEventMeta != 0,
-			EventSummaryMode: item.EventSummaryMode,
 		}
 	}
 	result, err := s.messages.SyncChannelMessagesBatch(c.Request.Context(), query)

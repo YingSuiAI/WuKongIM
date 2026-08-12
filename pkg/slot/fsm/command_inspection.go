@@ -255,18 +255,25 @@ func messageEventAppendBatchPayload(events []metadb.MessageEventAppend) []map[st
 }
 
 func messageEventAppendPayload(event metadb.MessageEventAppend) map[string]any {
-	return map[string]any{
-		"channel_id":    event.ChannelID,
-		"channel_type":  event.ChannelType,
-		"client_msg_no": event.ClientMsgNo,
-		"event_id":      event.EventID,
-		"event_key":     event.EventKey,
-		"event_type":    event.EventType,
-		"visibility":    event.Visibility,
-		"occurred_at":   event.OccurredAt,
-		"updated_at":    event.UpdatedAt,
-		"payload_bytes": len(event.Payload),
+	payload := map[string]any{
+		"channel_id":          event.ChannelID,
+		"channel_type":        event.ChannelType,
+		"client_msg_no":       event.ClientMsgNo,
+		"run_id":              event.RunID,
+		"authorization_fence": event.AuthorizationFence,
+		"authority_sequence":  event.AuthoritySequence,
+		"event_id":            event.EventID,
+		"event_key":           event.EventKey,
+		"event_type":          event.EventType,
+		"visibility":          event.Visibility,
+		"occurred_at":         event.OccurredAt,
+		"updated_at":          event.UpdatedAt,
+		"payload_bytes":       len(event.Payload),
 	}
+	if event.ProjectionOnly {
+		payload["projection_only"] = true
+	}
+	return payload
 }
 
 func conversationKeysPayload(keys []metadb.ChannelKey) []map[string]any {

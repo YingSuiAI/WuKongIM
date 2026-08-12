@@ -39,13 +39,14 @@ func TestMessageEventStoreAppendMapsAndClonesPayloads(t *testing.T) {
 		ChannelID:   "g1",
 		ChannelType: 2,
 		ClientMsgNo: "cmn-1",
-		EventID:     "evt-1",
-		EventKey:    "main",
-		EventType:   message.EventTypeStreamDelta,
-		Visibility:  message.VisibilityPublic,
-		OccurredAt:  10,
-		Payload:     payload,
-		UpdatedAt:   11,
+		RunID:       "run-1", AuthorizationFence: "fence-1",
+		EventID:    "evt-1",
+		EventKey:   "main",
+		EventType:  message.EventTypeDelta,
+		Visibility: message.VisibilityPublic,
+		OccurredAt: 10,
+		Payload:    payload,
+		UpdatedAt:  11,
 	})
 	if err != nil {
 		t.Fatalf("AppendMessageEvent() error = %v", err)
@@ -113,7 +114,7 @@ func TestMessageEventStoreRequiresNode(t *testing.T) {
 func TestMessageEventStoreMapsRouteErrors(t *testing.T) {
 	store := NewMessageEventStore(&messageEventNodeFake{err: pkgcluster.ErrNoSlotLeader})
 
-	_, err := store.AppendMessageEvent(context.Background(), message.MessageEventAppend{ChannelID: "g1", ChannelType: 2, ClientMsgNo: "cmn", EventID: "evt", EventType: message.EventTypeStreamDelta})
+	_, err := store.AppendMessageEvent(context.Background(), message.MessageEventAppend{ChannelID: "g1", ChannelType: 2, ClientMsgNo: "cmn", EventID: "evt", EventType: message.EventTypeDelta})
 	if !errors.Is(err, message.ErrRouteNotReady) {
 		t.Fatalf("AppendMessageEvent() error = %v, want route not ready", err)
 	}
@@ -126,6 +127,13 @@ type messageEventNodeFake struct {
 	limit        int
 	states       map[metadb.MessageEventMessageKey][]metadb.MessageEventState
 	err          error
+}
+
+func (n *messageEventNodeFake) LookupMessageEventAnchor(_ context.Context, channelID string, channelType int64, messageID uint64) (pkgcluster.MessageEventAnchor, bool, error) {
+	if n.err != nil {
+		return pkgcluster.MessageEventAnchor{}, false, n.err
+	}
+	return pkgcluster.MessageEventAnchor{ChannelID: channelID, ChannelType: channelType, MessageID: messageID, FromUID: "u1", ClientMsgNo: "cmn-1", RunID: "run-1", AuthorizationFence: "fence-1"}, true, nil
 }
 
 func (n *messageEventNodeFake) AppendMessageEvent(_ context.Context, event metadb.MessageEventAppend) (metadb.MessageEventAppendResult, error) {

@@ -82,7 +82,7 @@ func TestNewTestAppDisablesDefaultPluginRuntime(t *testing.T) {
 
 func TestAppAlwaysWiresGoroutineRegistryAndDebugSummary(t *testing.T) {
 	app, err := newTestApp(t, Config{
-		API: APIConfig{ListenAddr: "127.0.0.1:0"},
+		API: APIConfig{ListenAddr: "127.0.0.1:0", ServiceToken: "service-secret"},
 		Observability: ObservabilityConfig{
 			DebugAPIEnabled: true,
 		},
@@ -2723,7 +2723,7 @@ func TestManagerServerListsUsersAndMutatesSystemUsers(t *testing.T) {
 			1: {{UID: "u1"}},
 		},
 		devices: map[fakeManagerDeviceKey]metadb.Device{
-			{uid: "u1", deviceFlag: int64(frame.APP)}: {UID: "u1", DeviceFlag: int64(frame.APP), Token: "token-1", DeviceLevel: int64(frame.DeviceLevelMaster)},
+			{uid: "u1", deviceFlag: int64(frame.APP), deviceID: "device-1", appInstanceID: "app-1"}: {UID: "u1", DeviceFlag: int64(frame.APP), DeviceID: "device-1", AppInstanceID: "app-1", Token: "token-1", DeviceLevel: int64(frame.DeviceLevelMaster)},
 		},
 	}
 	app, err := newTestApp(t, Config{
@@ -5114,7 +5114,7 @@ func TestAppWiresMessageEventRouteToClusterStore(t *testing.T) {
 	cluster := newFakePresenceCluster(1, nil)
 	cluster.snapshot = readyFakeClusterSnapshot(1, 16)
 	app, err := newTestApp(t, Config{
-		API: APIConfig{ListenAddr: "127.0.0.1:0"},
+		API: APIConfig{ListenAddr: "127.0.0.1:0", ServiceToken: "service-secret"},
 	}, WithCluster(cluster))
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -5125,25 +5125,26 @@ func TestAppWiresMessageEventRouteToClusterStore(t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/message/event", strings.NewReader(`{"channel_id":"g1","channel_type":2,"from_uid":"u1","client_msg_no":"cmn-1","event_id":"evt-1","event_type":"stream.open","payload":{"kind":"text"}}`))
+	req := httptest.NewRequest(http.MethodPost, "/message/events:append", strings.NewReader(`{"channel_id":"g1","channel_type":2,"from_uid":"u1","message_id":99,"client_msg_no":"cmn-1","run_id":"run-1","authorization_fence":1,"authority_sequence":1,"event_id":"evt-1","event_type":"open","payload":{"event_id":"evt-1","run_id":"run-1","base_message":{"conversation_id":"019c0000-0000-7000-8000-000000000001","message_id":"019c0000-0000-7000-8000-000000000002","client_msg_id":"cmn-1","committed_message_ref":"agent-run.test","message_sequence":1,"source_principal_id":"u1"},"event_key":"main","event_type":"open","authority_sequence":1,"snapshot":{"state":"running","authority_sequence":1,"text":"","complete":false},"authorization_fence":1,"occurred_at":"2023-11-14T22:13:20Z"}}`))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer service-secret")
 	apiSrv.Handler().ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d body = %s, want 200", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), `"msg_event_seq":1`) || !strings.Contains(rec.Body.String(), `"stream_status":"open"`) {
+	if !strings.Contains(rec.Body.String(), `"msg_event_seq":1`) || !strings.Contains(rec.Body.String(), `"event_status":"open"`) {
 		t.Fatalf("body = %s, want event append data", rec.Body.String())
 	}
 	if len(cluster.messageEventAppends) != 1 {
 		t.Fatalf("message event appends = %#v, want one append", cluster.messageEventAppends)
 	}
 	event := cluster.messageEventAppends[0]
-	if event.ChannelID != "g1" || event.ChannelType != 2 || event.ClientMsgNo != "cmn-1" || event.EventID != "evt-1" || event.EventType != metadb.EventTypeStreamOpen {
+	if event.ChannelID != "g1" || event.ChannelType != 2 || event.ClientMsgNo != "cmn-1" || event.EventID != "evt-1" || event.EventType != metadb.EventTypeOpen {
 		t.Fatalf("message event append = %#v, want mapped event", event)
 	}
-	if string(event.Payload) != `{"kind":"text"}` {
-		t.Fatalf("payload = %q, want raw event payload", event.Payload)
+	if !bytes.Contains(event.Payload, []byte(`"event_type":"open"`)) {
+		t.Fatalf("payload = %q, want typed event payload", event.Payload)
 	}
 }
 
@@ -5772,8 +5773,10 @@ type fakeManagerCluster struct {
 }
 
 type fakeManagerDeviceKey struct {
-	uid        string
-	deviceFlag int64
+	uid           string
+	deviceFlag    int64
+	deviceID      string
+	appInstanceID string
 }
 
 func (f *fakeManagerCluster) NodeID() uint64 { return f.nodeID }
@@ -5947,16 +5950,26 @@ func (f *fakeManagerCluster) UpsertDeviceMetadata(_ context.Context, device meta
 	if f.devices == nil {
 		f.devices = make(map[fakeManagerDeviceKey]metadb.Device)
 	}
-	f.devices[fakeManagerDeviceKey{uid: device.UID, deviceFlag: device.DeviceFlag}] = device
+	f.devices[fakeManagerDeviceKey{uid: device.UID, deviceFlag: device.DeviceFlag, deviceID: device.DeviceID, appInstanceID: device.AppInstanceID}] = device
 	return nil
 }
 
-func (f *fakeManagerCluster) GetDeviceMetadata(_ context.Context, uid string, deviceFlag int64) (metadb.Device, error) {
-	device, ok := f.devices[fakeManagerDeviceKey{uid: uid, deviceFlag: deviceFlag}]
+func (f *fakeManagerCluster) GetDeviceMetadata(_ context.Context, uid string, deviceFlag int64, deviceID, appInstanceID string) (metadb.Device, error) {
+	device, ok := f.devices[fakeManagerDeviceKey{uid: uid, deviceFlag: deviceFlag, deviceID: deviceID, appInstanceID: appInstanceID}]
 	if !ok {
 		return metadb.Device{}, metadb.ErrNotFound
 	}
 	return device, nil
+}
+
+func (f *fakeManagerCluster) ListDeviceMetadataByUID(_ context.Context, uid string) ([]metadb.Device, error) {
+	var out []metadb.Device
+	for key, device := range f.devices {
+		if key.uid == uid {
+			out = append(out, device)
+		}
+	}
+	return out, nil
 }
 
 func (f *fakeManagerCluster) GetChannelMetadata(_ context.Context, channelID string, channelType int64) (metadb.Channel, error) {
@@ -6942,6 +6955,10 @@ func (f *fakePresenceCluster) ReadChannelCommittedBatch(_ context.Context, reads
 	return make([]clusterchannels.CommittedReadResult, len(reads)), nil
 }
 
+func (f *fakePresenceCluster) LookupMessageEventAnchor(_ context.Context, channelID string, channelType int64, messageID uint64) (clusterpkg.MessageEventAnchor, bool, error) {
+	return clusterpkg.MessageEventAnchor{ChannelID: channelID, ChannelType: channelType, FromUID: "u1", MessageID: messageID, ClientMsgNo: "cmn-1", RunID: "run-1", AuthorizationFence: "1"}, true, nil
+}
+
 func (f *fakePresenceCluster) AppendMessageEvent(_ context.Context, event metadb.MessageEventAppend) (metadb.MessageEventAppendResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -6950,9 +6967,6 @@ func (f *fakePresenceCluster) AppendMessageEvent(_ context.Context, event metadb
 	eventKey := event.EventKey
 	if eventKey == "" {
 		eventKey = metadb.EventKeyDefault
-	}
-	if event.EventType == metadb.EventTypeStreamFinish {
-		eventKey = metadb.EventKeyFinish
 	}
 	state := metadb.MessageEventState{
 		ChannelID:       event.ChannelID,
