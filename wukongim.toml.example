@@ -46,6 +46,8 @@ large_group_subscriber_threshold = 500
 
 [api]
 listen_addr = "127.0.0.1:5001"
+# Required for mutating service calls such as /user/token.
+service_token = ""
 external_tcp_addr = "127.0.0.1:5100"
 external_ws_addr = "ws://127.0.0.1:5200"
 
@@ -170,6 +172,8 @@ recipient_authority_dispatch_concurrency = 0
 
 [webhook]
 http_addr = ""
+# Required when http_addr is configured.
+signing_secret = ""
 focus_events = []
 queue_size = 1024
 workers = 16

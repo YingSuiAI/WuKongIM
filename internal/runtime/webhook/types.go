@@ -64,6 +64,8 @@ type OnlineStatus struct {
 type SendRequest struct {
 	// Event is the webhook event name sent as the event query parameter.
 	Event string
+	// RequestID identifies one logical webhook batch across retry attempts.
+	RequestID string
 	// Body is the already encoded JSON request body.
 	Body []byte
 }

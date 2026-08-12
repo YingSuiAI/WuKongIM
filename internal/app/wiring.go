@@ -2,10 +2,13 @@ package app
 
 import (
 	"context"
+	"crypto/subtle"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	accessapi "github.com/WuKongIM/WuKongIM/internal/access/api"
 	accessgateway "github.com/WuKongIM/WuKongIM/internal/access/gateway"
@@ -33,6 +36,7 @@ import (
 	goruntimeregistry "github.com/WuKongIM/WuKongIM/pkg/goroutine"
 	obsmetrics "github.com/WuKongIM/WuKongIM/pkg/metrics"
 	"github.com/WuKongIM/WuKongIM/pkg/observability/sendtrace"
+	"github.com/WuKongIM/WuKongIM/pkg/protocol/frame"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -780,6 +784,7 @@ func (a *App) wireAPI() {
 		legacyRouteNodes := legacyRouteNodeAddresses(a.cfg.NodeID, a.cfg.Cluster.Control.Voters, legacyRouteExternal, legacyRouteIntranet)
 		a.api = accessapi.New(accessapi.Options{
 			ListenAddr:               a.cfg.API.ListenAddr,
+			ServiceToken:             a.cfg.API.ServiceToken,
 			Readyz:                   a.readyzReport,
 			Maintenance:              a.restoreMaintenance.Load,
 			BenchEnabled:             a.cfg.Bench.APIEnabled,
@@ -1165,8 +1170,12 @@ func managerPermissionConfigs(permissions []ManagerPermissionConfig) []accessman
 func (a *App) wireGateway(nodeID uint64) error {
 	if a.gateway == nil && len(a.cfg.Gateway.Listeners) > 0 {
 		gw, err := gateway.New(gateway.Options{
-			Handler:        a.handler,
-			Authenticator:  gateway.NewWKProtoAuthenticator(gateway.WKProtoAuthOptions{NodeID: nodeID}),
+			Handler: a.handler,
+			Authenticator: gateway.NewWKProtoAuthenticator(gateway.WKProtoAuthOptions{
+				TokenAuthOn: true,
+				NodeID:      nodeID,
+				VerifyToken: a.verifyWKProtoToken,
+			}),
 			Listeners:      a.cfg.Gateway.Listeners,
 			DefaultSession: a.cfg.Gateway.Session,
 			Runtime: func() gateway.RuntimeOptions {
@@ -1184,4 +1193,33 @@ func (a *App) wireGateway(nodeID uint64) error {
 		a.gateway = gw
 	}
 	return nil
+}
+
+const wkProtoAuthLookupTimeout = 5 * time.Second
+
+var errWKProtoTokenAuth = errors.New("internal/app: wkproto token authentication failed")
+
+// verifyWKProtoToken authenticates one CONNECT against the durable per-device
+// token written by /user/token. It intentionally returns one generic error for
+// every lookup or comparison failure so authentication details (including
+// token values) never cross the gateway boundary.
+func (a *App) verifyWKProtoToken(uid string, deviceFlag frame.DeviceFlag, token string) (frame.DeviceLevel, error) {
+	if a == nil || token == "" {
+		return frame.DeviceLevelSlave, errWKProtoTokenAuth
+	}
+	node, ok := a.cluster.(clusterinfra.UserMetadataNode)
+	if !ok || node == nil {
+		return frame.DeviceLevelSlave, errWKProtoTokenAuth
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), wkProtoAuthLookupTimeout)
+	defer cancel()
+	device, err := node.GetDeviceMetadata(ctx, uid, int64(deviceFlag))
+	if err != nil || device.Token == "" {
+		return frame.DeviceLevelSlave, errWKProtoTokenAuth
+	}
+	if subtle.ConstantTimeCompare([]byte(token), []byte(device.Token)) != 1 {
+		return frame.DeviceLevelSlave, errWKProtoTokenAuth
+	}
+	return frame.DeviceLevel(device.DeviceLevel), nil
 }

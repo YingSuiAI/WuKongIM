@@ -542,6 +542,7 @@ func buildConfig(values map[string]string) (app.Config, error) {
 		cfg.Cluster.Storage.CommitShards = shards
 	}
 	cfg.API.ListenAddr = configValue(values, "WK_API_LISTEN_ADDR")
+	cfg.API.ServiceToken = configValue(values, "WK_API_SERVICE_TOKEN")
 	cfg.API.ExternalTCPAddr = configValue(values, "WK_EXTERNAL_TCPADDR")
 	cfg.API.ExternalWSAddr = configValue(values, "WK_EXTERNAL_WSADDR")
 	cfg.API.ExternalWSSAddr = configValue(values, "WK_EXTERNAL_WSSADDR")
@@ -1090,6 +1091,7 @@ func buildConfig(values map[string]string) (app.Config, error) {
 		cfg.Delivery.RecipientWorkerConcurrency = concurrency
 	}
 	cfg.Webhook.HTTPAddr = configValue(values, "WK_WEBHOOK_HTTP_ADDR")
+	cfg.Webhook.SigningSecret = configValue(values, "WK_WEBHOOK_SIGNING_SECRET")
 	if raw := configValue(values, "WK_WEBHOOK_FOCUS_EVENTS"); raw != "" {
 		focusEvents, err := parseStringList("WK_WEBHOOK_FOCUS_EVENTS", raw)
 		if err != nil {

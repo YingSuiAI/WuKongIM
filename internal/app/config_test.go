@@ -10,7 +10,8 @@ import (
 
 func TestWebhookConfigDefaultsWhenEndpointConfigured(t *testing.T) {
 	cfg, err := NormalizeWebhookConfig(WebhookConfig{
-		HTTPAddr: "http://127.0.0.1:18080/hook",
+		HTTPAddr:      "http://127.0.0.1:18080/hook",
+		SigningSecret: "test-signing-secret",
 	})
 	if err != nil {
 		t.Fatalf("NormalizeWebhookConfig() error = %v", err)
@@ -53,6 +54,7 @@ func TestWebhookConfigRejectsInvalidValues(t *testing.T) {
 		cfg  WebhookConfig
 	}{
 		{name: "enabled without endpoint", cfg: WebhookConfig{Enabled: true}},
+		{name: "endpoint without signing secret", cfg: WebhookConfig{HTTPAddr: "http://127.0.0.1/hook"}},
 		{name: "disabled negative queue", cfg: WebhookConfig{QueueSize: -1}},
 		{name: "negative queue", cfg: WebhookConfig{HTTPAddr: "http://127.0.0.1/hook", QueueSize: -1}},
 		{name: "negative workers", cfg: WebhookConfig{HTTPAddr: "http://127.0.0.1/hook", Workers: -1}},

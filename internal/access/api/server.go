@@ -208,6 +208,8 @@ type Options struct {
 	BenchEnabled bool
 	// BenchToken optionally requires one exact bearer capability on every /bench/v1/* and /debug/* route.
 	BenchToken string
+	// ServiceToken requires an exact bearer capability on mutating service routes.
+	ServiceToken string
 	// BenchMaxBatchSize limits top-level records accepted by one bench mutation request.
 	BenchMaxBatchSize int
 	// BenchMaxPayloadBytes limits bench mutation JSON request bodies in bytes.
@@ -268,6 +270,7 @@ type Server struct {
 	maintenance          func() bool
 	benchEnabled         bool
 	benchToken           string
+	serviceToken         string
 	benchMaxBatchSize    int
 	benchMaxPayloadBytes int64
 	gateway              GatewayAddresses
@@ -310,6 +313,7 @@ func New(opts Options) *Server {
 		maintenance:          opts.Maintenance,
 		benchEnabled:         opts.BenchEnabled,
 		benchToken:           strings.TrimSpace(opts.BenchToken),
+		serviceToken:         strings.TrimSpace(opts.ServiceToken),
 		benchMaxBatchSize:    opts.BenchMaxBatchSize,
 		benchMaxPayloadBytes: opts.BenchMaxPayloadBytes,
 		gateway:              opts.Gateway,
@@ -555,6 +559,17 @@ func (s *Server) requireBenchToken(c *gin.Context) {
 	providedDigest := sha256.Sum256([]byte(provided))
 	if !ok || provided == "" || subtle.ConstantTimeCompare(expectedDigest[:], providedDigest[:]) != 1 {
 		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "bench bearer token required"})
+		return
+	}
+	c.Next()
+}
+
+func (s *Server) requireServiceToken(c *gin.Context) {
+	provided, ok := strings.CutPrefix(c.GetHeader("Authorization"), "Bearer ")
+	expectedDigest := sha256.Sum256([]byte(s.serviceToken))
+	providedDigest := sha256.Sum256([]byte(provided))
+	if s.serviceToken == "" || !ok || provided == "" || subtle.ConstantTimeCompare(expectedDigest[:], providedDigest[:]) != 1 {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "service bearer token required"})
 		return
 	}
 	c.Next()

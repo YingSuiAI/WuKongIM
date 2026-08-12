@@ -26,7 +26,8 @@ func TestNewWiresWebhookSubsystemWhenEnabled(t *testing.T) {
 	app, err := newTestApp(t, Config{
 		DataDir: t.TempDir(),
 		Webhook: WebhookConfig{
-			HTTPAddr: "http://127.0.0.1:8080/webhook",
+			HTTPAddr:      "http://127.0.0.1:8080/webhook",
+			SigningSecret: "test-signing-secret",
 		},
 	}, WithCluster(&fakeCluster{}))
 	require.NoError(t, err)
@@ -40,10 +41,11 @@ func TestWebhookConfigSnapshotUsesNormalizedStartupConfig(t *testing.T) {
 	app, err := newTestApp(t, Config{
 		DataDir: t.TempDir(),
 		Webhook: WebhookConfig{
-			HTTPAddr:    "http://127.0.0.1:8080/webhook",
-			FocusEvents: []string{runtimewebhook.EventMsgNotify},
-			QueueSize:   2048,
-			Workers:     8,
+			HTTPAddr:      "http://127.0.0.1:8080/webhook",
+			SigningSecret: "test-signing-secret",
+			FocusEvents:   []string{runtimewebhook.EventMsgNotify},
+			QueueSize:     2048,
+			Workers:       8,
 		},
 	}, WithCluster(&fakeCluster{}))
 	require.NoError(t, err)

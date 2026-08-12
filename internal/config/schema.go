@@ -137,6 +137,7 @@ var schemaFields = []fieldSpec{
 	{TOMLPath: "channel.large_group_subscriber_threshold", EnvKey: "WK_CHANNEL_LARGE_GROUP_SUBSCRIBER_THRESHOLD", Kind: kindInt, Group: "channel", Label: "Large group subscriber threshold"},
 
 	{TOMLPath: "api.listen_addr", EnvKey: "WK_API_LISTEN_ADDR", Kind: kindString, Group: "api", Label: "API listen address"},
+	{TOMLPath: "api.service_token", EnvKey: "WK_API_SERVICE_TOKEN", Kind: kindString, Group: "api", Label: "API service token", Sensitive: true},
 	{TOMLPath: "api.external_tcp_addr", EnvKey: "WK_EXTERNAL_TCPADDR", Kind: kindString, Group: "api", Label: "External TCP address"},
 	{TOMLPath: "api.external_ws_addr", EnvKey: "WK_EXTERNAL_WSADDR", Kind: kindString, Group: "api", Label: "External WebSocket address", DiagnosticSensitive: true},
 	{TOMLPath: "api.external_wss_addr", EnvKey: "WK_EXTERNAL_WSSADDR", Kind: kindString, Group: "api", Label: "External secure WebSocket address", DiagnosticSensitive: true},
@@ -217,6 +218,7 @@ var schemaFields = []fieldSpec{
 	{TOMLPath: "delivery.recipient_worker_concurrency", EnvKey: "WK_DELIVERY_RECIPIENT_WORKER_CONCURRENCY", Kind: kindInt, Group: "delivery", Label: "Delivery recipient worker concurrency"},
 
 	{TOMLPath: "webhook.http_addr", EnvKey: "WK_WEBHOOK_HTTP_ADDR", Kind: kindString, Group: "webhook", Label: "Webhook HTTP address", DiagnosticSensitive: true},
+	{TOMLPath: "webhook.signing_secret", EnvKey: "WK_WEBHOOK_SIGNING_SECRET", Kind: kindString, Group: "webhook", Label: "Webhook signing secret", Sensitive: true},
 	{TOMLPath: "webhook.focus_events", EnvKey: "WK_WEBHOOK_FOCUS_EVENTS", Kind: kindStringList, Group: "webhook", Label: "Webhook focus events"},
 	{TOMLPath: "webhook.queue_size", EnvKey: "WK_WEBHOOK_QUEUE_SIZE", Kind: kindInt, Group: "webhook", Label: "Webhook queue size"},
 	{TOMLPath: "webhook.workers", EnvKey: "WK_WEBHOOK_WORKERS", Kind: kindInt, Group: "webhook", Label: "Webhook workers"},
@@ -318,6 +320,7 @@ func supportedConfigKeysForBuilder() []string {
 		"WK_CLUSTER_COMMIT_COORDINATOR_MAX_BYTES",
 		"WK_CLUSTER_COMMIT_COORDINATOR_SHARDS",
 		"WK_API_LISTEN_ADDR",
+		"WK_API_SERVICE_TOKEN",
 		"WK_MANAGER_LISTEN_ADDR",
 		"WK_MANAGER_AUTH_ON",
 		"WK_MANAGER_JWT_SECRET",
@@ -387,6 +390,7 @@ func supportedConfigKeysForBuilder() []string {
 		"WK_DELIVERY_EVENT_QUEUE_SIZE",
 		"WK_DELIVERY_RECIPIENT_WORKER_CONCURRENCY",
 		"WK_WEBHOOK_HTTP_ADDR",
+		"WK_WEBHOOK_SIGNING_SECRET",
 		"WK_WEBHOOK_FOCUS_EVENTS",
 		"WK_WEBHOOK_QUEUE_SIZE",
 		"WK_WEBHOOK_WORKERS",

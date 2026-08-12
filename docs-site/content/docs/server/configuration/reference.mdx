@@ -89,6 +89,7 @@ description: 完整列出公开 TOML 字段、WK_* 环境变量、值类型和�
 | TOML | Environment | Kind | Constraint |
 | --- | --- | --- | --- |
 | `api.listen_addr` | `WK_API_LISTEN_ADDR` | `string` | — |
+| `api.service_token` | `WK_API_SERVICE_TOKEN` | `string` | 敏感值；可变更服务路由必须配置 |
 | `api.external_tcp_addr` | `WK_EXTERNAL_TCPADDR` | `string` | — |
 | `api.external_ws_addr` | `WK_EXTERNAL_WSADDR` | `string` | 诊断制品脱敏 |
 | `api.external_wss_addr` | `WK_EXTERNAL_WSSADDR` | `string` | 诊断制品脱敏 |
@@ -217,6 +218,7 @@ description: 完整列出公开 TOML 字段、WK_* 环境变量、值类型和�
 | TOML | Environment | Kind | Constraint |
 | --- | --- | --- | --- |
 | `webhook.http_addr` | `WK_WEBHOOK_HTTP_ADDR` | `string` | 诊断制品脱敏 |
+| `webhook.signing_secret` | `WK_WEBHOOK_SIGNING_SECRET` | `string` | 敏感值；配置 `webhook.http_addr` 时必须提供 |
 | `webhook.focus_events` | `WK_WEBHOOK_FOCUS_EVENTS` | `string_list` | — |
 | `webhook.queue_size` | `WK_WEBHOOK_QUEUE_SIZE` | `int` | — |
 | `webhook.workers` | `WK_WEBHOOK_WORKERS` | `int` | — |
