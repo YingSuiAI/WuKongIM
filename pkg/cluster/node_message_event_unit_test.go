@@ -219,7 +219,7 @@ func TestMessageEventCacheRequiresSnapshotAfterFailover(t *testing.T) {
 	}
 }
 
-func TestMessageEventCacheIdempotencyRecordsDoNotRetainSnapshots(t *testing.T) {
+func TestMessageEventCacheAccountsExactReplayPayloadsWithoutDuplicatingProjectedSnapshots(t *testing.T) {
 	cache := newMessageEventStreamCache(8)
 	event := metadb.MessageEventAppend{
 		ChannelID: "g1", ChannelType: 2, ClientMsgNo: "cmn-memory", RunID: "run-1",
@@ -241,6 +241,13 @@ func TestMessageEventCacheIdempotencyRecordsDoNotRetainSnapshots(t *testing.T) {
 	}
 	if retained != 0 {
 		t.Fatalf("idempotency records retained %d snapshot bytes", retained)
+	}
+	wantPayloadBytes := int64(len(session.states[messageEventLaneCacheKey(event)].SnapshotPayload))
+	for _, applied := range session.appliedEvents {
+		wantPayloadBytes += int64(len(applied.Payload))
+	}
+	if cache.payloadBytes != wantPayloadBytes {
+		t.Fatalf("cache payload bytes = %d, want exact accounted bytes %d", cache.payloadBytes, wantPayloadBytes)
 	}
 }
 

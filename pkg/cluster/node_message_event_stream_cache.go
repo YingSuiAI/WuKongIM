@@ -35,7 +35,7 @@ type messageEventStreamCacheKey struct {
 type messageEventStreamCacheSession struct {
 	states             map[messageEventLaneKey]metadb.MessageEventState
 	applied            map[string]metadb.MessageEventAppendResult
-	appliedDigest      map[string]string
+	appliedEvents      map[string]metadb.MessageEventAppend
 	terminalRuns       map[string]metadb.MessageEventAppendResult
 	runSequences       map[string]uint64
 	runMsgEventSeqs    map[string]uint64
@@ -47,9 +47,8 @@ type messageEventStreamCacheSession struct {
 }
 
 type messageEventFinishingRun struct {
-	eventID string
-	digest  string
-	seq     uint64
+	event metadb.MessageEventAppend
+	seq   uint64
 }
 
 type messageEventLaneKey struct {
@@ -177,7 +176,7 @@ func (c *messageEventStreamCache) appendCachedObserved(event metadb.MessageEvent
 		return metadb.MessageEventAppendResult{}, c.observationLocked(), err
 	}
 	if result, ok := session.applied[event.EventID]; ok {
-		if session.appliedDigest[event.EventID] != metadb.MessageEventDigest(event) {
+		if !metadb.MessageEventSameInput(session.appliedEvents[event.EventID], event) {
 			return metadb.MessageEventAppendResult{}, c.observationLocked(), metadb.ErrStaleMeta
 		}
 		result = cloneMessageEventAppendResult(result)
@@ -241,7 +240,7 @@ func (c *messageEventStreamCache) appendCachedObserved(event metadb.MessageEvent
 	if len(nextPayload) > maxMessageEventSnapshotBytes {
 		return metadb.MessageEventAppendResult{}, c.observationLocked(), ErrBackpressured
 	}
-	projectedPayloadBytes := c.payloadBytes - int64(len(state.SnapshotPayload)) + int64(len(nextPayload))
+	projectedPayloadBytes := c.payloadBytes - int64(len(state.SnapshotPayload)) + int64(len(nextPayload)) + int64(len(event.Payload))
 	if projectedPayloadBytes > c.maxPayloadBytes {
 		return metadb.MessageEventAppendResult{}, c.observationLocked(), ErrBackpressured
 	}
@@ -259,7 +258,8 @@ func (c *messageEventStreamCache) appendCachedObserved(event metadb.MessageEvent
 
 	result := cachedMessageEventResult(event, state)
 	session.applied[event.EventID] = lightweightMessageEventAppendResult(result)
-	session.appliedDigest[event.EventID] = metadb.MessageEventDigest(event)
+	session.appliedEvents[event.EventID] = cloneMessageEventAppend(event)
+	c.payloadBytes += int64(len(event.Payload))
 	session.runSequences[event.RunID] = event.AuthoritySequence
 	session.runMsgEventSeqs[event.RunID] = event.MsgEventSeq
 	session.runEventCounts[event.RunID]++
@@ -300,12 +300,11 @@ func (c *messageEventStreamCache) prepareFinish(event metadb.MessageEventAppend)
 	if session == nil {
 		return event, nil, nil
 	}
-	digest := metadb.MessageEventDigest(event)
 	if finishing, ok := session.finishingRuns[event.RunID]; ok {
-		if finishing.eventID != event.EventID {
+		if finishing.event.EventID != event.EventID {
 			return event, nil, ErrMessageEventRunTerminal
 		}
-		if finishing.digest != digest {
+		if !metadb.MessageEventSameInput(finishing.event, event) {
 			return event, nil, metadb.ErrStaleMeta
 		}
 		event.MsgEventSeq = finishing.seq
@@ -316,7 +315,7 @@ func (c *messageEventStreamCache) prepareFinish(event metadb.MessageEventAppend)
 		if event.MsgEventSeq == 0 {
 			event.MsgEventSeq = session.runMsgEventSeqs[event.RunID] + 1
 		}
-		session.finishingRuns[event.RunID] = messageEventFinishingRun{eventID: event.EventID, digest: digest, seq: event.MsgEventSeq}
+		session.finishingRuns[event.RunID] = messageEventFinishingRun{event: cloneMessageEventAppend(event), seq: event.MsgEventSeq}
 	}
 	out := make([]metadb.MessageEventState, 0, len(session.states))
 	for _, state := range session.states {
@@ -340,7 +339,7 @@ func (c *messageEventStreamCache) abortFinish(event metadb.MessageEventAppend) {
 		return
 	}
 	finishing, ok := session.finishingRuns[event.RunID]
-	if ok && finishing.eventID == event.EventID && finishing.digest == metadb.MessageEventDigest(event) {
+	if ok && finishing.event.EventID == event.EventID && metadb.MessageEventSameInput(finishing.event, event) {
 		delete(session.finishingRuns, event.RunID)
 	}
 }
@@ -404,7 +403,7 @@ func (c *messageEventStreamCache) terminalResult(event metadb.MessageEventAppend
 		return metadb.MessageEventAppendResult{}, false, nil
 	}
 	if result, ok := session.applied[event.EventID]; ok {
-		if session.appliedDigest[event.EventID] != metadb.MessageEventDigest(event) {
+		if !metadb.MessageEventSameInput(session.appliedEvents[event.EventID], event) {
 			return metadb.MessageEventAppendResult{}, false, metadb.ErrStaleMeta
 		}
 		return cloneMessageEventAppendResult(result), true, nil
@@ -427,7 +426,7 @@ func (c *messageEventStreamCache) completeRunObserved(event metadb.MessageEventA
 		session = &messageEventStreamCacheSession{
 			states:             make(map[messageEventLaneKey]metadb.MessageEventState),
 			applied:            make(map[string]metadb.MessageEventAppendResult),
-			appliedDigest:      make(map[string]string),
+			appliedEvents:      make(map[string]metadb.MessageEventAppend),
 			terminalRuns:       make(map[string]metadb.MessageEventAppendResult),
 			runSequences:       make(map[string]uint64),
 			runMsgEventSeqs:    make(map[string]uint64),
@@ -446,7 +445,8 @@ func (c *messageEventStreamCache) completeRunObserved(event metadb.MessageEventA
 		delete(session.states, laneKey)
 	}
 	session.applied[event.EventID] = lightweightMessageEventAppendResult(result)
-	session.appliedDigest[event.EventID] = metadb.MessageEventDigest(event)
+	session.appliedEvents[event.EventID] = cloneMessageEventAppend(event)
+	c.payloadBytes += int64(len(event.Payload))
 	session.terminalRuns[event.RunID] = lightweightMessageEventAppendResult(result)
 	session.runSequences[event.RunID] = event.AuthoritySequence
 	session.runMsgEventSeqs[event.RunID] = result.MsgEventSeq
@@ -500,6 +500,12 @@ func (c *messageEventStreamCache) deleteSessionLocked(key messageEventStreamCach
 		for _, state := range session.states {
 			c.accountStateRemoveLocked(state)
 		}
+		for _, event := range session.appliedEvents {
+			c.payloadBytes -= int64(len(event.Payload))
+		}
+		if c.payloadBytes < 0 {
+			c.payloadBytes = 0
+		}
 	}
 	delete(c.sessions, key)
 }
@@ -518,7 +524,7 @@ func (c *messageEventStreamCache) sessionLocked(key messageEventStreamCacheKey, 
 	session = &messageEventStreamCacheSession{
 		states:             make(map[messageEventLaneKey]metadb.MessageEventState),
 		applied:            make(map[string]metadb.MessageEventAppendResult),
-		appliedDigest:      make(map[string]string),
+		appliedEvents:      make(map[string]metadb.MessageEventAppend),
 		terminalRuns:       make(map[string]metadb.MessageEventAppendResult),
 		runSequences:       make(map[string]uint64),
 		runMsgEventSeqs:    make(map[string]uint64),
@@ -801,7 +807,7 @@ func (n *Node) appendMessageEventLocal(ctx context.Context, event metadb.Message
 			return metadb.MessageEventAppendResult{}, err
 		}
 		if found {
-			if applied.EventDigest != metadb.MessageEventDigest(event) {
+			if !metadb.MessageEventAppliedMatches(applied, event) {
 				return metadb.MessageEventAppendResult{}, metadb.ErrStaleMeta
 			}
 			return metadb.MessageEventAppendResult{Applied: false, ChannelID: event.ChannelID, ChannelType: event.ChannelType, ClientMsgNo: event.ClientMsgNo, RunID: event.RunID, EventID: event.EventID, EventKey: applied.EventKey, MsgEventSeq: applied.MsgEventSeq, Status: applied.Status}, nil
@@ -1409,6 +1415,11 @@ func cloneMessageEventAppends(events []metadb.MessageEventAppend) []metadb.Messa
 		out[i].Payload = cloneBytes(event.Payload)
 	}
 	return out
+}
+
+func cloneMessageEventAppend(event metadb.MessageEventAppend) metadb.MessageEventAppend {
+	event.Payload = cloneBytes(event.Payload)
+	return event
 }
 
 func cloneMessageEventAppendResult(result metadb.MessageEventAppendResult) metadb.MessageEventAppendResult {

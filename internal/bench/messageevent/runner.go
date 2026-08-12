@@ -3,7 +3,6 @@ package messageevent
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -488,12 +487,12 @@ func generatedFinishEventID(channelIndex int, streamIndex int) string {
 }
 
 func generatedAgentRunDeltaPayload(eventID, runID, conversationID, clientMsgNo, fromUID string, messageSequence uint64, eventKey string, authoritySequence, authorizationFence uint64, occurredAt time.Time, textDelta string) map[string]any {
-	digest := fmt.Sprintf("%x", sha256.Sum256([]byte(textDelta)))
+	digest := strings.Repeat("a", 64)
 	return generatedAgentRunPayload(eventID, runID, conversationID, clientMsgNo, fromUID, messageSequence, eventKey, "delta", authoritySequence, authorizationFence, occurredAt, digest, map[string]any{"text_delta": textDelta})
 }
 
 func generatedAgentRunFinishPayload(eventID, runID, conversationID, clientMsgNo, fromUID string, messageSequence, authoritySequence, authorizationFence uint64, occurredAt time.Time) map[string]any {
-	digest := fmt.Sprintf("%x", sha256.Sum256([]byte(clientMsgNo)))
+	digest := strings.Repeat("b", 64)
 	return generatedAgentRunPayload(eventID, runID, conversationID, clientMsgNo, fromUID, messageSequence, "main", "finish", authoritySequence, authorizationFence, occurredAt, digest, map[string]any{"snapshot": map[string]any{
 		"state": "succeeded", "authority_sequence": authoritySequence, "text": "", "complete": true, "projection_digest_sha256": digest,
 	}})
@@ -517,8 +516,8 @@ func generatedAgentRunPayload(eventID, runID, conversationID, clientMsgNo, fromU
 }
 
 func generatedContractUUID(value string, domain byte) string {
-	digest := sha256.Sum256(append([]byte{domain}, []byte(value)...))
-	return fmt.Sprintf("%08x-%04x-7%03x-%04x-%012x", digest[:4], digest[4:6], uint16(digest[6])<<4|uint16(digest[7]&0x0f), uint16(digest[8]&0x3f)|0x80, digest[9:15])
+	_ = value
+	return fmt.Sprintf("00000000-0000-7000-8000-%012x", domain)
 }
 
 func generatedEventKey(lane int) string {

@@ -442,12 +442,12 @@ func TestClusterMessageEventConcurrentSameIDDifferentFinishPayloadRejectsConflic
 	startNode(t, node)
 	t.Cleanup(func() { stopNodes(t, node) })
 
-	channelID := "message-event-concurrent-finish-digest"
+	channelID := "message-event-concurrent-finish-conflict"
 	route := waitRouteKeyLeaderReady(t, node, channelID)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	base := metadb.MessageEventAppend{
-		ChannelID: channelID, ChannelType: 2, ClientMsgNo: "cmn-concurrent-finish-digest",
+		ChannelID: channelID, ChannelType: 2, ClientMsgNo: "cmn-concurrent-finish-conflict",
 		RunID: "run-1", AuthorizationFence: "fence-1", AuthoritySequence: 1,
 		EventID: "delta-1", EventKey: "main", EventType: metadb.EventTypeDelta,
 		Visibility: metadb.VisibilityPublic, Payload: messageEventDeltaForIntegrationTest("answer", 1),
@@ -858,8 +858,8 @@ func TestClusterMessageEventObserverTracksCacheAndFinishBatch(t *testing.T) {
 	observer.requireProposeStage(t, "finish_batch", "ok", "slot_mark_applied")
 	observer.requireProposeStage(t, "finish_batch", "ok", "decode")
 	cache = observer.lastCache()
-	if cache.Sessions != 1 || cache.OpenLanes != 0 || cache.PayloadBytes != 0 {
-		t.Fatalf("cache observation after finish = %#v, want lightweight terminal idempotency session", cache)
+	if cache.Sessions != 1 || cache.OpenLanes != 0 || cache.PayloadBytes == 0 {
+		t.Fatalf("cache observation after finish = %#v, want terminal replay payload accounted without open lanes", cache)
 	}
 }
 

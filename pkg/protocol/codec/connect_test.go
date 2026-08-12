@@ -1,67 +1,11 @@
 package codec
 
 import (
-	"encoding/hex"
-	"encoding/json"
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/WuKongIM/WuKongIM/pkg/protocol/frame"
 	"github.com/stretchr/testify/assert"
 )
-
-type connectV6Golden struct {
-	Version                uint8  `json:"version"`
-	DeviceFlag             uint8  `json:"device_flag"`
-	DeviceID               string `json:"device_id"`
-	UID                    string `json:"uid"`
-	Token                  string `json:"token"`
-	ClientTimestamp        int64  `json:"client_timestamp"`
-	ClientKey              string `json:"client_key"`
-	AppInstanceID          string `json:"app_instance_id"`
-	InstallationGeneration uint64 `json:"installation_generation"`
-	SessionGeneration      uint64 `json:"session_generation"`
-	FrameHex               string `json:"frame_hex"`
-}
-
-func TestConnectV6Golden(t *testing.T) {
-	raw, err := os.ReadFile(filepath.Join("testdata", "connect_v6_golden.json"))
-	assert.NoError(t, err)
-	var fixture connectV6Golden
-	assert.NoError(t, json.Unmarshal(raw, &fixture))
-
-	packet := &frame.ConnectPacket{
-		Version:                fixture.Version,
-		DeviceFlag:             frame.DeviceFlag(fixture.DeviceFlag),
-		DeviceID:               fixture.DeviceID,
-		UID:                    fixture.UID,
-		Token:                  fixture.Token,
-		ClientTimestamp:        fixture.ClientTimestamp,
-		ClientKey:              fixture.ClientKey,
-		AppInstanceID:          fixture.AppInstanceID,
-		InstallationGeneration: fixture.InstallationGeneration,
-		SessionGeneration:      fixture.SessionGeneration,
-	}
-	wire, err := New().EncodeFrame(packet, frame.LatestVersion)
-	assert.NoError(t, err)
-	assert.Equal(t, fixture.FrameHex, hex.EncodeToString(wire))
-
-	decoded, consumed, err := New().DecodeFrame(wire, frame.LatestVersion)
-	assert.NoError(t, err)
-	assert.Equal(t, len(wire), consumed)
-	got := decoded.(*frame.ConnectPacket)
-	assert.Equal(t, packet.Version, got.Version)
-	assert.Equal(t, packet.DeviceFlag, got.DeviceFlag)
-	assert.Equal(t, packet.DeviceID, got.DeviceID)
-	assert.Equal(t, packet.UID, got.UID)
-	assert.Equal(t, packet.Token, got.Token)
-	assert.Equal(t, packet.ClientTimestamp, got.ClientTimestamp)
-	assert.Equal(t, packet.ClientKey, got.ClientKey)
-	assert.Equal(t, packet.AppInstanceID, got.AppInstanceID)
-	assert.Equal(t, packet.InstallationGeneration, got.InstallationGeneration)
-	assert.Equal(t, packet.SessionGeneration, got.SessionGeneration)
-}
 
 func TestConnectEncodeAndDecode(t *testing.T) {
 

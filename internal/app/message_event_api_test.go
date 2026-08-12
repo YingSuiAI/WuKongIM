@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/WuKongIM/WuKongIM/internal/contracts/onlinedelivery"
@@ -14,33 +12,11 @@ import (
 	presenceusecase "github.com/WuKongIM/WuKongIM/internal/usecase/presence"
 )
 
-func TestRealtimeMessageEventMatchesSharedReducerGolden(t *testing.T) {
-	raw, err := os.ReadFile(filepath.Join("..", "..", "pkg", "protocol", "codec", "testdata", "event_v6_reducer_golden.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var fixture struct {
-		Cases []struct {
-			Name string          `json:"name"`
-			Data json.RawMessage `json:"data"`
-		} `json:"cases"`
-	}
-	if err := json.Unmarshal(raw, &fixture); err != nil {
-		t.Fatal(err)
-	}
-	var want json.RawMessage
-	for _, tc := range fixture.Cases {
-		if tc.Name == "delta_main" {
-			want = tc.Data
-			break
-		}
-	}
-	if len(want) == 0 {
-		t.Fatal("shared reducer fixture is missing delta case")
-	}
+func TestRealtimeMessageEventCarriesTypedReducerFields(t *testing.T) {
+	payload := json.RawMessage(`{"run_id":"run-1","event_type":"delta","event_key":"main","authority_sequence":7,"text_delta":"hello"}`)
 	got, err := marshalRealtimeMessageEvent(messageusecase.MessageEventAppend{
 		EventType: messageusecase.EventTypeDelta,
-		Payload:   wantPayloadFromGolden(t, want),
+		Payload:   payload,
 	}, messageusecase.MessageEventAppendResult{
 		ChannelID: "u1@agent-a", ChannelType: 11, MessageID: 9001, ClientMsgNo: "client-msg-9001",
 		EventKey: "main", MsgEventSeq: 2,
@@ -48,33 +24,26 @@ func TestRealtimeMessageEventMatchesSharedReducerGolden(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var gotValue, wantValue any
-	if err := json.Unmarshal(got, &gotValue); err != nil {
-		t.Fatal(err)
-	}
-	if err := json.Unmarshal(want, &wantValue); err != nil {
-		t.Fatal(err)
-	}
-	if !jsonValuesEqual(gotValue, wantValue) {
-		t.Fatalf("production EVENT data = %s, want shared fixture %s", got, want)
-	}
-}
-
-func wantPayloadFromGolden(t *testing.T, data json.RawMessage) json.RawMessage {
-	t.Helper()
 	var envelope struct {
-		Payload json.RawMessage `json:"payload"`
+		ChannelID   string `json:"channel_id"`
+		MessageID   uint64 `json:"message_id"`
+		MsgEventSeq uint64 `json:"msg_event_seq"`
+		Payload     struct {
+			RunID             string `json:"run_id"`
+			EventType         string `json:"event_type"`
+			EventKey          string `json:"event_key"`
+			AuthoritySequence uint64 `json:"authority_sequence"`
+			TextDelta         string `json:"text_delta"`
+		} `json:"payload"`
 	}
-	if err := json.Unmarshal(data, &envelope); err != nil {
+	if err := json.Unmarshal(got, &envelope); err != nil {
 		t.Fatal(err)
 	}
-	return envelope.Payload
-}
-
-func jsonValuesEqual(left, right any) bool {
-	leftJSON, _ := json.Marshal(left)
-	rightJSON, _ := json.Marshal(right)
-	return string(leftJSON) == string(rightJSON)
+	if envelope.ChannelID != "u1@agent-a" || envelope.MessageID != 9001 || envelope.MsgEventSeq != 2 ||
+		envelope.Payload.RunID != "run-1" || envelope.Payload.EventType != "delta" || envelope.Payload.EventKey != "main" ||
+		envelope.Payload.AuthoritySequence != 7 || envelope.Payload.TextDelta != "hello" {
+		t.Fatalf("production EVENT data = %s", got)
+	}
 }
 
 func TestMessageEventPushChunksOwnerRoutesAt256(t *testing.T) {

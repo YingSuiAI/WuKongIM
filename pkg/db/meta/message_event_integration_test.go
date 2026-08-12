@@ -210,7 +210,7 @@ func TestMessageEventAppendRejectsEventIDContentConflict(t *testing.T) {
 	ctx := context.Background()
 	shard := store.db.HashSlot(4)
 	base := MessageEventAppend{
-		ChannelID: "g1", ChannelType: 2, ClientMsgNo: "cmn-digest", RunID: "run-1", AuthorizationFence: "fence-1", AuthoritySequence: 1,
+		ChannelID: "g1", ChannelType: 2, ClientMsgNo: "cmn-conflict", RunID: "run-1", AuthorizationFence: "fence-1", AuthoritySequence: 1,
 		EventID: "evt-1", EventKey: "main", EventType: EventTypeDelta, Visibility: VisibilityPublic,
 		Payload: messageEventDeltaPayloadForTest("A", 1), OccurredAt: 10, UpdatedAt: 11,
 	}

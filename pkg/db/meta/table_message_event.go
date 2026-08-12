@@ -3,9 +3,7 @@ package meta
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/json"
-	"fmt"
 	"strings"
 
 	"github.com/WuKongIM/WuKongIM/pkg/db/internal/dberrors"
@@ -58,15 +56,21 @@ const (
 	messageEventCursorColumnRunID       uint16 = 6
 	messageEventCursorColumnTerminal    uint16 = 7
 
-	messageEventAppliedColumnChannelID   uint16 = 1
-	messageEventAppliedColumnChannelType uint16 = 2
-	messageEventAppliedColumnClientMsgNo uint16 = 3
-	messageEventAppliedColumnEventID     uint16 = 4
-	messageEventAppliedColumnEventKey    uint16 = 5
-	messageEventAppliedColumnMsgSeq      uint16 = 6
-	messageEventAppliedColumnStatus      uint16 = 7
-	messageEventAppliedColumnUpdatedAt   uint16 = 8
-	messageEventAppliedColumnDigest      uint16 = 9
+	messageEventAppliedColumnChannelID          uint16 = 1
+	messageEventAppliedColumnChannelType        uint16 = 2
+	messageEventAppliedColumnClientMsgNo        uint16 = 3
+	messageEventAppliedColumnEventID            uint16 = 4
+	messageEventAppliedColumnEventKey           uint16 = 5
+	messageEventAppliedColumnMsgSeq             uint16 = 6
+	messageEventAppliedColumnStatus             uint16 = 7
+	messageEventAppliedColumnUpdatedAt          uint16 = 8
+	messageEventAppliedColumnRunID              uint16 = 9
+	messageEventAppliedColumnAuthorizationFence uint16 = 10
+	messageEventAppliedColumnProjectionOnly     uint16 = 11
+	messageEventAppliedColumnEventType          uint16 = 12
+	messageEventAppliedColumnVisibility         uint16 = 13
+	messageEventAppliedColumnOccurredAt         uint16 = 14
+	messageEventAppliedColumnPayload            uint16 = 15
 )
 
 var messageEventStateTable = registerMetaTable(TableSpec[MessageEventState]{
@@ -179,14 +183,26 @@ var messageEventAppliedTable = registerMetaTable(TableSpec[MessageEventApplied]{
 		{ID: messageEventAppliedColumnMsgSeq, Name: "msg_event_seq", Type: schema.TypeUint64},
 		{ID: messageEventAppliedColumnStatus, Name: "status", Type: schema.TypeString},
 		{ID: messageEventAppliedColumnUpdatedAt, Name: "updated_at", Type: schema.TypeInt64},
-		{ID: messageEventAppliedColumnDigest, Name: "event_digest", Type: schema.TypeString},
+		{ID: messageEventAppliedColumnRunID, Name: "run_id", Type: schema.TypeString},
+		{ID: messageEventAppliedColumnAuthorizationFence, Name: "authorization_fence", Type: schema.TypeString},
+		{ID: messageEventAppliedColumnProjectionOnly, Name: "projection_only", Type: schema.TypeBool},
+		{ID: messageEventAppliedColumnEventType, Name: "event_type", Type: schema.TypeString},
+		{ID: messageEventAppliedColumnVisibility, Name: "visibility", Type: schema.TypeString},
+		{ID: messageEventAppliedColumnOccurredAt, Name: "occurred_at", Type: schema.TypeInt64},
+		{ID: messageEventAppliedColumnPayload, Name: "payload", Type: schema.TypeBytes},
 	},
 	Families: []schema.Family{{ID: messageEventAppliedPrimaryFamilyID, Name: "primary", Columns: []uint16{
 		messageEventAppliedColumnEventKey,
 		messageEventAppliedColumnMsgSeq,
 		messageEventAppliedColumnStatus,
 		messageEventAppliedColumnUpdatedAt,
-		messageEventAppliedColumnDigest,
+		messageEventAppliedColumnRunID,
+		messageEventAppliedColumnAuthorizationFence,
+		messageEventAppliedColumnProjectionOnly,
+		messageEventAppliedColumnEventType,
+		messageEventAppliedColumnVisibility,
+		messageEventAppliedColumnOccurredAt,
+		messageEventAppliedColumnPayload,
 	}}},
 	Primary: PrimarySpec[MessageEventApplied]{
 		IndexID:  messageEventAppliedPrimaryIndexID,
@@ -307,7 +323,7 @@ func (s *Shard) AppendMessageEvent(ctx context.Context, event MessageEventAppend
 		return MessageEventAppendResult{}, err
 	}
 	if appliedExists {
-		if appliedEvent.EventDigest != messageEventDigest(event) {
+		if !messageEventAppliedMatches(appliedEvent, event) {
 			return MessageEventAppendResult{}, dberrors.ErrConflict
 		}
 		return s.messageEventAppendResultFromApplied(event, appliedEvent)
@@ -387,7 +403,7 @@ func (b *Batch) AppendMessageEvent(hashSlot HashSlot, event MessageEventAppend) 
 		return MessageEventAppendResult{}, err
 	}
 	if appliedExists {
-		if appliedEvent.EventDigest != messageEventDigest(event) {
+		if !messageEventAppliedMatches(appliedEvent, event) {
 			return MessageEventAppendResult{}, dberrors.ErrConflict
 		}
 		return b.messageEventAppendResultFromApplied(hashSlot, event, appliedEvent)
@@ -625,16 +641,22 @@ func validMessageEventAuthoritySequence(cursor MessageEventCursor, exists bool, 
 
 func messageEventAppliedFromResult(event MessageEventAppend, result MessageEventAppendResult) MessageEventApplied {
 	return MessageEventApplied{
-		ChannelID:         event.ChannelID,
-		ChannelType:       event.ChannelType,
-		ClientMsgNo:       event.ClientMsgNo,
-		EventID:           event.EventID,
-		EventKey:          result.EventKey,
-		MsgEventSeq:       result.MsgEventSeq,
-		AuthoritySequence: event.AuthoritySequence,
-		Status:            result.Status,
-		EventDigest:       messageEventDigest(event),
-		UpdatedAt:         event.UpdatedAt,
+		ChannelID:          event.ChannelID,
+		ChannelType:        event.ChannelType,
+		ClientMsgNo:        event.ClientMsgNo,
+		EventID:            event.EventID,
+		EventKey:           result.EventKey,
+		MsgEventSeq:        result.MsgEventSeq,
+		AuthoritySequence:  event.AuthoritySequence,
+		Status:             result.Status,
+		RunID:              event.RunID,
+		AuthorizationFence: event.AuthorizationFence,
+		ProjectionOnly:     event.ProjectionOnly,
+		EventType:          event.EventType,
+		Visibility:         event.Visibility,
+		OccurredAt:         event.OccurredAt,
+		Payload:            cloneBytes(event.Payload),
+		UpdatedAt:          event.UpdatedAt,
 	}
 }
 
@@ -961,7 +983,17 @@ func encodeMessageEventAppliedValue(applied MessageEventApplied) []byte {
 	value = appendValueUint64(value, applied.AuthoritySequence)
 	value = appendValueString(value, applied.Status)
 	value = appendValueInt64(value, applied.UpdatedAt)
-	return appendValueString(value, applied.EventDigest)
+	value = appendValueString(value, applied.RunID)
+	value = appendValueString(value, applied.AuthorizationFence)
+	if applied.ProjectionOnly {
+		value = append(value, 1)
+	} else {
+		value = append(value, 0)
+	}
+	value = appendValueString(value, applied.EventType)
+	value = appendValueString(value, applied.Visibility)
+	value = appendValueInt64(value, applied.OccurredAt)
+	return appendValueBytes(value, applied.Payload)
 }
 
 func decodeMessageEventAppliedValue(channelID string, channelType int64, clientMsgNo string, eventID string, value []byte) (MessageEventApplied, error) {
@@ -985,7 +1017,32 @@ func decodeMessageEventAppliedValue(channelID string, channelType int64, clientM
 	if err != nil {
 		return MessageEventApplied{}, err
 	}
-	eventDigest, rest, err := readValueString(rest)
+	runID, rest, err := readValueString(rest)
+	if err != nil {
+		return MessageEventApplied{}, err
+	}
+	authorizationFence, rest, err := readValueString(rest)
+	if err != nil {
+		return MessageEventApplied{}, err
+	}
+	if len(rest) == 0 || rest[0] > 1 {
+		return MessageEventApplied{}, dberrors.ErrCorruptValue
+	}
+	projectionOnly := rest[0] == 1
+	rest = rest[1:]
+	eventType, rest, err := readValueString(rest)
+	if err != nil {
+		return MessageEventApplied{}, err
+	}
+	visibility, rest, err := readValueString(rest)
+	if err != nil {
+		return MessageEventApplied{}, err
+	}
+	occurredAt, rest, err := readValueInt64(rest)
+	if err != nil {
+		return MessageEventApplied{}, err
+	}
+	payload, rest, err := readValueBytes(rest)
 	if err != nil {
 		return MessageEventApplied{}, err
 	}
@@ -993,16 +1050,22 @@ func decodeMessageEventAppliedValue(channelID string, channelType int64, clientM
 		return MessageEventApplied{}, dberrors.ErrCorruptValue
 	}
 	return MessageEventApplied{
-		ChannelID:         channelID,
-		ChannelType:       channelType,
-		ClientMsgNo:       clientMsgNo,
-		EventID:           eventID,
-		EventKey:          eventKey,
-		MsgEventSeq:       msgEventSeq,
-		AuthoritySequence: authoritySequence,
-		Status:            status,
-		EventDigest:       eventDigest,
-		UpdatedAt:         updatedAt,
+		ChannelID:          channelID,
+		ChannelType:        channelType,
+		ClientMsgNo:        clientMsgNo,
+		EventID:            eventID,
+		EventKey:           eventKey,
+		MsgEventSeq:        msgEventSeq,
+		AuthoritySequence:  authoritySequence,
+		Status:             status,
+		RunID:              runID,
+		AuthorizationFence: authorizationFence,
+		ProjectionOnly:     projectionOnly,
+		EventType:          eventType,
+		Visibility:         visibility,
+		OccurredAt:         occurredAt,
+		Payload:            payload,
+		UpdatedAt:          updatedAt,
 	}, nil
 }
 
@@ -1098,17 +1161,58 @@ func messageEventAppliedEqual(left MessageEventApplied, leftExists bool, right M
 	if !leftExists {
 		return true
 	}
-	return left == right
+	return left.ChannelID == right.ChannelID &&
+		left.ChannelType == right.ChannelType &&
+		left.ClientMsgNo == right.ClientMsgNo &&
+		left.EventID == right.EventID &&
+		left.EventKey == right.EventKey &&
+		left.MsgEventSeq == right.MsgEventSeq &&
+		left.AuthoritySequence == right.AuthoritySequence &&
+		left.Status == right.Status &&
+		left.RunID == right.RunID &&
+		left.AuthorizationFence == right.AuthorizationFence &&
+		left.ProjectionOnly == right.ProjectionOnly &&
+		left.EventType == right.EventType &&
+		left.Visibility == right.Visibility &&
+		left.OccurredAt == right.OccurredAt &&
+		bytes.Equal(left.Payload, right.Payload) &&
+		left.UpdatedAt == right.UpdatedAt
 }
 
-func messageEventDigest(event MessageEventAppend) string {
-	h := sha256.New()
-	_, _ = fmt.Fprintf(h, "%s\x00%d\x00%s\x00%s\x00%s\x00%d\x00%t\x00%s\x00%s\x00%s\x00%d\x00", event.ChannelID, event.ChannelType, event.ClientMsgNo, event.RunID, event.AuthorizationFence, event.AuthoritySequence, event.ProjectionOnly, event.EventKey, event.EventType, event.Visibility, event.OccurredAt)
-	_, _ = h.Write(event.Payload)
-	return fmt.Sprintf("%x", h.Sum(nil))
+func messageEventAppliedMatches(applied MessageEventApplied, event MessageEventAppend) bool {
+	return applied.ChannelID == event.ChannelID &&
+		applied.ChannelType == event.ChannelType &&
+		applied.ClientMsgNo == event.ClientMsgNo &&
+		applied.EventID == event.EventID &&
+		applied.RunID == event.RunID &&
+		applied.AuthorizationFence == event.AuthorizationFence &&
+		applied.AuthoritySequence == event.AuthoritySequence &&
+		applied.ProjectionOnly == event.ProjectionOnly &&
+		applied.EventKey == event.EventKey &&
+		applied.EventType == event.EventType &&
+		applied.Visibility == event.Visibility &&
+		applied.OccurredAt == event.OccurredAt &&
+		bytes.Equal(applied.Payload, event.Payload)
 }
 
-// MessageEventDigest returns the stable content digest bound to event_id.
-func MessageEventDigest(event MessageEventAppend) string {
-	return messageEventDigest(event)
+// MessageEventAppliedMatches reports whether an idempotency row represents the exact normalized event.
+func MessageEventAppliedMatches(applied MessageEventApplied, event MessageEventAppend) bool {
+	return messageEventAppliedMatches(applied, event)
+}
+
+// MessageEventSameInput compares the normalized producer-owned fields of two appends.
+func MessageEventSameInput(left, right MessageEventAppend) bool {
+	return left.ChannelID == right.ChannelID &&
+		left.ChannelType == right.ChannelType &&
+		left.ClientMsgNo == right.ClientMsgNo &&
+		left.RunID == right.RunID &&
+		left.AuthorizationFence == right.AuthorizationFence &&
+		left.AuthoritySequence == right.AuthoritySequence &&
+		left.ProjectionOnly == right.ProjectionOnly &&
+		left.EventID == right.EventID &&
+		left.EventKey == right.EventKey &&
+		left.EventType == right.EventType &&
+		left.Visibility == right.Visibility &&
+		left.OccurredAt == right.OccurredAt &&
+		bytes.Equal(left.Payload, right.Payload)
 }

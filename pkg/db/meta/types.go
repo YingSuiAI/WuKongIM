@@ -144,8 +144,14 @@ type MessageEventApplied struct {
 	AuthoritySequence uint64
 	// Status is the lane status immediately after the event was applied.
 	Status string
-	// EventDigest binds the idempotency key to the original event content.
-	EventDigest string
+	// RunID and the remaining event fields bind event_id to the exact normalized input.
+	RunID              string
+	AuthorizationFence string
+	ProjectionOnly     bool
+	EventType          string
+	Visibility         string
+	OccurredAt         int64
+	Payload            []byte
 	// UpdatedAt records when this idempotency row was created.
 	UpdatedAt int64
 }
