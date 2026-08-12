@@ -3,9 +3,13 @@
 package message_event_stream
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"net/url"
 	"sort"
 	"strings"
@@ -18,7 +22,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const legacyStreamSetting = 1 << 1
+const (
+	messageEventServiceToken = "message-event-e2e-service"
+	messageEventRunID        = "run-e2e-1"
+	messageEventFence        = uint64(1)
+	messageEventOccurredAt   = int64(1700000000000)
+	messageEventDigest       = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+)
 
 type messageEventEnvelope struct {
 	Status int                 `json:"status"`
@@ -26,11 +36,11 @@ type messageEventEnvelope struct {
 }
 
 type messageEventPayload struct {
-	ClientMsgNo  string `json:"client_msg_no"`
-	EventKey     string `json:"event_key"`
-	EventID      string `json:"event_id"`
-	MsgEventSeq  uint64 `json:"msg_event_seq"`
-	StreamStatus string `json:"stream_status"`
+	ClientMsgNo string `json:"client_msg_no"`
+	EventKey    string `json:"event_key"`
+	EventID     string `json:"event_id"`
+	MsgEventSeq uint64 `json:"msg_event_seq"`
+	EventStatus string `json:"event_status"`
 }
 
 type channelMessageSyncPage struct {
@@ -38,12 +48,8 @@ type channelMessageSyncPage struct {
 }
 
 type channelMessageSyncItem struct {
-	ClientMsgNo string                `json:"client_msg_no"`
-	End         int                   `json:"end"`
-	EndReason   int                   `json:"end_reason"`
-	StreamData  []byte                `json:"stream_data"`
-	EventMeta   *messageEventMeta     `json:"event_meta"`
-	EventHint   *messageEventSyncHint `json:"event_sync_hint"`
+	ClientMsgNo string            `json:"client_msg_no"`
+	EventMeta   *messageEventMeta `json:"event_meta"`
 }
 
 type messageEventMeta struct {
@@ -61,12 +67,13 @@ type messageEventKeyMeta struct {
 	Status          string         `json:"status"`
 	LastMsgEventSeq uint64         `json:"last_msg_event_seq"`
 	Snapshot        map[string]any `json:"snapshot"`
-	EndReason       int            `json:"end_reason"`
 }
 
-type messageEventSyncHint struct {
-	ClientMsgNo     string `json:"client_msg_no"`
-	FromMsgEventSeq uint64 `json:"from_msg_event_seq"`
+type messageEventAnchor struct {
+	ChannelID   string
+	FromUID     string
+	ClientMsgNo string
+	MessageID   int64
 }
 
 type messageEventSlotLeaderTransferResponse struct {
@@ -79,7 +86,7 @@ type messageEventSlotLeaderTransferResponse struct {
 }
 
 func TestWukongIMMessageEventStreamBuffersUntilFinishAndExposesMetrics(t *testing.T) {
-	node := suite.New(t).StartSingleNodeCluster()
+	node := suite.New(t).StartSingleNodeCluster(suite.WithNodeConfigOverrides(1, map[string]string{"WK_API_SERVICE_TOKEN": messageEventServiceToken}))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -101,60 +108,34 @@ func TestWukongIMMessageEventStreamBuffersUntilFinishAndExposesMetrics(t *testin
 		"channel_id":    channelID,
 		"channel_type":  frame.ChannelTypeGroup,
 		"client_msg_no": clientMsgNo,
-		"setting":       legacyStreamSetting,
-		"payload":       base64.StdEncoding.EncodeToString([]byte("stream base")),
+		"payload":       base64.StdEncoding.EncodeToString([]byte(`{"type":1,"run_id":"` + messageEventRunID + `","authorization_fence":1}`)),
 	})
 	require.NoError(t, err, node.DumpDiagnostics())
 	require.Equal(t, uint8(frame.ReasonSuccess), send.Reason, node.DumpDiagnostics())
 	require.NotZero(t, send.MessageSeq, node.DumpDiagnostics())
+	anchor := messageEventAnchor{ChannelID: channelID, FromUID: aliceUID, ClientMsgNo: clientMsgNo, MessageID: send.MessageID}
 
-	mainDelta := postMessageEvent(t, ctx, *node, map[string]any{
-		"channel_id":    channelID,
-		"channel_type":  frame.ChannelTypeGroup,
-		"from_uid":      aliceUID,
-		"client_msg_no": clientMsgNo,
-		"event_id":      "evt-main-delta",
-		"event_key":     "main",
-		"event_type":    "stream.delta",
-		"payload":       map[string]any{"kind": "text", "delta": "hello "},
-	})
-	require.Equal(t, uint64(0), mainDelta.Data.MsgEventSeq, node.DumpDiagnostics())
-	require.Equal(t, "open", mainDelta.Data.StreamStatus, node.DumpDiagnostics())
+	mainDelta := postMessageEvent(t, ctx, *node, anchor, "evt-main-delta", "main", "delta", 1, "hello ", "running")
+	require.Equal(t, uint64(1), mainDelta.Data.MsgEventSeq, node.DumpDiagnostics())
+	require.Equal(t, "open", mainDelta.Data.EventStatus, node.DumpDiagnostics())
 	suite.RequireMetricAtLeastEventually(t, *node, "wukongim_message_event_append_total", map[string]string{
 		"path":       "cache",
-		"event_type": "stream.delta",
+		"event_type": "delta",
 		"result":     "ok",
 	}, 1)
 	suite.RequireMetricAtLeastEventually(t, *node, "wukongim_message_event_stream_cache_sessions", nil, 1)
 	suite.RequireMetricAtLeastEventually(t, *node, "wukongim_message_event_stream_cache_open_lanes", nil, 1)
 
-	toolDelta := postMessageEvent(t, ctx, *node, map[string]any{
-		"channel_id":    channelID,
-		"channel_type":  frame.ChannelTypeGroup,
-		"from_uid":      aliceUID,
-		"client_msg_no": clientMsgNo,
-		"event_id":      "evt-tool-delta",
-		"event_key":     "tool",
-		"event_type":    "stream.delta",
-		"payload":       map[string]any{"kind": "text", "delta": "lookup"},
-	})
-	require.Equal(t, uint64(0), toolDelta.Data.MsgEventSeq, node.DumpDiagnostics())
+	toolDelta := postMessageEvent(t, ctx, *node, anchor, "evt-tool-delta", "tool", "delta", 2, "lookup", "running")
+	require.Equal(t, uint64(2), toolDelta.Data.MsgEventSeq, node.DumpDiagnostics())
 	suite.RequireMetricAtLeastEventually(t, *node, "wukongim_message_event_stream_cache_open_lanes", nil, 2)
 
-	finish := postMessageEvent(t, ctx, *node, map[string]any{
-		"channel_id":    channelID,
-		"channel_type":  frame.ChannelTypeGroup,
-		"from_uid":      aliceUID,
-		"client_msg_no": clientMsgNo,
-		"event_id":      "evt-finish",
-		"event_type":    "stream.finish",
-		"payload":       map[string]any{"end_reason": 3},
-	})
+	finish := postMessageEvent(t, ctx, *node, anchor, "evt-finish", "main", "finish", 3, "hello ", "succeeded")
 	require.NotZero(t, finish.Data.MsgEventSeq, node.DumpDiagnostics())
-	require.Equal(t, "closed", finish.Data.StreamStatus, node.DumpDiagnostics())
+	require.Equal(t, "closed", finish.Data.EventStatus, node.DumpDiagnostics())
 	suite.RequireMetricAtLeastEventually(t, *node, "wukongim_message_event_append_total", map[string]string{
 		"path":       "finish_batch",
-		"event_type": "stream.finish",
+		"event_type": "finish",
 		"result":     "ok",
 	}, 1)
 	suite.RequireMetricAtLeastEventually(t, *node, "wukongim_message_event_propose_total", map[string]string{
@@ -164,17 +145,12 @@ func TestWukongIMMessageEventStreamBuffersUntilFinishAndExposesMetrics(t *testin
 	suite.RequireMetricAtLeastEventually(t, *node, "wukongim_message_event_propose_batch_events_sum", map[string]string{
 		"path":   "finish_batch",
 		"result": "ok",
-	}, 3)
-	requireMetricEqualsEventually(t, *node, "wukongim_message_event_stream_cache_sessions", nil, 0)
+	}, 2)
+	requireMetricEqualsEventually(t, *node, "wukongim_message_event_stream_cache_sessions", nil, 1)
 	requireMetricEqualsEventually(t, *node, "wukongim_message_event_stream_cache_open_lanes", nil, 0)
 
 	restartSingleNodeCluster(t, node)
 	msg := requireStreamMessageEventMetaEventually(t, *node, aliceUID, channelID, clientMsgNo, send.MessageSeq, 10*time.Second)
-	require.NotNil(t, msg.EventHint, node.DumpDiagnostics())
-	require.Equal(t, clientMsgNo, msg.EventHint.ClientMsgNo, node.DumpDiagnostics())
-	require.Equal(t, 1, msg.End, node.DumpDiagnostics())
-	require.Equal(t, 3, msg.EndReason, node.DumpDiagnostics())
-	require.Contains(t, string(msg.StreamData), "hello ", node.DumpDiagnostics())
 	require.NotNil(t, msg.EventMeta, node.DumpDiagnostics())
 	require.True(t, msg.EventMeta.HasEvents, node.DumpDiagnostics())
 	require.True(t, msg.EventMeta.Completed, node.DumpDiagnostics())
@@ -185,8 +161,13 @@ func TestWukongIMMessageEventStreamBuffersUntilFinishAndExposesMetrics(t *testin
 	requireEventLane(t, msg.EventMeta, "tool", "closed", "lookup")
 }
 
-func TestWukongIMMessageEventStreamFollowerForwardAndLeaderChangeFailClosed(t *testing.T) {
-	cluster := suite.New(t).StartThreeNodeCluster(suite.WithManagerHTTP())
+func TestWukongIMMessageEventStreamFollowerForwardAndLeaderChangeSnapshotRecovery(t *testing.T) {
+	cluster := suite.New(t).StartThreeNodeCluster(
+		suite.WithManagerHTTP(),
+		suite.WithNodeConfigOverrides(1, map[string]string{"WK_API_SERVICE_TOKEN": messageEventServiceToken}),
+		suite.WithNodeConfigOverrides(2, map[string]string{"WK_API_SERVICE_TOKEN": messageEventServiceToken}),
+		suite.WithNodeConfigOverrides(3, map[string]string{"WK_API_SERVICE_TOKEN": messageEventServiceToken}),
+	)
 	readyCtx, cancelReady := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancelReady()
 	require.NoError(t, cluster.WaitClusterReady(readyCtx), cluster.DumpDiagnostics())
@@ -217,21 +198,21 @@ func TestWukongIMMessageEventStreamFollowerForwardAndLeaderChangeFailClosed(t *t
 		"channel_id":    channelID,
 		"channel_type":  frame.ChannelTypeGroup,
 		"client_msg_no": clientMsgNo,
-		"setting":       legacyStreamSetting,
-		"payload":       base64.StdEncoding.EncodeToString([]byte("stream base")),
+		"payload":       base64.StdEncoding.EncodeToString([]byte(`{"type":1,"run_id":"` + messageEventRunID + `","authorization_fence":1}`)),
 	})
 	require.NoError(t, err, cluster.DumpDiagnostics())
 	require.Equal(t, uint8(frame.ReasonSuccess), send.Reason, cluster.DumpDiagnostics())
+	anchor := messageEventAnchor{ChannelID: channelID, FromUID: aliceUID, ClientMsgNo: clientMsgNo, MessageID: send.MessageID}
 
-	postStreamDeltas(t, ctx, *ingress, channelID, aliceUID, clientMsgNo, "evt-main-delta", "evt-tool-delta")
+	postStreamDeltas(t, ctx, *ingress, anchor, "evt-main-delta", "evt-tool-delta", 1)
 	suite.RequireMetricAtLeastEventually(t, *ingress, "wukongim_message_event_append_total", map[string]string{
 		"path":       "forward",
-		"event_type": "stream.delta",
+		"event_type": "delta",
 		"result":     "ok",
 	}, 2)
 	suite.RequireMetricAtLeastEventually(t, *leaderNode, "wukongim_message_event_append_total", map[string]string{
 		"path":       "cache",
-		"event_type": "stream.delta",
+		"event_type": "delta",
 		"result":     "ok",
 	}, 2)
 	suite.RequireMetricAtLeastEventually(t, *leaderNode, "wukongim_message_event_stream_cache_open_lanes", nil, 2)
@@ -250,35 +231,11 @@ func TestWukongIMMessageEventStreamFollowerForwardAndLeaderChangeFailClosed(t *t
 	requireMetricEqualsEventually(t, *leaderNode, "wukongim_message_event_stream_cache_sessions", nil, 0)
 	requireMetricEqualsEventually(t, *leaderNode, "wukongim_message_event_stream_cache_open_lanes", nil, 0)
 
-	err = postMessageEventError(ctx, *finishIngress, map[string]any{
-		"channel_id":    channelID,
-		"channel_type":  frame.ChannelTypeGroup,
-		"from_uid":      aliceUID,
-		"client_msg_no": clientMsgNo,
-		"event_id":      "evt-finish-before-replay",
-		"event_type":    "stream.finish",
-		"payload":       map[string]any{"end_reason": 3},
-	})
-	require.Error(t, err, cluster.DumpDiagnostics())
-	require.Contains(t, err.Error(), "message event stream cache miss", cluster.DumpDiagnostics())
-	suite.RequireMetricAtLeastEventually(t, *newLeaderNode, "wukongim_message_event_append_total", map[string]string{
-		"path":       "finish_batch",
-		"event_type": "stream.finish",
-		"result":     "cache_miss",
-	}, 1)
-
-	postStreamDeltas(t, ctx, *finishIngress, channelID, aliceUID, clientMsgNo, "evt-main-delta-replay", "evt-tool-delta-replay")
-	finish := postMessageEvent(t, ctx, *finishIngress, map[string]any{
-		"channel_id":    channelID,
-		"channel_type":  frame.ChannelTypeGroup,
-		"from_uid":      aliceUID,
-		"client_msg_no": clientMsgNo,
-		"event_id":      "evt-finish",
-		"event_type":    "stream.finish",
-		"payload":       map[string]any{"end_reason": 3},
-	})
+	postMessageEvent(t, ctx, *finishIngress, anchor, "evt-main-snapshot-replay", "main", "snapshot", 3, "hello ", "running")
+	postMessageEvent(t, ctx, *finishIngress, anchor, "evt-tool-snapshot-replay", "tool", "snapshot", 4, "lookup", "running")
+	finish := postMessageEvent(t, ctx, *finishIngress, anchor, "evt-finish", "main", "finish", 5, "hello ", "succeeded")
 	require.NotZero(t, finish.Data.MsgEventSeq, cluster.DumpDiagnostics())
-	require.Equal(t, "closed", finish.Data.StreamStatus, cluster.DumpDiagnostics())
+	require.Equal(t, "closed", finish.Data.EventStatus, cluster.DumpDiagnostics())
 	suite.RequireMetricAtLeastEventually(t, *newLeaderNode, "wukongim_message_event_propose_total", map[string]string{
 		"path":   "finish_batch",
 		"result": "ok",
@@ -286,60 +243,109 @@ func TestWukongIMMessageEventStreamFollowerForwardAndLeaderChangeFailClosed(t *t
 	suite.RequireMetricAtLeastEventually(t, *newLeaderNode, "wukongim_message_event_propose_batch_events_sum", map[string]string{
 		"path":   "finish_batch",
 		"result": "ok",
-	}, 3)
+	}, 2)
 	requireMetricEqualsEventually(t, *newLeaderNode, "wukongim_message_event_stream_cache_open_lanes", nil, 0)
 
-	msg := requireStreamMessageEventMetaEventually(t, *finishIngress, aliceUID, channelID, clientMsgNo, send.MessageSeq, 15*time.Second)
-	require.NotNil(t, msg.EventMeta, cluster.DumpDiagnostics())
-	require.True(t, msg.EventMeta.Completed, cluster.DumpDiagnostics())
-	require.Equal(t, 2, msg.EventMeta.EventCount, cluster.DumpDiagnostics())
-	requireEventLane(t, msg.EventMeta, "main", "closed", "hello ")
-	requireEventLane(t, msg.EventMeta, "tool", "closed", "lookup")
+	duplicate := postMessageEvent(t, ctx, *finishIngress, anchor, "evt-finish", "main", "finish", 5, "hello ", "succeeded")
+	require.Equal(t, finish.Data.MsgEventSeq, duplicate.Data.MsgEventSeq, cluster.DumpDiagnostics())
+	require.Equal(t, "closed", duplicate.Data.EventStatus, cluster.DumpDiagnostics())
 }
 
-func postMessageEvent(t *testing.T, ctx context.Context, node suite.StartedNode, body map[string]any) messageEventEnvelope {
+func postMessageEvent(t *testing.T, ctx context.Context, node suite.StartedNode, anchor messageEventAnchor, eventID, eventKey, eventType string, authoritySequence uint64, text, state string) messageEventEnvelope {
 	t.Helper()
 
+	payload := map[string]any{
+		"event_id": eventID, "run_id": messageEventRunID,
+		"base_message": map[string]any{
+			"conversation_id": "019c0000-0000-7000-8000-000000000001",
+			"message_id":      "019c0000-0000-7000-8000-000000000002",
+			"client_msg_id":   anchor.ClientMsgNo, "committed_message_ref": "agent-run.e2e",
+			"message_sequence": 1, "source_principal_id": anchor.FromUID,
+		},
+		"event_key": eventKey, "event_type": eventType, "authority_sequence": authoritySequence,
+		"projection_digest_sha256": messageEventDigest,
+		"authorization_fence":      messageEventFence,
+		"occurred_at":              "2023-11-14T22:13:20Z",
+	}
+	if eventType == "delta" {
+		payload["text_delta"] = text
+	} else {
+		payload["snapshot"] = map[string]any{
+			"state": state, "authority_sequence": authoritySequence, "text": text, "complete": eventType == "finish",
+			"projection_digest_sha256": messageEventDigest,
+		}
+	}
+	body := map[string]any{
+		"channel_id": anchor.ChannelID, "channel_type": frame.ChannelTypeGroup, "from_uid": anchor.FromUID,
+		"message_id": anchor.MessageID, "client_msg_no": anchor.ClientMsgNo, "run_id": messageEventRunID,
+		"authorization_fence": messageEventFence, "authority_sequence": authoritySequence,
+		"event_id": eventID, "event_key": eventKey, "event_type": eventType, "visibility": "public",
+		"occurred_at": messageEventOccurredAt, "payload": payload,
+	}
 	var out messageEventEnvelope
-	_, err := suite.PostJSON(ctx, "http://"+node.APIAddr()+"/message/event", body, &out)
+	err := postServiceJSON(ctx, "http://"+node.APIAddr()+"/message/events:append", body, &out)
 	require.NoError(t, err, node.DumpDiagnostics())
 	require.Equal(t, 200, out.Status, node.DumpDiagnostics())
 	return out
 }
 
-func postMessageEventError(ctx context.Context, node suite.StartedNode, body map[string]any) error {
+func postMessageEventError(ctx context.Context, node suite.StartedNode, anchor messageEventAnchor, eventID, eventType string, authoritySequence uint64) error {
 	var out messageEventEnvelope
-	_, err := suite.PostJSON(ctx, "http://"+node.APIAddr()+"/message/event", body, &out)
-	return err
+	payload := map[string]any{
+		"event_id": eventID, "run_id": messageEventRunID,
+		"base_message": map[string]any{
+			"conversation_id": "019c0000-0000-7000-8000-000000000001", "message_id": "019c0000-0000-7000-8000-000000000002",
+			"client_msg_id": anchor.ClientMsgNo, "committed_message_ref": "agent-run.e2e", "message_sequence": 1, "source_principal_id": anchor.FromUID,
+		},
+		"event_key": "main", "event_type": eventType, "authority_sequence": authoritySequence,
+		"projection_digest_sha256": messageEventDigest, "authorization_fence": messageEventFence, "occurred_at": "2023-11-14T22:13:20Z",
+		"snapshot": map[string]any{"state": "succeeded", "authority_sequence": authoritySequence, "text": "hello ", "complete": true, "projection_digest_sha256": messageEventDigest},
+	}
+	body := map[string]any{
+		"channel_id": anchor.ChannelID, "channel_type": frame.ChannelTypeGroup, "from_uid": anchor.FromUID,
+		"message_id": anchor.MessageID, "client_msg_no": anchor.ClientMsgNo, "run_id": messageEventRunID,
+		"authorization_fence": messageEventFence, "authority_sequence": authoritySequence,
+		"event_id": eventID, "event_key": "main", "event_type": eventType, "visibility": "public",
+		"occurred_at": messageEventOccurredAt, "payload": payload,
+	}
+	return postServiceJSON(ctx, "http://"+node.APIAddr()+"/message/events:append", body, &out)
 }
 
-func postStreamDeltas(t *testing.T, ctx context.Context, node suite.StartedNode, channelID, fromUID, clientMsgNo, mainEventID, toolEventID string) {
+func postStreamDeltas(t *testing.T, ctx context.Context, node suite.StartedNode, anchor messageEventAnchor, mainEventID, toolEventID string, startSequence uint64) {
 	t.Helper()
 
-	mainDelta := postMessageEvent(t, ctx, node, map[string]any{
-		"channel_id":    channelID,
-		"channel_type":  frame.ChannelTypeGroup,
-		"from_uid":      fromUID,
-		"client_msg_no": clientMsgNo,
-		"event_id":      mainEventID,
-		"event_key":     "main",
-		"event_type":    "stream.delta",
-		"payload":       map[string]any{"kind": "text", "delta": "hello "},
-	})
-	require.Equal(t, uint64(0), mainDelta.Data.MsgEventSeq, node.DumpDiagnostics())
-	require.Equal(t, "open", mainDelta.Data.StreamStatus, node.DumpDiagnostics())
+	mainDelta := postMessageEvent(t, ctx, node, anchor, mainEventID, "main", "delta", startSequence, "hello ", "running")
+	require.NotZero(t, mainDelta.Data.MsgEventSeq, node.DumpDiagnostics())
+	require.Equal(t, "open", mainDelta.Data.EventStatus, node.DumpDiagnostics())
 
-	toolDelta := postMessageEvent(t, ctx, node, map[string]any{
-		"channel_id":    channelID,
-		"channel_type":  frame.ChannelTypeGroup,
-		"from_uid":      fromUID,
-		"client_msg_no": clientMsgNo,
-		"event_id":      toolEventID,
-		"event_key":     "tool",
-		"event_type":    "stream.delta",
-		"payload":       map[string]any{"kind": "text", "delta": "lookup"},
-	})
-	require.Equal(t, uint64(0), toolDelta.Data.MsgEventSeq, node.DumpDiagnostics())
+	toolDelta := postMessageEvent(t, ctx, node, anchor, toolEventID, "tool", "delta", startSequence+1, "lookup", "running")
+	require.NotZero(t, toolDelta.Data.MsgEventSeq, node.DumpDiagnostics())
+}
+
+func postServiceJSON(ctx context.Context, url string, body, out any) error {
+	data, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+messageEventServiceToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	responseBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode/100 != 2 {
+		return fmt.Errorf("POST %s returned %d: %s", url, resp.StatusCode, strings.TrimSpace(string(responseBody)))
+	}
+	return json.Unmarshal(responseBody, out)
 }
 
 func restartSingleNodeCluster(t *testing.T, node *suite.StartedNode) {
@@ -396,7 +402,7 @@ func requireStreamMessageEventMetaEventually(t *testing.T, node suite.StartedNod
 			"channel_type":       frame.ChannelTypeGroup,
 			"start_message_seq":  startSeq,
 			"limit":              10,
-			"event_summary_mode": "full",
+			"include_event_meta": 1,
 		}, &page)
 		if err == nil {
 			lastPage = page

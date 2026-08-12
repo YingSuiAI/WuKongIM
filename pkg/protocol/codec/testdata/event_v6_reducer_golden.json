@@ -1,0 +1,65 @@
+{
+  "version": 4,
+  "sequence_scope": {
+    "authority_sequence": "platform_anchor_run_ledger",
+    "msg_event_seq": "wukong_anchor_run_transport"
+  },
+  "event_types": ["open", "delta", "snapshot", "finish"],
+  "cases": [
+    {
+      "name": "open_main",
+      "event_id": "019d0000-0000-7000-8000-000000000101",
+      "frame_type": "open",
+      "timestamp": 1786521599900,
+      "data": {"channel_id":"u1@agent-a","channel_type":11,"message_id":9001,"client_msg_no":"client-msg-9001","msg_event_seq":1,"payload":{"event_id":"019d0000-0000-7000-8000-000000000101","run_id":"019d0000-0000-7000-8000-000000000100","base_message":{"conversation_id":"019d0000-0000-7000-8000-000000000001","message_id":"019d0000-0000-7000-8000-000000000002","client_msg_id":"client-msg-9001","committed_message_ref":"agent-run.019d0000-0000-7000-8000-000000000100","message_sequence":42,"source_principal_id":"019d0000-0000-7000-8000-000000000003"},"event_key":"main","event_type":"open","authority_sequence":100,"snapshot":{"state":"running","authority_sequence":100,"text":"","complete":false,"projection_digest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"projection_digest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","authorization_fence":7,"occurred_at":"2026-08-12T15:59:59.9Z"}},
+      "previous_sequence": 0,
+      "expect": {"action":"apply","watermark_key":"9001:019d0000-0000-7000-8000-000000000100","reducer_key":"019d0000-0000-7000-8000-000000000100:main","sequence":1,"authority_sequence":100,"run_terminal":false}
+    },
+    {
+      "name": "delta_main",
+      "event_id": "019d0000-0000-7000-8000-000000000102",
+      "frame_type": "delta",
+      "timestamp": 1786521600000,
+      "data": {"channel_id":"u1@agent-a","channel_type":11,"message_id":9001,"client_msg_no":"client-msg-9001","msg_event_seq":2,"payload":{"event_id":"019d0000-0000-7000-8000-000000000102","run_id":"019d0000-0000-7000-8000-000000000100","base_message":{"conversation_id":"019d0000-0000-7000-8000-000000000001","message_id":"019d0000-0000-7000-8000-000000000002","client_msg_id":"client-msg-9001","committed_message_ref":"agent-run.019d0000-0000-7000-8000-000000000100","message_sequence":42,"source_principal_id":"019d0000-0000-7000-8000-000000000003"},"event_key":"main","event_type":"delta","authority_sequence":101,"text_delta":"hello","projection_digest_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","authorization_fence":7,"occurred_at":"2026-08-12T16:00:00Z"}},
+      "previous_sequence": 1,
+      "expect": {"action":"apply","watermark_key":"9001:019d0000-0000-7000-8000-000000000100","reducer_key":"019d0000-0000-7000-8000-000000000100:main","sequence":2,"authority_sequence":101,"run_terminal":false}
+    },
+    {
+      "name": "gap",
+      "event_id": "019d0000-0000-7000-8000-000000000104",
+      "frame_type": "delta",
+      "timestamp": 1786521600200,
+      "data": {"channel_id":"u1@agent-a","channel_type":11,"message_id":9001,"client_msg_no":"client-msg-9001","msg_event_seq":4,"payload":{"event_id":"019d0000-0000-7000-8000-000000000104","run_id":"019d0000-0000-7000-8000-000000000100","base_message":{"conversation_id":"019d0000-0000-7000-8000-000000000001","message_id":"019d0000-0000-7000-8000-000000000002","client_msg_id":"client-msg-9001","committed_message_ref":"agent-run.019d0000-0000-7000-8000-000000000100","message_sequence":42,"source_principal_id":"019d0000-0000-7000-8000-000000000003"},"event_key":"main","event_type":"delta","authority_sequence":103,"text_delta":"gap","projection_digest_sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","authorization_fence":7,"occurred_at":"2026-08-12T16:00:00.2Z"}},
+      "previous_sequence": 2,
+      "expect": {"action":"snapshot_recovery","watermark_key":"9001:019d0000-0000-7000-8000-000000000100","reducer_key":"019d0000-0000-7000-8000-000000000100:main","sequence":4,"authority_sequence":103,"run_terminal":false}
+    },
+    {
+      "name": "duplicate",
+      "event_id": "019d0000-0000-7000-8000-000000000102",
+      "frame_type": "delta",
+      "timestamp": 1786521600300,
+      "data": {"channel_id":"u1@agent-a","channel_type":11,"message_id":9001,"client_msg_no":"client-msg-9001","msg_event_seq":2,"payload":{"event_id":"019d0000-0000-7000-8000-000000000102","run_id":"019d0000-0000-7000-8000-000000000100","base_message":{"conversation_id":"019d0000-0000-7000-8000-000000000001","message_id":"019d0000-0000-7000-8000-000000000002","client_msg_id":"client-msg-9001","committed_message_ref":"agent-run.019d0000-0000-7000-8000-000000000100","message_sequence":42,"source_principal_id":"019d0000-0000-7000-8000-000000000003"},"event_key":"main","event_type":"delta","authority_sequence":101,"text_delta":"hello","projection_digest_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","authorization_fence":7,"occurred_at":"2026-08-12T16:00:00Z"}},
+      "previous_sequence": 2,
+      "expect": {"action":"ignore_duplicate","watermark_key":"9001:019d0000-0000-7000-8000-000000000100","reducer_key":"019d0000-0000-7000-8000-000000000100:main","sequence":2,"authority_sequence":101,"run_terminal":false}
+    },
+    {
+      "name": "snapshot_recovery",
+      "event_id": "019d0000-0000-7000-8000-000000000105",
+      "frame_type": "snapshot",
+      "timestamp": 1786521600400,
+      "data": {"channel_id":"u1@agent-a","channel_type":11,"message_id":9001,"client_msg_no":"client-msg-9001","msg_event_seq":4,"payload":{"event_id":"019d0000-0000-7000-8000-000000000105","run_id":"019d0000-0000-7000-8000-000000000100","base_message":{"conversation_id":"019d0000-0000-7000-8000-000000000001","message_id":"019d0000-0000-7000-8000-000000000002","client_msg_id":"client-msg-9001","committed_message_ref":"agent-run.019d0000-0000-7000-8000-000000000100","message_sequence":42,"source_principal_id":"019d0000-0000-7000-8000-000000000003"},"event_key":"main","event_type":"snapshot","authority_sequence":103,"snapshot":{"state":"running","authority_sequence":103,"text":"hello world","complete":false,"projection_digest_sha256":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"},"projection_digest_sha256":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","authorization_fence":7,"occurred_at":"2026-08-12T16:00:00.4Z"}},
+      "previous_sequence": 2,
+      "expect": {"action":"apply_snapshot","watermark_key":"9001:019d0000-0000-7000-8000-000000000100","reducer_key":"019d0000-0000-7000-8000-000000000100:main","sequence":4,"authority_sequence":103,"run_terminal":false}
+    },
+    {
+      "name": "finish_on_main",
+      "event_id": "019d0000-0000-7000-8000-000000000106",
+      "frame_type": "finish",
+      "timestamp": 1786521600500,
+      "data": {"channel_id":"u1@agent-a","channel_type":11,"message_id":9001,"client_msg_no":"client-msg-9001","msg_event_seq":5,"payload":{"event_id":"019d0000-0000-7000-8000-000000000106","run_id":"019d0000-0000-7000-8000-000000000100","base_message":{"conversation_id":"019d0000-0000-7000-8000-000000000001","message_id":"019d0000-0000-7000-8000-000000000002","client_msg_id":"client-msg-9001","committed_message_ref":"agent-run.019d0000-0000-7000-8000-000000000100","message_sequence":42,"source_principal_id":"019d0000-0000-7000-8000-000000000003"},"event_key":"main","event_type":"finish","authority_sequence":104,"snapshot":{"state":"succeeded","authority_sequence":104,"text":"hello world","complete":true,"projection_digest_sha256":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"},"projection_digest_sha256":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","authorization_fence":7,"occurred_at":"2026-08-12T16:00:00.5Z"}},
+      "previous_sequence": 4,
+      "expect": {"action":"apply","watermark_key":"9001:019d0000-0000-7000-8000-000000000100","reducer_key":"019d0000-0000-7000-8000-000000000100:main","sequence":5,"authority_sequence":104,"run_terminal":true}
+    }
+  ],
+  "unknown_wkproto_frame": {"fixed_header_hex":"f000","expect":"ignore_without_state_change"}
+}

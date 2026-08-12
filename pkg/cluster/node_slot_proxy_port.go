@@ -180,11 +180,11 @@ func (n *Node) GetChannelMetadataAuthoritative(ctx context.Context, channelID st
 }
 
 // GetDeviceMetadataAuthoritative reads one device credential from the current Slot leader.
-func (n *Node) GetDeviceMetadataAuthoritative(ctx context.Context, uid string, deviceFlag int64) (metadb.Device, error) {
+func (n *Node) GetDeviceMetadataAuthoritative(ctx context.Context, uid string, deviceFlag int64, deviceID, appInstanceID string) (metadb.Device, error) {
 	if n == nil || n.defaultSlotProxy == nil {
 		return metadb.Device{}, ErrNotStarted
 	}
-	return n.defaultSlotProxy.GetDevice(ctx, uid, deviceFlag)
+	return n.defaultSlotProxy.GetDevice(ctx, uid, deviceFlag, deviceID, appInstanceID)
 }
 
 // CreateChannelMetadataStrict applies a create-only mutation at the Slot leader.

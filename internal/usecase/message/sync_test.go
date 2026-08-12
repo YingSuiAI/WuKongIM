@@ -294,14 +294,15 @@ func TestSyncChannelMessagesEnrichesFullEventMeta(t *testing.T) {
 				ChannelID:       "g1",
 				ChannelType:     2,
 				ClientMsgNo:     "cmn-1",
-				EventKey:        EventKeyFinish,
+				EventKey:        "run-1:main",
+				LastEventType:   EventTypeFinish,
 				Status:          EventStatusClosed,
 				LastMsgEventSeq: 4,
 			},
 		},
 	}}
 	reader := &recordingChannelMessageReader{page: ChannelMessagePage{Messages: []SyncedMessage{
-		{Setting: legacySettingStream, ChannelID: "g1", ChannelType: 2, ClientMsgNo: "cmn-1", MessageID: 9, Payload: []byte("base")},
+		{ChannelID: "g1", ChannelType: 2, ClientMsgNo: "cmn-1", MessageID: 9, Payload: []byte("base")},
 	}}}
 	app := New(Options{Reader: reader, Memberships: liveSyncMembershipStore(), MembershipAuthority: allowLiveMembershipAuthority(), EventStore: store})
 
@@ -309,7 +310,7 @@ func TestSyncChannelMessagesEnrichesFullEventMeta(t *testing.T) {
 		LoginUID:         "u1",
 		ChannelID:        "g1",
 		ChannelType:      2,
-		EventSummaryMode: "full",
+		IncludeEventMeta: true,
 	})
 
 	if err != nil {
@@ -325,11 +326,8 @@ func TestSyncChannelMessagesEnrichesFullEventMeta(t *testing.T) {
 		t.Fatalf("messages = %#v, want one message", result.Messages)
 	}
 	msg := result.Messages[0]
-	if string(msg.Payload) != "base" || string(msg.StreamData) != "hello" || msg.End != 1 || msg.EndReason != 3 || msg.Error != "" {
-		t.Fatalf("stream fields = payload %q stream %q end %d reason %d error %q", msg.Payload, msg.StreamData, msg.End, msg.EndReason, msg.Error)
-	}
-	if msg.EventHint == nil || msg.EventHint.ClientMsgNo != "cmn-1" || msg.EventHint.FromMsgEventSeq != 0 {
-		t.Fatalf("event hint = %#v, want cmn-1/0", msg.EventHint)
+	if string(msg.Payload) != "base" {
+		t.Fatalf("payload = %q, want base", msg.Payload)
 	}
 	if msg.EventMeta == nil {
 		t.Fatal("EventMeta = nil, want event summary")
@@ -345,38 +343,13 @@ func TestSyncChannelMessagesEnrichesFullEventMeta(t *testing.T) {
 	}
 }
 
-func TestSyncChannelMessagesBasicEventMetaOmitsSnapshots(t *testing.T) {
+func TestSyncChannelMessagesIncludeEventMetaReturnsSnapshots(t *testing.T) {
 	key := MessageEventMessageKey{ChannelID: "g1", ChannelType: 2, ClientMsgNo: "cmn-1"}
 	store := &recordingMessageEventStore{stateRows: map[MessageEventMessageKey][]MessageEventState{
 		key: {{EventKey: EventKeyDefault, Status: EventStatusOpen, LastMsgEventSeq: 1, SnapshotPayload: []byte(`{"kind":"text","text":"hello"}`)}},
 	}}
 	reader := &recordingChannelMessageReader{page: ChannelMessagePage{Messages: []SyncedMessage{
-		{Setting: legacySettingStream, ChannelID: "g1", ChannelType: 2, ClientMsgNo: "cmn-1"},
-	}}}
-	app := New(Options{Reader: reader, Memberships: liveSyncMembershipStore(), MembershipAuthority: allowLiveMembershipAuthority(), EventStore: store})
-
-	result, err := app.SyncChannelMessages(context.Background(), SyncChannelMessagesQuery{
-		LoginUID:         "u1",
-		ChannelID:        "g1",
-		ChannelType:      2,
-		EventSummaryMode: "basic",
-	})
-
-	if err != nil {
-		t.Fatalf("SyncChannelMessages() error = %v", err)
-	}
-	if got := result.Messages[0].EventMeta.Events[0].Snapshot; got != nil {
-		t.Fatalf("snapshot = %#v, want nil in basic mode", got)
-	}
-}
-
-func TestSyncChannelMessagesIncludeEventMetaDefaultsToFull(t *testing.T) {
-	key := MessageEventMessageKey{ChannelID: "g1", ChannelType: 2, ClientMsgNo: "cmn-1"}
-	store := &recordingMessageEventStore{stateRows: map[MessageEventMessageKey][]MessageEventState{
-		key: {{EventKey: EventKeyDefault, Status: EventStatusOpen, LastMsgEventSeq: 1, SnapshotPayload: []byte(`{"kind":"text","text":"hello"}`)}},
-	}}
-	reader := &recordingChannelMessageReader{page: ChannelMessagePage{Messages: []SyncedMessage{
-		{Setting: legacySettingStream, ChannelID: "g1", ChannelType: 2, ClientMsgNo: "cmn-1"},
+		{ChannelID: "g1", ChannelType: 2, ClientMsgNo: "cmn-1"},
 	}}}
 	app := New(Options{Reader: reader, Memberships: liveSyncMembershipStore(), MembershipAuthority: allowLiveMembershipAuthority(), EventStore: store})
 
@@ -398,7 +371,7 @@ func TestSyncChannelMessagesIncludeEventMetaDefaultsToFull(t *testing.T) {
 	}
 }
 
-func TestSyncChannelMessagesSkipsNonStreamMessagesDuringEventEnrichment(t *testing.T) {
+func TestSyncChannelMessagesEnrichesOrdinaryAnchorWhenRequested(t *testing.T) {
 	store := &recordingMessageEventStore{}
 	reader := &recordingChannelMessageReader{page: ChannelMessagePage{Messages: []SyncedMessage{
 		{ChannelID: "g1", ChannelType: 2, ClientMsgNo: "cmn-ordinary"},
@@ -409,21 +382,21 @@ func TestSyncChannelMessagesSkipsNonStreamMessagesDuringEventEnrichment(t *testi
 		LoginUID:         "u1",
 		ChannelID:        "g1",
 		ChannelType:      2,
-		EventSummaryMode: "full",
+		IncludeEventMeta: true,
 	})
 
 	if err != nil {
 		t.Fatalf("SyncChannelMessages() error = %v", err)
 	}
-	if len(store.stateCalls) != 0 {
-		t.Fatalf("state calls = %#v, want none for ordinary messages", store.stateCalls)
+	if len(store.stateCalls) != 1 {
+		t.Fatalf("state calls = %#v, want ordinary anchor lookup", store.stateCalls)
 	}
 }
 
-func TestSyncChannelMessagesSkipsEventStoreWhenSummaryModeEmpty(t *testing.T) {
+func TestSyncChannelMessagesSkipsEventStoreWhenEventMetaNotRequested(t *testing.T) {
 	store := &recordingMessageEventStore{}
 	reader := &recordingChannelMessageReader{page: ChannelMessagePage{Messages: []SyncedMessage{
-		{Setting: legacySettingStream, ChannelID: "g1", ChannelType: 2, ClientMsgNo: "cmn-1"},
+		{ChannelID: "g1", ChannelType: 2, ClientMsgNo: "cmn-1"},
 	}}}
 	app := New(Options{Reader: reader, Memberships: liveSyncMembershipStore(), MembershipAuthority: allowLiveMembershipAuthority(), EventStore: store})
 
@@ -445,7 +418,7 @@ func TestSyncChannelMessagesPropagatesEventStoreError(t *testing.T) {
 	storeErr := errors.New("event store failed")
 	store := &recordingMessageEventStore{stateErr: storeErr}
 	reader := &recordingChannelMessageReader{page: ChannelMessagePage{Messages: []SyncedMessage{
-		{Setting: legacySettingStream, ChannelID: "g1", ChannelType: 2, ClientMsgNo: "cmn-1"},
+		{ChannelID: "g1", ChannelType: 2, ClientMsgNo: "cmn-1"},
 	}}}
 	app := New(Options{Reader: reader, Memberships: liveSyncMembershipStore(), MembershipAuthority: allowLiveMembershipAuthority(), EventStore: store})
 
@@ -453,7 +426,7 @@ func TestSyncChannelMessagesPropagatesEventStoreError(t *testing.T) {
 		LoginUID:         "u1",
 		ChannelID:        "g1",
 		ChannelType:      2,
-		EventSummaryMode: "basic",
+		IncludeEventMeta: true,
 	})
 
 	if !errors.Is(err, storeErr) {

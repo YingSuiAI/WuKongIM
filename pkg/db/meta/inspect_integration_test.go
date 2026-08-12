@@ -182,7 +182,7 @@ func TestInspectScanDeviceByUID(t *testing.T) {
 	store := openTestMetaStore(t)
 	defer store.close(t)
 	ctx := context.Background()
-	device := Device{UID: "u-device", DeviceFlag: 3, Token: "device-token", DeviceLevel: 9}
+	device := Device{UID: "u-device", DeviceFlag: 3, DeviceID: "device-3", AppInstanceID: "app-3", Token: "device-token", DeviceLevel: 9}
 	if err := store.db.HashSlot(5).UpsertDevice(ctx, device); err != nil {
 		t.Fatalf("UpsertDevice(): %v", err)
 	}
@@ -212,8 +212,8 @@ func TestInspectScanDeviceFilterUsesPrimaryPrefix(t *testing.T) {
 	ctx := context.Background()
 	shard := store.db.HashSlot(5)
 	for _, device := range []Device{
-		{UID: "u-prefix", DeviceFlag: 1, Token: "match"},
-		{UID: "z-other", DeviceFlag: 1, Token: "skip"},
+		{UID: "u-prefix", DeviceFlag: 1, DeviceID: "device-1", AppInstanceID: "app-1", Token: "match"},
+		{UID: "z-other", DeviceFlag: 1, DeviceID: "device-1", AppInstanceID: "app-1", Token: "skip"},
 	} {
 		if err := shard.UpsertDevice(ctx, device); err != nil {
 			t.Fatalf("UpsertDevice(%+v): %v", device, err)
@@ -247,8 +247,8 @@ func TestInspectScanDeviceCursorAcceptsJSONFloat64NumericPart(t *testing.T) {
 	ctx := context.Background()
 	shard := store.db.HashSlot(5)
 	for _, device := range []Device{
-		{UID: "u-device", DeviceFlag: 1, Token: "first"},
-		{UID: "u-device", DeviceFlag: 2, Token: "second"},
+		{UID: "u-device", DeviceFlag: 1, DeviceID: "device-1", AppInstanceID: "app-1", Token: "first"},
+		{UID: "u-device", DeviceFlag: 2, DeviceID: "device-2", AppInstanceID: "app-2", Token: "second"},
 	} {
 		if err := shard.UpsertDevice(ctx, device); err != nil {
 			t.Fatalf("UpsertDevice(%+v): %v", device, err)
@@ -259,7 +259,7 @@ func TestInspectScanDeviceCursorAcceptsJSONFloat64NumericPart(t *testing.T) {
 		Table:       "device",
 		HashSlot:    5,
 		HashSlotSet: true,
-		After:       &InspectCursor{HashSlot: 5, Primary: []any{"u-device", float64(1)}},
+		After:       &InspectCursor{HashSlot: 5, Primary: []any{"u-device", float64(1), "device-1", "app-1"}},
 		Limit:       10,
 	})
 	if err != nil {
@@ -456,17 +456,18 @@ func TestInspectScanRemainingTablesSmoke(t *testing.T) {
 			seed: func(ctx context.Context, shard *Shard) error {
 				_, err := shard.AppendMessageEvent(ctx, MessageEventAppend{
 					ChannelID: "event", ChannelType: 2, ClientMsgNo: "cmn-1",
-					EventID: "evt-1", EventKey: "main", EventType: EventTypeStreamDelta,
+					RunID: "run-1", AuthorizationFence: "1", AuthoritySequence: 1,
+					EventID: "evt-1", EventKey: "main", EventType: EventTypeDelta,
 					Payload: []byte(`{"kind":"text","delta":"hi"}`), OccurredAt: 10, UpdatedAt: 11,
 				})
 				return err
 			},
 			assert: func(t *testing.T, row InspectRow) {
 				t.Helper()
-				if row["channel_id"] != "event" || row["client_msg_no"] != "cmn-1" || row["event_key"] != EventKeyDefault || row["last_msg_event_seq"] != uint64(1) {
+				if row["channel_id"] != "event" || row["client_msg_no"] != "cmn-1" || row["run_id"] != "run-1" || row["event_key"] != EventKeyDefault || row["last_msg_event_seq"] != uint64(1) || row["last_authority_sequence"] != uint64(1) {
 					t.Fatalf("message event state row = %+v", row)
 				}
-				if got, want := string(row["snapshot_payload"].([]byte)), `{"kind":"text","text":"hi"}`; !jsonEqualForTest(got, want) {
+				if got, want := string(row["snapshot_payload"].([]byte)), `{"kind":"text","delta":"hi"}`; !jsonEqualForTest(got, want) {
 					t.Fatalf("message event snapshot = %s, want %s", got, want)
 				}
 			},
@@ -478,14 +479,15 @@ func TestInspectScanRemainingTablesSmoke(t *testing.T) {
 			seed: func(ctx context.Context, shard *Shard) error {
 				_, err := shard.AppendMessageEvent(ctx, MessageEventAppend{
 					ChannelID: "event", ChannelType: 2, ClientMsgNo: "cmn-1",
-					EventID: "evt-1", EventType: EventTypeStreamDelta,
+					RunID: "run-1", AuthorizationFence: "1", AuthoritySequence: 1,
+					EventID: "evt-1", EventType: EventTypeDelta,
 					Payload: []byte(`{"kind":"text","delta":"hi"}`), UpdatedAt: 11,
 				})
 				return err
 			},
 			assert: func(t *testing.T, row InspectRow) {
 				t.Helper()
-				if row["channel_id"] != "event" || row["client_msg_no"] != "cmn-1" || row["last_msg_event_seq"] != uint64(1) || row["updated_at"] != int64(11) {
+				if row["channel_id"] != "event" || row["client_msg_no"] != "cmn-1" || row["run_id"] != "run-1" || row["last_msg_event_seq"] != uint64(1) || row["last_authority_sequence"] != uint64(1) || row["updated_at"] != int64(11) {
 					t.Fatalf("message event cursor row = %+v", row)
 				}
 			},
@@ -497,14 +499,15 @@ func TestInspectScanRemainingTablesSmoke(t *testing.T) {
 			seed: func(ctx context.Context, shard *Shard) error {
 				_, err := shard.AppendMessageEvent(ctx, MessageEventAppend{
 					ChannelID: "event", ChannelType: 2, ClientMsgNo: "cmn-1",
-					EventID: "evt-1", EventType: EventTypeStreamDelta,
+					RunID: "run-1", AuthorizationFence: "1", AuthoritySequence: 1,
+					EventID: "evt-1", EventType: EventTypeDelta,
 					Payload: []byte(`{"kind":"text","delta":"hi"}`), UpdatedAt: 11,
 				})
 				return err
 			},
 			assert: func(t *testing.T, row InspectRow) {
 				t.Helper()
-				if row["channel_id"] != "event" || row["client_msg_no"] != "cmn-1" || row["event_id"] != "evt-1" || row["msg_event_seq"] != uint64(1) {
+				if row["channel_id"] != "event" || row["client_msg_no"] != "cmn-1" || row["event_id"] != "evt-1" || row["msg_event_seq"] != uint64(1) || row["authority_sequence"] != uint64(1) {
 					t.Fatalf("message event applied row = %+v", row)
 				}
 			},

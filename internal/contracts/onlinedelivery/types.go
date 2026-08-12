@@ -80,6 +80,16 @@ type Route struct {
 	SessionID uint64
 	// DeviceID identifies the recipient client device.
 	DeviceID string
+	// AppInstanceID identifies the application installation owning this route.
+	AppInstanceID string
+	// InstallationGeneration fences a revoked and recreated installation binding.
+	InstallationGeneration uint64
+	// SessionGeneration fences older login sessions for the installation.
+	SessionGeneration uint64
+	// AuthorizationFence is the Platform principal authority fence bound at token issue.
+	AuthorizationFence uint64
+	// ProtocolVersion is the negotiated WKProto version.
+	ProtocolVersion uint8
 	// DeviceFlag carries protocol device category metadata.
 	DeviceFlag uint8
 	// DeviceLevel carries protocol device priority metadata.
@@ -94,6 +104,29 @@ type OwnerPush struct {
 	Event channelappendcontract.CommittedEnvelope
 	// Routes are the recipient endpoints owned by OwnerNodeID.
 	Routes []Route
+}
+
+// EventPush groups one realtime WKProto EVENT for exact routes owned by one node.
+type EventPush struct {
+	// OwnerNodeID is the recipient owner node that should accept the push.
+	OwnerNodeID uint64
+	// EventID is the idempotency identifier carried by the EVENT frame.
+	EventID string
+	// EventType identifies the typed realtime mutation.
+	EventType string
+	// Timestamp is the source event timestamp in Unix milliseconds.
+	Timestamp uint64
+	// Payload is the immutable event payload.
+	Payload []byte
+	// Routes are the exact recipient endpoints owned by OwnerNodeID.
+	Routes []Route
+}
+
+// Clone returns an independent event push for transport or retention.
+func (p EventPush) Clone() EventPush {
+	p.Payload = append([]byte(nil), p.Payload...)
+	p.Routes = append([]Route(nil), p.Routes...)
+	return p
 }
 
 // Clone returns an independent owner push for serialization or retention.

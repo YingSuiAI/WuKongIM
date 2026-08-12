@@ -113,7 +113,7 @@ type App struct {
 	// webhookOffline adapts offline recipient batches into msg.offline webhook events.
 	webhookOffline channelappend.OfflineRecipientsObserver
 	// webhookPresence adapts owner-local online status transitions into webhook events.
-	webhookPresence presence.OnlineStatusObserver
+	webhookPresence presence.LeaseObserver
 	// plugins exposes v2 plugin lifecycle and hook usecases.
 	plugins       *pluginusecase.App
 	channels      *channelusecase.App

@@ -16,7 +16,7 @@ func TestSendMessageMapsCompatibleRequestToMessageUsecase(t *testing.T) {
 	messages := &recordingMessageUsecase{
 		sendResult: messageusecase.SendResult{MessageID: 99, MessageSeq: 7, Reason: messageusecase.ReasonSuccess},
 	}
-	srv := New(Options{Messages: messages})
+	srv := New(Options{Messages: messages, ServiceToken: "service-secret"})
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/message/send", bytes.NewBufferString(`{"sender_uid":"u1","channel_id":"u2","channel_type":1,"client_msg_no":"c1","payload":"aGk=","header":{"no_persist":1},"sync_once":1,"setting":9,"topic":"topic-a","expire":3600}`))
@@ -53,7 +53,7 @@ func TestSendMessageMapsSubscribersToRequestScopedCommand(t *testing.T) {
 	messages := &recordingMessageUsecase{
 		sendResult: messageusecase.SendResult{MessageID: 100, MessageSeq: 1, Reason: messageusecase.ReasonSuccess},
 	}
-	srv := New(Options{Messages: messages})
+	srv := New(Options{Messages: messages, ServiceToken: "service-secret"})
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/message/send", bytes.NewBufferString(`{"from_uid":"system","payload":"Y21k","subscribers":["u1","u2"],"sync_once":1}`))
@@ -131,7 +131,7 @@ func TestChannelMessageSyncMapsCompatibleRequestToUsecase(t *testing.T) {
 	srv := New(Options{Messages: messages})
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/channel/messagesync", bytes.NewBufferString(`{"login_uid":"u1","channel_id":"u2","channel_type":1,"start_message_seq":2,"end_message_seq":5,"limit":10,"pull_mode":1,"include_event_meta":1,"event_summary_mode":"compat"}`))
+	req := httptest.NewRequest(http.MethodPost, "/channel/messagesync", bytes.NewBufferString(`{"login_uid":"u1","channel_id":"u2","channel_type":1,"start_message_seq":2,"end_message_seq":5,"limit":10,"pull_mode":1,"include_event_meta":1}`))
 	req.Header.Set("Content-Type", "application/json")
 
 	srv.Handler().ServeHTTP(rec, req)
@@ -146,7 +146,7 @@ func TestChannelMessageSyncMapsCompatibleRequestToUsecase(t *testing.T) {
 		t.Fatalf("sync queries = %#v, want one query", messages.syncQueries)
 	}
 	got := messages.syncQueries[0]
-	if got.LoginUID != "u1" || got.ChannelID != "u2" || got.ChannelType != frame.ChannelTypePerson || got.StartMessageSeq != 2 || got.EndMessageSeq != 5 || got.Limit != 10 || got.PullMode != messageusecase.PullModeUp || !got.IncludeEventMeta || got.EventSummaryMode != "compat" {
+	if got.LoginUID != "u1" || got.ChannelID != "u2" || got.ChannelType != frame.ChannelTypePerson || got.StartMessageSeq != 2 || got.EndMessageSeq != 5 || got.Limit != 10 || got.PullMode != messageusecase.PullModeUp || !got.IncludeEventMeta {
 		t.Fatalf("sync query = %#v, want mapped request", got)
 	}
 }
@@ -181,24 +181,26 @@ func TestMessageEventAppendMapsCompatibleRequestToUsecase(t *testing.T) {
 			ChannelType: int64(frame.ChannelTypePerson),
 			FromUID:     "u1",
 			ClientMsgNo: "cmn-1",
+			RunID:       "run-1",
 			EventID:     "evt-1",
 			EventKey:    messageusecase.EventKeyDefault,
 			MsgEventSeq: 12,
 			Status:      messageusecase.EventStatusOpen,
 		},
 	}
-	srv := New(Options{Messages: messages})
+	srv := New(Options{Messages: messages, ServiceToken: "service-secret"})
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/message/event", bytes.NewBufferString(`{"channel_id":"u2","channel_type":1,"from_uid":"u1","message_id":99,"client_msg_no":"cmn-1","event_id":"evt-1","event_type":"stream.delta","event_key":"main","visibility":"public","occurred_at":1700000000000,"payload":{"kind":"text","delta":"hi"}}`))
+	req := httptest.NewRequest(http.MethodPost, "/message/events:append", bytes.NewBufferString(`{"channel_id":"u2","channel_type":1,"from_uid":"u1","message_id":99,"client_msg_no":"cmn-1","run_id":"run-1","authorization_fence":1,"authority_sequence":13,"event_id":"evt-1","event_type":"delta","event_key":"main","visibility":"public","occurred_at":1700000000000,"payload":{"event_id":"evt-1","run_id":"run-1","base_message":{"conversation_id":"019c0000-0000-7000-8000-000000000001","message_id":"019c0000-0000-7000-8000-000000000002","client_msg_id":"cmn-1","committed_message_ref":"agent-run.test","message_sequence":1,"source_principal_id":"u1"},"event_key":"main","event_type":"delta","authority_sequence":13,"text_delta":"hi","projection_digest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","authorization_fence":1,"occurred_at":"2023-11-14T22:13:20Z"}}`))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer service-secret")
 
 	srv.Handler().ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d body = %s, want 200", rec.Code, rec.Body.String())
 	}
-	if !jsonEqual(rec.Body.String(), `{"status":200,"data":{"client_msg_no":"cmn-1","event_key":"main","event_id":"evt-1","msg_event_seq":12,"stream_status":"open","channel_id":"u2","channel_type":1,"from_uid":"u1"}}`) {
+	if !jsonEqual(rec.Body.String(), `{"status":200,"data":{"client_msg_no":"cmn-1","run_id":"run-1","event_key":"main","event_id":"evt-1","msg_event_seq":12,"authority_sequence":13,"event_status":"open","channel_id":"u2","channel_type":1,"from_uid":"u1"}}`) {
 		t.Fatalf("body = %q, want compatible event append response", rec.Body.String())
 	}
 	if len(messages.appendCalls) != 1 {
@@ -208,10 +210,10 @@ func TestMessageEventAppendMapsCompatibleRequestToUsecase(t *testing.T) {
 	if call.ChannelID != "u2" || call.ChannelType != int64(frame.ChannelTypePerson) || call.FromUID != "u1" || call.MessageID != 99 {
 		t.Fatalf("append command channel/sender = %#v, want mapped request", call)
 	}
-	if call.ClientMsgNo != "cmn-1" || call.EventID != "evt-1" || call.EventKey != "main" || call.EventType != "stream.delta" || call.Visibility != "public" || call.OccurredAt != 1700000000000 {
+	if call.ClientMsgNo != "cmn-1" || call.RunID != "run-1" || call.AuthorizationFence != "1" || call.AuthoritySequence != 13 || call.EventID != "evt-1" || call.EventKey != "main" || call.EventType != "delta" || call.Visibility != "public" || call.OccurredAt != 1700000000000 {
 		t.Fatalf("append command event fields = %#v, want mapped request", call)
 	}
-	if string(call.Payload) != `{"kind":"text","delta":"hi"}` {
+	if !bytes.Contains(call.Payload, []byte(`"text_delta":"hi"`)) || !bytes.Contains(call.Payload, []byte(`"authority_sequence":13`)) {
 		t.Fatalf("payload = %q, want raw JSON payload", call.Payload)
 	}
 }
@@ -224,16 +226,17 @@ func TestMessageEventAppendReturnsCompatibleErrors(t *testing.T) {
 		want     string
 	}{
 		{name: "invalid json", messages: &recordingMessageUsecase{}, body: `{"channel_id":`, want: `{"msg":"数据格式有误！","status":400}`},
-		{name: "missing usecase", body: `{"channel_id":"g1","channel_type":2,"client_msg_no":"cmn","event_id":"evt","event_type":"stream.open"}`, want: `{"msg":"message usecase not configured","status":400}`},
-		{name: "unsupported headers", messages: &recordingMessageUsecase{}, body: `{"channel_id":"g1","channel_type":2,"client_msg_no":"cmn","event_id":"evt","event_type":"stream.open","headers":{"x":"y"}}`, want: `{"msg":"message event headers are not supported","status":400}`},
-		{name: "usecase error", messages: &recordingMessageUsecase{appendErr: messageusecase.ErrMessageEventClientMsgNoRequired}, body: `{"channel_id":"g1","channel_type":2,"event_id":"evt","event_type":"stream.open"}`, want: `{"msg":"client_msg_no不能为空！","status":400}`},
+		{name: "missing usecase", body: `{"channel_id":"g1","channel_type":2,"client_msg_no":"cmn","event_id":"evt","event_type":"open"}`, want: `{"msg":"message usecase not configured","status":400}`},
+		{name: "unsupported headers", messages: &recordingMessageUsecase{}, body: `{"channel_id":"g1","channel_type":2,"client_msg_no":"cmn","event_id":"evt","event_type":"open","headers":{"x":"y"}}`, want: `{"msg":"message event headers are not supported","status":400}`},
+		{name: "usecase error", messages: &recordingMessageUsecase{appendErr: messageusecase.ErrMessageEventClientMsgNoRequired}, body: `{"channel_id":"g1","channel_type":2,"event_id":"evt","event_type":"open"}`, want: `{"msg":"client_msg_no不能为空！","status":400}`},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			srv := New(Options{Messages: tt.messages})
+			srv := New(Options{Messages: tt.messages, ServiceToken: "service-secret"})
 
 			rec := httptest.NewRecorder()
-			req := httptest.NewRequest(http.MethodPost, "/message/event", bytes.NewBufferString(tt.body))
+			req := httptest.NewRequest(http.MethodPost, "/message/events:append", bytes.NewBufferString(tt.body))
 			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Authorization", "Bearer service-secret")
 
 			srv.Handler().ServeHTTP(rec, req)
 
@@ -244,6 +247,33 @@ func TestMessageEventAppendReturnsCompatibleErrors(t *testing.T) {
 				t.Fatalf("body = %q, want JSON %s", rec.Body.String(), tt.want)
 			}
 		})
+	}
+}
+
+func TestMessageEventAppendRequiresServiceToken(t *testing.T) {
+	srv := New(Options{Messages: &recordingMessageUsecase{}, ServiceToken: "service-secret"})
+	for _, authorization := range []string{"", "Bearer wrong"} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/message/events:append", bytes.NewBufferString(`{}`))
+		req.Header.Set("Content-Type", "application/json")
+		if authorization != "" {
+			req.Header.Set("Authorization", authorization)
+		}
+		srv.Handler().ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("authorization %q status = %d body = %s, want 401", authorization, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+func TestLegacyMessageEventRouteIsRemoved(t *testing.T) {
+	srv := New(Options{Messages: &recordingMessageUsecase{}, ServiceToken: "service-secret"})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/message/event", bytes.NewBufferString(`{}`))
+	req.Header.Set("Authorization", "Bearer service-secret")
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d body = %s, want removed route", rec.Code, rec.Body.String())
 	}
 }
 
@@ -258,9 +288,6 @@ func TestChannelMessageSyncIncludesEventFields(t *testing.T) {
 				ChannelID:   "g1",
 				ChannelType: frame.ChannelTypeGroup,
 				Payload:     []byte("base"),
-				End:         1,
-				EndReason:   3,
-				StreamData:  []byte("hello"),
 				EventMeta: &messageusecase.MessageEventMeta{
 					HasEvents:       true,
 					Completed:       true,
@@ -275,14 +302,13 @@ func TestChannelMessageSyncIncludesEventFields(t *testing.T) {
 						EndReason:       3,
 					}},
 				},
-				EventHint: &messageusecase.MessageEventSyncHint{ClientMsgNo: "c1"},
 			}},
 		},
 	}
 	srv := New(Options{Messages: messages})
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/channel/messagesync", bytes.NewBufferString(`{"login_uid":"u1","channel_id":"g1","channel_type":2,"event_summary_mode":"full"}`))
+	req := httptest.NewRequest(http.MethodPost, "/channel/messagesync", bytes.NewBufferString(`{"login_uid":"u1","channel_id":"g1","channel_type":2,"include_event_meta":1}`))
 	req.Header.Set("Content-Type", "application/json")
 
 	srv.Handler().ServeHTTP(rec, req)
@@ -290,7 +316,7 @@ func TestChannelMessageSyncIncludesEventFields(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d body = %s, want 200", rec.Code, rec.Body.String())
 	}
-	if !jsonEqual(rec.Body.String(), `{"start_message_seq":0,"end_message_seq":0,"more":0,"messages":[{"header":{"no_persist":0,"red_dot":0,"sync_once":0},"setting":0,"message_id":88,"message_idstr":"88","client_msg_no":"c1","end":1,"end_reason":3,"stream_data":"aGVsbG8=","event_meta":{"has_events":true,"completed":true,"event_version":2,"last_msg_event_seq":2,"event_count":1,"events":[{"event_key":"main","status":"closed","last_msg_event_seq":2,"snapshot":{"text":"hello"},"end_reason":3}]},"event_sync_hint":{"client_msg_no":"c1","from_msg_event_seq":0},"message_seq":2,"from_uid":"u2","channel_id":"g1","channel_type":2,"expire":0,"timestamp":0,"payload":"YmFzZQ=="}]}`) {
+	if !jsonEqual(rec.Body.String(), `{"start_message_seq":0,"end_message_seq":0,"more":0,"messages":[{"header":{"no_persist":0,"red_dot":0,"sync_once":0},"setting":0,"message_id":88,"message_idstr":"88","client_msg_no":"c1","event_meta":{"has_events":true,"completed":true,"event_version":2,"last_msg_event_seq":2,"event_count":1,"events":[{"event_key":"main","status":"closed","last_msg_event_seq":2,"snapshot":{"text":"hello"},"end_reason":3}]},"message_seq":2,"from_uid":"u2","channel_id":"g1","channel_type":2,"expire":0,"timestamp":0,"payload":"YmFzZQ=="}]}`) {
 		t.Fatalf("body = %q, want event-enriched messagesync response", rec.Body.String())
 	}
 }

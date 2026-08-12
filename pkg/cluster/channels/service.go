@@ -309,6 +309,15 @@ func NewService(cfg Config) (*Service, error) {
 // Runtime returns the Channel public cluster surface.
 func (s *Service) Runtime() ch.Cluster { return s.runtime }
 
+// LookupCommittedMessage reads one locally committed message through the hosted runtime.
+func (s *Service) LookupCommittedMessage(ctx context.Context, id ch.ChannelID, messageID uint64) (ch.Message, bool, error) {
+	lookup, ok := s.runtime.(ch.CommittedMessageLookup)
+	if !ok {
+		return ch.Message{}, false, ch.ErrNotReady
+	}
+	return lookup.LookupCommittedMessage(ctx, id, messageID)
+}
+
 // Server returns the Channel replication server surface.
 func (s *Service) Server() channeltransport.Server { return s.runtime }
 

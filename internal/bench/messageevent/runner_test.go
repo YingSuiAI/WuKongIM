@@ -2,6 +2,7 @@ package messageevent
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,8 @@ import (
 	"testing"
 	"time"
 )
+
+const testServiceToken = "test-service-token"
 
 func TestRunnerWritesStreamsAndCapturesMetrics(t *testing.T) {
 	var mu sync.Mutex
@@ -28,12 +31,12 @@ func TestRunnerWritesStreamsAndCapturesMetrics(t *testing.T) {
 			call := metricsCalls
 			mu.Unlock()
 			if call == 1 {
-				_, _ = w.Write([]byte(`wukongim_message_event_append_total{path="cache",event_type="stream.delta",result="ok"} 0
+				_, _ = w.Write([]byte(`wukongim_message_event_append_total{path="cache",event_type="delta",result="ok"} 0
 wukongim_message_event_propose_total{path="finish_batch",result="ok"} 0
 `))
 				return
 			}
-			_, _ = w.Write([]byte(`wukongim_message_event_append_total{path="cache",event_type="stream.delta",result="ok"} 8
+			_, _ = w.Write([]byte(`wukongim_message_event_append_total{path="cache",event_type="delta",result="ok"} 8
 wukongim_message_event_propose_total{path="finish_batch",result="ok"} 2
 `))
 		case "/channel":
@@ -44,30 +47,41 @@ wukongim_message_event_propose_total{path="finish_batch",result="ok"} 2
 			_, _ = w.Write([]byte(`{"status":200}`))
 		case "/message/send":
 			var req struct {
-				Setting uint8 `json:"setting"`
+				Payload string `json:"payload"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 				t.Errorf("decode send: %v", err)
 			}
-			if req.Setting != 2 {
-				t.Errorf("send setting = %d, want stream bit", req.Setting)
+			decoded, err := base64.StdEncoding.DecodeString(req.Payload)
+			if err != nil || !strings.Contains(string(decoded), `"run_id"`) || !strings.Contains(string(decoded), `"authorization_fence"`) {
+				t.Errorf("base SEND payload = %q, want run and authorization fence", decoded)
 			}
 			mu.Lock()
 			sendPosts++
 			mu.Unlock()
 			_, _ = w.Write([]byte(`{"message_id":99,"message_seq":7,"reason":1}`))
-		case "/message/event":
+		case "/message/events:append":
 			var req struct {
-				EventType string `json:"event_type"`
+				MessageID          uint64 `json:"message_id"`
+				RunID              string `json:"run_id"`
+				AuthorizationFence uint64 `json:"authorization_fence"`
+				AuthoritySequence  uint64 `json:"authority_sequence"`
+				EventType          string `json:"event_type"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 				t.Errorf("decode event: %v", err)
 			}
+			if r.Header.Get("Authorization") != "Bearer "+testServiceToken {
+				t.Errorf("Authorization = %q", r.Header.Get("Authorization"))
+			}
+			if req.MessageID != 99 || req.RunID == "" || req.AuthorizationFence == 0 || req.AuthoritySequence == 0 {
+				t.Errorf("incomplete append identity: %+v", req)
+			}
 			mu.Lock()
 			switch req.EventType {
-			case "stream.delta":
+			case "delta":
 				deltaPosts++
-			case "stream.finish":
+			case "finish":
 				finishPosts++
 			default:
 				t.Errorf("unexpected event type %q", req.EventType)
@@ -82,6 +96,7 @@ wukongim_message_event_propose_total{path="finish_batch",result="ok"} 2
 
 	cfg := DefaultConfig()
 	cfg.APIAddrs = []string{server.URL}
+	cfg.ServiceToken = testServiceToken
 	cfg.Channels = 1
 	cfg.StreamsPerChannel = 2
 	cfg.LanesPerStream = 2
@@ -145,8 +160,8 @@ func TestRunnerWarmChannelsBeforeMeasuredMetrics(t *testing.T) {
 			mu.Lock()
 			metricsCalls++
 			mu.Unlock()
-			_, _ = w.Write([]byte(`wukongim_message_event_append_total{path="cache",event_type="stream.delta",result="ok"} 0
-wukongim_message_event_append_total{path="finish_batch",event_type="stream.finish",result="ok"} 0
+			_, _ = w.Write([]byte(`wukongim_message_event_append_total{path="cache",event_type="delta",result="ok"} 0
+wukongim_message_event_append_total{path="finish_batch",event_type="finish",result="ok"} 0
 wukongim_message_event_propose_total{path="finish_batch",result="ok"} 0
 `))
 		case "/channel":
@@ -157,7 +172,7 @@ wukongim_message_event_propose_total{path="finish_batch",result="ok"} 0
 			_, _ = w.Write([]byte(`{"status":200}`))
 		case "/message/send":
 			_, _ = w.Write([]byte(`{"message_id":99,"message_seq":7,"reason":1}`))
-		case "/message/event":
+		case "/message/events:append":
 			_, _ = w.Write([]byte(`{"status":200,"data":{"msg_event_seq":1,"stream_status":"closed"}}`))
 		default:
 			http.NotFound(w, r)
@@ -167,6 +182,7 @@ wukongim_message_event_propose_total{path="finish_batch",result="ok"} 0
 
 	cfg := DefaultConfig()
 	cfg.APIAddrs = []string{server.URL}
+	cfg.ServiceToken = testServiceToken
 	cfg.Channels = 2
 	cfg.StreamsPerChannel = 1
 	cfg.LanesPerStream = 1
@@ -206,8 +222,8 @@ func TestRunnerWarmRuntimeBeforeMeasuredMetrics(t *testing.T) {
 			mu.Lock()
 			metricsCalls++
 			mu.Unlock()
-			_, _ = w.Write([]byte(`wukongim_message_event_append_total{path="cache",event_type="stream.delta",result="ok"} 0
-wukongim_message_event_append_total{path="finish_batch",event_type="stream.finish",result="ok"} 0
+			_, _ = w.Write([]byte(`wukongim_message_event_append_total{path="cache",event_type="delta",result="ok"} 0
+wukongim_message_event_append_total{path="finish_batch",event_type="finish",result="ok"} 0
 wukongim_message_event_propose_total{path="finish_batch",result="ok"} 0
 `))
 		case "/channel":
@@ -216,7 +232,6 @@ wukongim_message_event_propose_total{path="finish_batch",result="ok"} 0
 		case "/message/send":
 			var req struct {
 				ClientMsgNo string `json:"client_msg_no"`
-				Setting     uint8  `json:"setting"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 				t.Errorf("decode send: %v", err)
@@ -224,21 +239,15 @@ wukongim_message_event_propose_total{path="finish_batch",result="ok"} 0
 			mu.Lock()
 			if strings.Contains(req.ClientMsgNo, "-warm-runtime-") {
 				warmSends++
-				if req.Setting != 0 {
-					t.Errorf("warm runtime setting = %d, want non-stream SEND", req.Setting)
-				}
 			} else {
 				measuredBaseSends++
 				if metricsCalls > 0 {
 					sawMetricsBeforeMeasuredSend = true
 				}
-				if req.Setting != 2 {
-					t.Errorf("measured base setting = %d, want stream bit", req.Setting)
-				}
 			}
 			mu.Unlock()
 			_, _ = w.Write([]byte(`{"message_id":99,"message_seq":7,"reason":1}`))
-		case "/message/event":
+		case "/message/events:append":
 			_, _ = w.Write([]byte(`{"status":200,"data":{"msg_event_seq":1,"stream_status":"closed"}}`))
 		default:
 			http.NotFound(w, r)
@@ -248,6 +257,7 @@ wukongim_message_event_propose_total{path="finish_batch",result="ok"} 0
 
 	cfg := DefaultConfig()
 	cfg.APIAddrs = []string{server.URL}
+	cfg.ServiceToken = testServiceToken
 	cfg.Channels = 2
 	cfg.StreamsPerChannel = 1
 	cfg.LanesPerStream = 1
@@ -283,21 +293,21 @@ func TestRunnerFailsWhenMessageEventHardGateDoesNotMatchMetrics(t *testing.T) {
 		case "/metrics":
 			metricsCalls++
 			if metricsCalls == 1 {
-				_, _ = w.Write([]byte(`wukongim_message_event_append_total{path="cache",event_type="stream.delta",result="ok"} 0
-wukongim_message_event_append_total{path="finish_batch",event_type="stream.finish",result="ok"} 0
+				_, _ = w.Write([]byte(`wukongim_message_event_append_total{path="cache",event_type="delta",result="ok"} 0
+wukongim_message_event_append_total{path="finish_batch",event_type="finish",result="ok"} 0
 wukongim_message_event_propose_total{path="finish_batch",result="ok"} 0
 `))
 				return
 			}
-			_, _ = w.Write([]byte(`wukongim_message_event_append_total{path="cache",event_type="stream.delta",result="ok"} 2
-wukongim_message_event_append_total{path="finish_batch",event_type="stream.finish",result="ok"} 2
+			_, _ = w.Write([]byte(`wukongim_message_event_append_total{path="cache",event_type="delta",result="ok"} 2
+wukongim_message_event_append_total{path="finish_batch",event_type="finish",result="ok"} 2
 wukongim_message_event_propose_total{path="finish_batch",result="ok"} 0
 `))
 		case "/channel":
 			_, _ = w.Write([]byte(`{"status":200}`))
 		case "/message/send":
 			_, _ = w.Write([]byte(`{"message_id":99,"message_seq":7,"reason":1}`))
-		case "/message/event":
+		case "/message/events:append":
 			_, _ = w.Write([]byte(`{"status":200,"data":{"msg_event_seq":1,"stream_status":"closed"}}`))
 		default:
 			http.NotFound(w, r)
@@ -307,6 +317,7 @@ wukongim_message_event_propose_total{path="finish_batch",result="ok"} 0
 
 	cfg := DefaultConfig()
 	cfg.APIAddrs = []string{server.URL}
+	cfg.ServiceToken = testServiceToken
 	cfg.Channels = 1
 	cfg.StreamsPerChannel = 2
 	cfg.LanesPerStream = 1
@@ -337,16 +348,16 @@ wukongim_message_event_propose_total{path="finish_batch",result="ok"} 0
 	}
 }
 
-func TestRunnerTreatsLegacyBusinessStatusAsError(t *testing.T) {
+func TestRunnerTreatsBusinessStatusAsError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/metrics":
-			_, _ = w.Write([]byte(`wukongim_message_event_append_total{path="cache",event_type="stream.delta",result="ok"} 0`))
+			_, _ = w.Write([]byte(`wukongim_message_event_append_total{path="cache",event_type="delta",result="ok"} 0`))
 		case "/channel":
 			_, _ = w.Write([]byte(`{"status":200}`))
 		case "/message/send":
 			_, _ = w.Write([]byte(`{"message_id":99,"message_seq":7,"reason":1}`))
-		case "/message/event":
+		case "/message/events:append":
 			_, _ = w.Write([]byte(`{"status":400,"msg":"message event stream cache miss"}`))
 		default:
 			http.NotFound(w, r)
@@ -356,6 +367,7 @@ func TestRunnerTreatsLegacyBusinessStatusAsError(t *testing.T) {
 
 	cfg := DefaultConfig()
 	cfg.APIAddrs = []string{server.URL}
+	cfg.ServiceToken = testServiceToken
 	cfg.Channels = 1
 	cfg.StreamsPerChannel = 1
 	cfg.LanesPerStream = 1

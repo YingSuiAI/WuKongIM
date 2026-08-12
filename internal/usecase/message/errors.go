@@ -36,11 +36,28 @@ var (
 	// ErrMessageEventChannelTypeRequired reports that a message event append has no channel type.
 	ErrMessageEventChannelTypeRequired = errors.New("channel_type不能为空！")
 	// ErrMessageEventClientMsgNoRequired reports that a message event append has no client message number.
-	ErrMessageEventClientMsgNoRequired = errors.New("client_msg_no不能为空！")
+	ErrMessageEventClientMsgNoRequired        = errors.New("client_msg_no不能为空！")
+	ErrMessageEventRunIDRequired              = errors.New("run_id不能为空！")
+	ErrMessageEventAuthorizationFenceRequired = errors.New("authorization_fence不能为空！")
+	ErrMessageEventAuthoritySequenceRequired  = errors.New("authority_sequence must be greater than zero")
+	ErrMessageEventRunIDInvalid               = errors.New("run_id must not contain ':'")
+	ErrMessageEventDeltaTooLarge              = errors.New("message event delta exceeds 16 KiB")
+	ErrMessageEventSnapshotTooLarge           = errors.New("message event snapshot exceeds 256 KiB")
+	ErrMessageEventPayloadRequired            = errors.New("message event payload is required")
 	// ErrMessageEventIDRequired reports that a message event append has no event idempotency key.
 	ErrMessageEventIDRequired = errors.New("event_id不能为空！")
 	// ErrMessageEventTypeRequired reports that a message event append has no event type.
 	ErrMessageEventTypeRequired = errors.New("event_type不能为空！")
+	// ErrMessageEventFromUIDRequired reports that a message event append has no sender.
+	ErrMessageEventFromUIDRequired = errors.New("from_uid不能为空！")
+	// ErrMessageEventMessageIDRequired reports that a message event append has no base message id.
+	ErrMessageEventMessageIDRequired = errors.New("message_id不能为空！")
+	// ErrMessageEventPublicOnly rejects non-public projection lanes in protocol v6.
+	ErrMessageEventPublicOnly = errors.New("message event visibility must be public")
+	// ErrMessageEventTargetNotFound reports that the exact committed base message does not exist.
+	ErrMessageEventTargetNotFound = errors.New("message event target message not found")
+	// ErrMessageEventAnchorMismatch reports that sender or client message identity differs from the base message.
+	ErrMessageEventAnchorMismatch = errors.New("message event anchor mismatch")
 	// ErrSendHookDepthExceeded reports that a plugin-origin send exceeded hook recursion limits.
 	ErrSendHookDepthExceeded = errors.New("internal/message: send hook depth exceeded")
 	// ErrRequestSubscribersRequireSyncOnce reports that request-scoped sends must be sync_once.

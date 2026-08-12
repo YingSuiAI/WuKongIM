@@ -5,11 +5,13 @@ import (
 	"errors"
 
 	"github.com/WuKongIM/WuKongIM/internal/usecase/message"
+	clusterpkg "github.com/WuKongIM/WuKongIM/pkg/cluster"
 	metadb "github.com/WuKongIM/WuKongIM/pkg/db/meta"
 )
 
 // MessageEventNode is the cluster message event projection facade used by internal.
 type MessageEventNode interface {
+	LookupMessageEventAnchor(context.Context, string, int64, uint64) (clusterpkg.MessageEventAnchor, bool, error)
 	AppendMessageEvent(context.Context, metadb.MessageEventAppend) (metadb.MessageEventAppendResult, error)
 	GetMessageEventStatesBatch(context.Context, []metadb.MessageEventMessageKey, int) (map[metadb.MessageEventMessageKey][]metadb.MessageEventState, error)
 }
@@ -24,6 +26,18 @@ var _ message.MessageEventStore = (*MessageEventStore)(nil)
 // NewMessageEventStore creates a MessageEventStore.
 func NewMessageEventStore(node MessageEventNode) *MessageEventStore {
 	return &MessageEventStore{node: node}
+}
+
+// LookupMessageEventAnchor reads one committed base message from its Channel leader.
+func (s *MessageEventStore) LookupMessageEventAnchor(ctx context.Context, channelID string, channelType int64, messageID uint64) (message.MessageEventAnchor, bool, error) {
+	if s == nil || s.node == nil {
+		return message.MessageEventAnchor{}, false, message.ErrMessageEventStoreRequired
+	}
+	anchor, found, err := s.node.LookupMessageEventAnchor(ctx, channelID, channelType, messageID)
+	if err != nil || !found {
+		return message.MessageEventAnchor{}, found, mapMessageEventError(err)
+	}
+	return message.MessageEventAnchor{ChannelID: anchor.ChannelID, ChannelType: anchor.ChannelType, FromUID: anchor.FromUID, MessageID: anchor.MessageID, ClientMsgNo: anchor.ClientMsgNo, RunID: anchor.RunID, AuthorizationFence: anchor.AuthorizationFence}, true, nil
 }
 
 // AppendMessageEvent persists one message event projection update.
@@ -65,24 +79,29 @@ func mapMessageEventError(err error) error {
 
 func metadbMessageEventAppend(event message.MessageEventAppend) metadb.MessageEventAppend {
 	return metadb.MessageEventAppend{
-		ChannelID:   event.ChannelID,
-		ChannelType: event.ChannelType,
-		ClientMsgNo: event.ClientMsgNo,
-		EventID:     event.EventID,
-		EventKey:    event.EventKey,
-		EventType:   event.EventType,
-		Visibility:  event.Visibility,
-		OccurredAt:  event.OccurredAt,
-		Payload:     cloneBytes(event.Payload),
-		UpdatedAt:   event.UpdatedAt,
+		ChannelID:          event.ChannelID,
+		ChannelType:        event.ChannelType,
+		ClientMsgNo:        event.ClientMsgNo,
+		RunID:              event.RunID,
+		AuthorizationFence: event.AuthorizationFence,
+		AuthoritySequence:  event.AuthoritySequence,
+		EventID:            event.EventID,
+		EventKey:           event.EventKey,
+		EventType:          event.EventType,
+		Visibility:         event.Visibility,
+		OccurredAt:         event.OccurredAt,
+		Payload:            cloneBytes(event.Payload),
+		UpdatedAt:          event.UpdatedAt,
 	}
 }
 
 func messageEventAppendResultFromMeta(result metadb.MessageEventAppendResult) message.MessageEventAppendResult {
 	return message.MessageEventAppendResult{
+		Applied:     result.Applied,
 		ChannelID:   result.ChannelID,
 		ChannelType: result.ChannelType,
 		ClientMsgNo: result.ClientMsgNo,
+		RunID:       result.RunID,
 		EventID:     result.EventID,
 		EventKey:    result.EventKey,
 		MsgEventSeq: result.MsgEventSeq,
@@ -125,20 +144,22 @@ func messageEventStatesFromMeta(states []metadb.MessageEventState) []message.Mes
 
 func messageEventStateFromMeta(state metadb.MessageEventState) message.MessageEventState {
 	return message.MessageEventState{
-		ChannelID:       state.ChannelID,
-		ChannelType:     state.ChannelType,
-		ClientMsgNo:     state.ClientMsgNo,
-		EventKey:        state.EventKey,
-		Status:          state.Status,
-		LastMsgEventSeq: state.LastMsgEventSeq,
-		LastEventID:     state.LastEventID,
-		LastEventType:   state.LastEventType,
-		LastVisibility:  state.LastVisibility,
-		LastOccurredAt:  state.LastOccurredAt,
-		SnapshotPayload: cloneBytes(state.SnapshotPayload),
-		EndReason:       state.EndReason,
-		Error:           state.Error,
-		UpdatedAt:       state.UpdatedAt,
+		ChannelID:             state.ChannelID,
+		ChannelType:           state.ChannelType,
+		ClientMsgNo:           state.ClientMsgNo,
+		RunID:                 state.RunID,
+		EventKey:              state.EventKey,
+		Status:                state.Status,
+		LastMsgEventSeq:       state.LastMsgEventSeq,
+		LastAuthoritySequence: state.LastAuthoritySequence,
+		LastEventID:           state.LastEventID,
+		LastEventType:         state.LastEventType,
+		LastVisibility:        state.LastVisibility,
+		LastOccurredAt:        state.LastOccurredAt,
+		SnapshotPayload:       cloneBytes(state.SnapshotPayload),
+		EndReason:             state.EndReason,
+		Error:                 state.Error,
+		UpdatedAt:             state.UpdatedAt,
 	}
 }
 

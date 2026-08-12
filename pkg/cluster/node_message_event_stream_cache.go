@@ -17,7 +17,13 @@ import (
 
 const (
 	defaultMessageEventStreamCacheMaxSessions = 50000
+	defaultMessageEventStreamCacheMaxBytes    = 512 << 20
 	defaultMessageEventFinishCoalesceWindow   = time.Millisecond
+	maxMessageEventLanesPerRun                = 8
+	maxMessageEventEventsPerRun               = 4096
+	maxMessageEventProjectionBytesPerRun      = 4 << 20
+	maxMessageEventSnapshotBytes              = 256 << 10
+	maxMessageEventRunDuration                = 30 * time.Minute
 )
 
 type messageEventStreamCacheKey struct {
@@ -27,14 +33,35 @@ type messageEventStreamCacheKey struct {
 }
 
 type messageEventStreamCacheSession struct {
-	states  map[string]metadb.MessageEventState
-	applied map[string]metadb.MessageEventAppendResult
-	updated time.Time
+	states             map[messageEventLaneKey]metadb.MessageEventState
+	applied            map[string]metadb.MessageEventAppendResult
+	appliedDigest      map[string]string
+	terminalRuns       map[string]metadb.MessageEventAppendResult
+	runSequences       map[string]uint64
+	runMsgEventSeqs    map[string]uint64
+	runEventCounts     map[string]int
+	runProjectionBytes map[string]int64
+	runStarted         map[string]time.Time
+	finishingRuns      map[string]messageEventFinishingRun
+	updated            time.Time
+}
+
+type messageEventFinishingRun struct {
+	eventID string
+	digest  string
+	seq     uint64
+}
+
+type messageEventLaneKey struct {
+	runID    string
+	eventKey string
 }
 
 type messageEventFinishCoalesceKey struct {
 	channelID   string
 	channelType int64
+	clientMsgNo string
+	runID       string
 }
 
 type messageEventFinishCoalesceRequest struct {
@@ -54,7 +81,7 @@ type messageEventFinishCoalesceGroup struct {
 	requests []*messageEventFinishCoalesceRequest
 }
 
-// messageEventFinishCoalescer batches concurrent stream.finish flushes for one channel.
+// messageEventFinishCoalescer batches concurrent finish flushes for one channel.
 type messageEventFinishCoalescer struct {
 	mu     sync.Mutex
 	window time.Duration
@@ -73,12 +100,13 @@ func newMessageEventFinishCoalescer(window time.Duration) *messageEventFinishCoa
 
 // messageEventStreamCache keeps in-flight stream projections on the Slot leader.
 type messageEventStreamCache struct {
-	mu            sync.Mutex
-	restorePaused bool
-	maxSessions   int
-	sessions      map[messageEventStreamCacheKey]*messageEventStreamCacheSession
-	openLanes     int
-	payloadBytes  int64
+	mu              sync.Mutex
+	restorePaused   bool
+	maxSessions     int
+	maxPayloadBytes int64
+	sessions        map[messageEventStreamCacheKey]*messageEventStreamCacheSession
+	openLanes       int
+	payloadBytes    int64
 }
 
 func newMessageEventStreamCache(maxSessions int) *messageEventStreamCache {
@@ -86,8 +114,9 @@ func newMessageEventStreamCache(maxSessions int) *messageEventStreamCache {
 		maxSessions = defaultMessageEventStreamCacheMaxSessions
 	}
 	return &messageEventStreamCache{
-		maxSessions: maxSessions,
-		sessions:    make(map[messageEventStreamCacheKey]*messageEventStreamCacheSession),
+		maxSessions:     maxSessions,
+		maxPayloadBytes: defaultMessageEventStreamCacheMaxBytes,
+		sessions:        make(map[messageEventStreamCacheKey]*messageEventStreamCacheSession),
 	}
 }
 
@@ -148,11 +177,48 @@ func (c *messageEventStreamCache) appendCachedObserved(event metadb.MessageEvent
 		return metadb.MessageEventAppendResult{}, c.observationLocked(), err
 	}
 	if result, ok := session.applied[event.EventID]; ok {
-		return cloneMessageEventAppendResult(result), c.observationLocked(), nil
+		if session.appliedDigest[event.EventID] != metadb.MessageEventDigest(event) {
+			return metadb.MessageEventAppendResult{}, c.observationLocked(), metadb.ErrStaleMeta
+		}
+		result = cloneMessageEventAppendResult(result)
+		result.Applied = false
+		return result, c.observationLocked(), nil
+	}
+	if _, terminal := session.terminalRuns[event.RunID]; terminal {
+		return metadb.MessageEventAppendResult{}, c.observationLocked(), ErrMessageEventRunTerminal
+	}
+	if _, finishing := session.finishingRuns[event.RunID]; finishing {
+		return metadb.MessageEventAppendResult{}, c.observationLocked(), ErrMessageEventRunTerminal
+	}
+	lastSequence, sequenceKnown := session.runSequences[event.RunID]
+	if sequenceKnown && event.AuthoritySequence != lastSequence+1 {
+		return metadb.MessageEventAppendResult{}, c.observationLocked(), metadb.ErrStaleMeta
+	}
+	if !sequenceKnown && event.EventType == metadb.EventTypeDelta && event.AuthoritySequence > 1 {
+		return metadb.MessageEventAppendResult{}, c.observationLocked(), ErrMessageEventStreamCacheMiss
+	}
+	event.MsgEventSeq = session.runMsgEventSeqs[event.RunID] + 1
+	if !sequenceKnown && event.EventType == metadb.EventTypeSnapshot && event.AuthoritySequence > 1 {
+		// After leader failover the cache has no transport watermark. Using the
+		// authoritative snapshot watermark creates an intentional transport gap,
+		// so connected clients recover the self-contained snapshot instead of
+		// treating it as an old seq=1 replay.
+		event.MsgEventSeq = event.AuthoritySequence
+	}
+	laneKey := messageEventLaneCacheKey(event)
+	if _, exists := session.states[laneKey]; !exists && c.runLaneCountLocked(session, event.RunID) >= maxMessageEventLanesPerRun {
+		return metadb.MessageEventAppendResult{}, c.observationLocked(), ErrMessageEventLaneLimit
+	}
+	started := session.runStarted[event.RunID]
+	if !started.IsZero() && now.Sub(started) > maxMessageEventRunDuration {
+		return metadb.MessageEventAppendResult{}, c.observationLocked(), ErrBackpressured
+	}
+	if session.runEventCounts[event.RunID] >= maxMessageEventEventsPerRun || session.runProjectionBytes[event.RunID]+int64(len(event.Payload)) > maxMessageEventProjectionBytesPerRun {
+		return metadb.MessageEventAppendResult{}, c.observationLocked(), ErrBackpressured
 	}
 
-	state := session.states[event.EventKey]
-	oldState, hadState := session.states[event.EventKey]
+	state := session.states[laneKey]
+	oldState, hadState := session.states[laneKey]
 	if state.EventKey == "" {
 		state = cachedMessageEventState(event)
 	}
@@ -163,23 +229,44 @@ func (c *messageEventStreamCache) appendCachedObserved(event metadb.MessageEvent
 	}
 
 	state.Status = metadb.EventStatusOpen
+	nextPayload := cloneBytes(state.SnapshotPayload)
 	switch event.EventType {
-	case metadb.EventTypeStreamDelta:
-		state.SnapshotPayload = reduceCachedMessageEventDelta(state.SnapshotPayload, event.Payload)
-	case metadb.EventTypeStreamSnapshot:
-		state.SnapshotPayload = cloneBytes(event.Payload)
+	case metadb.EventTypeOpen:
+		nextPayload = cachedMessageEventSnapshotFromPayload(event.Payload)
+	case metadb.EventTypeDelta:
+		nextPayload = reduceCachedMessageEventDelta(state.SnapshotPayload, event.Payload)
+	case metadb.EventTypeSnapshot:
+		nextPayload = cachedMessageEventSnapshotFromPayload(event.Payload)
 	}
+	if len(nextPayload) > maxMessageEventSnapshotBytes {
+		return metadb.MessageEventAppendResult{}, c.observationLocked(), ErrBackpressured
+	}
+	projectedPayloadBytes := c.payloadBytes - int64(len(state.SnapshotPayload)) + int64(len(nextPayload))
+	if projectedPayloadBytes > c.maxPayloadBytes {
+		return metadb.MessageEventAppendResult{}, c.observationLocked(), ErrBackpressured
+	}
+	state.SnapshotPayload = nextPayload
 	state.LastEventID = event.EventID
 	state.LastEventType = event.EventType
 	state.LastVisibility = event.Visibility
 	state.LastOccurredAt = event.OccurredAt
 	state.UpdatedAt = event.UpdatedAt
-	session.states[event.EventKey] = cloneMessageEventState(state)
+	state.LastMsgEventSeq = event.MsgEventSeq
+	state.LastAuthoritySequence = event.AuthoritySequence
+	session.states[laneKey] = cloneMessageEventState(state)
 	c.accountStateReplaceLocked(oldState, hadState, state)
 	session.updated = now
 
 	result := cachedMessageEventResult(event, state)
-	session.applied[event.EventID] = cloneMessageEventAppendResult(result)
+	session.applied[event.EventID] = lightweightMessageEventAppendResult(result)
+	session.appliedDigest[event.EventID] = metadb.MessageEventDigest(event)
+	session.runSequences[event.RunID] = event.AuthoritySequence
+	session.runMsgEventSeqs[event.RunID] = event.MsgEventSeq
+	session.runEventCounts[event.RunID]++
+	session.runProjectionBytes[event.RunID] += int64(len(event.Payload))
+	if started.IsZero() {
+		session.runStarted[event.RunID] = now
+	}
 	return result, c.observationLocked(), nil
 }
 
@@ -195,7 +282,7 @@ func (c *messageEventStreamCache) mergeTerminalPayload(event metadb.MessageEvent
 	if session == nil {
 		return event
 	}
-	state := session.states[event.EventKey]
+	state := session.states[messageEventLaneCacheKey(event)]
 	if state.EventKey == "" || len(state.SnapshotPayload) == 0 {
 		return event
 	}
@@ -203,53 +290,59 @@ func (c *messageEventStreamCache) mergeTerminalPayload(event metadb.MessageEvent
 	return event
 }
 
-func (c *messageEventStreamCache) markTerminalPersisted(event metadb.MessageEventAppend, result metadb.MessageEventAppendResult) {
-	if c == nil || !isMessageEventTerminalEvent(event.EventType) {
-		return
+func (c *messageEventStreamCache) prepareFinish(event metadb.MessageEventAppend) (metadb.MessageEventAppend, []metadb.MessageEventState, error) {
+	if c == nil || event.EventType != metadb.EventTypeFinish {
+		return event, nil, nil
 	}
-	key := messageEventCacheKey(event)
-	now := time.Now()
 	c.mu.Lock()
 	defer c.mu.Unlock()
-
-	session := c.sessions[key]
+	session := c.sessions[messageEventCacheKey(event)]
 	if session == nil {
-		return
+		return event, nil, nil
 	}
-	session.updated = now
-	oldState, hadState := session.states[result.EventKey]
-	state := cloneMessageEventState(result.State)
-	if state.EventKey == "" {
-		state = cachedMessageEventState(event)
-		state.Status = result.Status
-		state.LastMsgEventSeq = result.MsgEventSeq
-	}
-	session.states[result.EventKey] = state
-	c.accountStateReplaceLocked(oldState, hadState, state)
-	session.applied[event.EventID] = cloneMessageEventAppendResult(result)
-}
-
-func (c *messageEventStreamCache) openStatesForFinish(event metadb.MessageEventAppend) []metadb.MessageEventState {
-	if c == nil || event.EventType != metadb.EventTypeStreamFinish {
-		return nil
-	}
-	key := messageEventCacheKey(event)
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	session := c.sessions[key]
-	if session == nil || len(session.states) == 0 {
-		return nil
+	digest := metadb.MessageEventDigest(event)
+	if finishing, ok := session.finishingRuns[event.RunID]; ok {
+		if finishing.eventID != event.EventID {
+			return event, nil, ErrMessageEventRunTerminal
+		}
+		if finishing.digest != digest {
+			return event, nil, metadb.ErrStaleMeta
+		}
+		event.MsgEventSeq = finishing.seq
+	} else {
+		if last := session.runSequences[event.RunID]; last > 0 && event.AuthoritySequence != last+1 {
+			return event, nil, metadb.ErrStaleMeta
+		}
+		if event.MsgEventSeq == 0 {
+			event.MsgEventSeq = session.runMsgEventSeqs[event.RunID] + 1
+		}
+		session.finishingRuns[event.RunID] = messageEventFinishingRun{eventID: event.EventID, digest: digest, seq: event.MsgEventSeq}
 	}
 	out := make([]metadb.MessageEventState, 0, len(session.states))
 	for _, state := range session.states {
-		if state.EventKey == "" || state.EventKey == metadb.EventKeyFinish || isMessageEventTerminalStatus(state.Status) {
+		if state.EventKey == "" || state.RunID != event.RunID || isMessageEventTerminalStatus(state.Status) {
 			continue
 		}
 		out = append(out, cloneMessageEventState(state))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].EventKey < out[j].EventKey })
-	return out
+	return event, out, nil
+}
+
+func (c *messageEventStreamCache) abortFinish(event metadb.MessageEventAppend) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	session := c.sessions[messageEventCacheKey(event)]
+	if session == nil {
+		return
+	}
+	finishing, ok := session.finishingRuns[event.RunID]
+	if ok && finishing.eventID == event.EventID && finishing.digest == metadb.MessageEventDigest(event) {
+		delete(session.finishingRuns, event.RunID)
+	}
 }
 
 func (c *messageEventStreamCache) states(key metadb.MessageEventMessageKey) []metadb.MessageEventState {
@@ -296,6 +389,72 @@ func (c *messageEventStreamCache) removeObserved(event metadb.MessageEventAppend
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.deleteSessionLocked(key)
+	return c.observationLocked()
+}
+
+func (c *messageEventStreamCache) terminalResult(event metadb.MessageEventAppend) (metadb.MessageEventAppendResult, bool, error) {
+	if c == nil {
+		return metadb.MessageEventAppendResult{}, false, nil
+	}
+	key := messageEventCacheKey(event)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	session := c.sessions[key]
+	if session == nil {
+		return metadb.MessageEventAppendResult{}, false, nil
+	}
+	if result, ok := session.applied[event.EventID]; ok {
+		if session.appliedDigest[event.EventID] != metadb.MessageEventDigest(event) {
+			return metadb.MessageEventAppendResult{}, false, metadb.ErrStaleMeta
+		}
+		return cloneMessageEventAppendResult(result), true, nil
+	}
+	if _, terminal := session.terminalRuns[event.RunID]; terminal {
+		return metadb.MessageEventAppendResult{}, false, ErrMessageEventRunTerminal
+	}
+	return metadb.MessageEventAppendResult{}, false, nil
+}
+
+func (c *messageEventStreamCache) completeRunObserved(event metadb.MessageEventAppend, result metadb.MessageEventAppendResult) MessageEventStreamCacheObservation {
+	if c == nil {
+		return MessageEventStreamCacheObservation{}
+	}
+	key := messageEventCacheKey(event)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	session := c.sessions[key]
+	if session == nil {
+		session = &messageEventStreamCacheSession{
+			states:             make(map[messageEventLaneKey]metadb.MessageEventState),
+			applied:            make(map[string]metadb.MessageEventAppendResult),
+			appliedDigest:      make(map[string]string),
+			terminalRuns:       make(map[string]metadb.MessageEventAppendResult),
+			runSequences:       make(map[string]uint64),
+			runMsgEventSeqs:    make(map[string]uint64),
+			runEventCounts:     make(map[string]int),
+			runProjectionBytes: make(map[string]int64),
+			runStarted:         make(map[string]time.Time),
+			finishingRuns:      make(map[string]messageEventFinishingRun),
+		}
+		c.sessions[key] = session
+	}
+	for laneKey, state := range session.states {
+		if laneKey.runID != event.RunID {
+			continue
+		}
+		c.accountStateRemoveLocked(state)
+		delete(session.states, laneKey)
+	}
+	session.applied[event.EventID] = lightweightMessageEventAppendResult(result)
+	session.appliedDigest[event.EventID] = metadb.MessageEventDigest(event)
+	session.terminalRuns[event.RunID] = lightweightMessageEventAppendResult(result)
+	session.runSequences[event.RunID] = event.AuthoritySequence
+	session.runMsgEventSeqs[event.RunID] = result.MsgEventSeq
+	delete(session.runEventCounts, event.RunID)
+	delete(session.runProjectionBytes, event.RunID)
+	delete(session.runStarted, event.RunID)
+	delete(session.finishingRuns, event.RunID)
+	session.updated = time.Now()
 	return c.observationLocked()
 }
 
@@ -357,9 +516,17 @@ func (c *messageEventStreamCache) sessionLocked(key messageEventStreamCacheKey, 
 		}
 	}
 	session = &messageEventStreamCacheSession{
-		states:  make(map[string]metadb.MessageEventState),
-		applied: make(map[string]metadb.MessageEventAppendResult),
-		updated: now,
+		states:             make(map[messageEventLaneKey]metadb.MessageEventState),
+		applied:            make(map[string]metadb.MessageEventAppendResult),
+		appliedDigest:      make(map[string]string),
+		terminalRuns:       make(map[string]metadb.MessageEventAppendResult),
+		runSequences:       make(map[string]uint64),
+		runMsgEventSeqs:    make(map[string]uint64),
+		runEventCounts:     make(map[string]int),
+		runProjectionBytes: make(map[string]int64),
+		runStarted:         make(map[string]time.Time),
+		finishingRuns:      make(map[string]messageEventFinishingRun),
+		updated:            now,
 	}
 	c.sessions[key] = session
 	return session, nil
@@ -434,16 +601,35 @@ func isMessageEventTerminalCacheSession(session *messageEventStreamCacheSession)
 	return true
 }
 
+func (c *messageEventStreamCache) runLaneCountLocked(session *messageEventStreamCacheSession, runID string) int {
+	count := 0
+	for laneKey := range session.states {
+		if laneKey.runID == runID {
+			count++
+		}
+	}
+	return count
+}
+
+func messageEventLaneCacheKey(event metadb.MessageEventAppend) messageEventLaneKey {
+	return messageEventLaneKey{runID: event.RunID, eventKey: event.EventKey}
+}
+
 type messageEventAppendRPCRequest struct {
-	Op    string                          `json:"op,omitempty"`
-	Event metadb.MessageEventAppend       `json:"event,omitempty"`
-	Keys  []metadb.MessageEventMessageKey `json:"keys,omitempty"`
-	Limit int                             `json:"limit,omitempty"`
+	Op          string                          `json:"op,omitempty"`
+	Event       metadb.MessageEventAppend       `json:"event,omitempty"`
+	Keys        []metadb.MessageEventMessageKey `json:"keys,omitempty"`
+	Limit       int                             `json:"limit,omitempty"`
+	ChannelID   string                          `json:"channel_id,omitempty"`
+	ChannelType int64                           `json:"channel_type,omitempty"`
+	MessageID   uint64                          `json:"message_id,omitempty"`
 }
 
 type messageEventAppendRPCResponse struct {
 	Result metadb.MessageEventAppendResult `json:"result,omitempty"`
 	States []messageEventStatesRPCEntry    `json:"states,omitempty"`
+	Anchor MessageEventAnchor              `json:"anchor,omitempty"`
+	Found  bool                            `json:"found,omitempty"`
 }
 
 type messageEventStatesRPCEntry struct {
@@ -473,9 +659,31 @@ func (h messageEventAppendRPCHandler) HandleRPC(ctx context.Context, payload []b
 			return nil, err
 		}
 		return json.Marshal(messageEventAppendRPCResponse{States: messageEventStateEntriesFromMap(rows)})
+	case "anchor_lookup":
+		anchor, found, err := h.node.lookupMessageEventAnchorLocal(ctx, req.ChannelID, req.ChannelType, req.MessageID)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(messageEventAppendRPCResponse{Anchor: anchor, Found: found})
 	default:
 		return nil, metadb.ErrInvalidArgument
 	}
+}
+
+func (n *Node) forwardMessageEventAnchorLookup(ctx context.Context, nodeID uint64, channelID string, channelType int64, messageID uint64) (MessageEventAnchor, bool, error) {
+	body, err := json.Marshal(messageEventAppendRPCRequest{Op: "anchor_lookup", ChannelID: channelID, ChannelType: channelType, MessageID: messageID})
+	if err != nil {
+		return MessageEventAnchor{}, false, err
+	}
+	respBody, err := n.CallRPC(ctx, nodeID, clusternet.RPCMessageEventAppend, body)
+	if err != nil {
+		return MessageEventAnchor{}, false, err
+	}
+	var resp messageEventAppendRPCResponse
+	if err := json.Unmarshal(respBody, &resp); err != nil {
+		return MessageEventAnchor{}, false, err
+	}
+	return resp.Anchor, resp.Found, nil
 }
 
 func (n *Node) forwardMessageEventAppend(ctx context.Context, nodeID uint64, event metadb.MessageEventAppend) (metadb.MessageEventAppendResult, error) {
@@ -543,31 +751,27 @@ func messageEventStateMapFromEntries(entries []messageEventStatesRPCEntry) map[m
 func normalizeClusterMessageEventAppend(event metadb.MessageEventAppend) (metadb.MessageEventAppend, error) {
 	event.ChannelID = strings.TrimSpace(event.ChannelID)
 	event.ClientMsgNo = strings.TrimSpace(event.ClientMsgNo)
+	event.RunID = strings.TrimSpace(event.RunID)
+	event.AuthorizationFence = strings.TrimSpace(event.AuthorizationFence)
 	event.EventID = strings.TrimSpace(event.EventID)
 	event.EventKey = strings.TrimSpace(event.EventKey)
 	event.EventType = strings.ToLower(strings.TrimSpace(event.EventType))
 	event.Visibility = strings.TrimSpace(event.Visibility)
 	event.Payload = cloneBytes(event.Payload)
-	if event.ChannelID == "" || event.ChannelType <= 0 || event.ClientMsgNo == "" || event.EventID == "" || event.EventType == "" {
+	if event.ChannelID == "" || event.ChannelType <= 0 || event.ClientMsgNo == "" || event.RunID == "" || event.AuthorizationFence == "" || event.AuthoritySequence == 0 || event.EventID == "" || event.EventType == "" {
 		return metadb.MessageEventAppend{}, metadb.ErrInvalidArgument
 	}
 	if event.EventKey == "" {
 		event.EventKey = metadb.EventKeyDefault
 	}
-	if event.EventType == metadb.EventTypeStreamFinish {
-		event.EventKey = metadb.EventKeyFinish
-	}
 	if event.Visibility == "" {
 		event.Visibility = metadb.VisibilityPublic
 	}
 	switch event.EventType {
-	case metadb.EventTypeStreamOpen,
-		metadb.EventTypeStreamDelta,
-		metadb.EventTypeStreamClose,
-		metadb.EventTypeStreamError,
-		metadb.EventTypeStreamCancel,
-		metadb.EventTypeStreamSnapshot,
-		metadb.EventTypeStreamFinish:
+	case metadb.EventTypeOpen,
+		metadb.EventTypeDelta,
+		metadb.EventTypeSnapshot,
+		metadb.EventTypeFinish:
 		return event, nil
 	default:
 		return metadb.MessageEventAppend{}, metadb.ErrInvalidArgument
@@ -591,6 +795,25 @@ func (n *Node) appendMessageEventLocal(ctx context.Context, event metadb.Message
 	if route.Leader != n.cfg.NodeID {
 		return metadb.MessageEventAppendResult{}, ErrNotLeader
 	}
+	if n.defaultSlotMetaDB != nil {
+		applied, found, err := n.defaultSlotMetaDB.ForHashSlot(route.HashSlot).GetMessageEventApplied(ctx, event.ChannelID, event.ChannelType, event.ClientMsgNo, event.EventID)
+		if err != nil {
+			return metadb.MessageEventAppendResult{}, err
+		}
+		if found {
+			if applied.EventDigest != metadb.MessageEventDigest(event) {
+				return metadb.MessageEventAppendResult{}, metadb.ErrStaleMeta
+			}
+			return metadb.MessageEventAppendResult{Applied: false, ChannelID: event.ChannelID, ChannelType: event.ChannelType, ClientMsgNo: event.ClientMsgNo, RunID: event.RunID, EventID: event.EventID, EventKey: applied.EventKey, MsgEventSeq: applied.MsgEventSeq, Status: applied.Status}, nil
+		}
+	}
+	runTerminal, err := n.messageEventRunTerminalState(ctx, route.HashSlot, event)
+	if err != nil {
+		return metadb.MessageEventAppendResult{}, err
+	}
+	if runTerminal {
+		return metadb.MessageEventAppendResult{}, ErrMessageEventRunTerminal
+	}
 	if isMessageEventCacheOnlyEvent(event.EventType) {
 		start := time.Now()
 		result, observation, err := n.messageEventStreamCache.appendCachedObserved(event)
@@ -598,21 +821,14 @@ func (n *Node) appendMessageEventLocal(ctx context.Context, event metadb.Message
 		n.setMessageEventStreamCache(observation)
 		return result, err
 	}
-	if event.EventType == metadb.EventTypeStreamFinish {
-		return n.appendMessageEventFinishLocal(ctx, event)
-	}
-	if isMessageEventTerminalEvent(event.EventType) {
-		start := time.Now()
-		event = n.messageEventStreamCache.mergeTerminalPayload(event)
-		result, err := n.appendMessageEventDurable(ctx, event)
-		if err != nil {
-			n.observeMessageEventAppend(messageEventPathDurable, event, messageEventResultForError(err), time.Since(start))
-			return metadb.MessageEventAppendResult{}, err
+	if event.EventType == metadb.EventTypeFinish {
+		if result, applied, err := n.messageEventStreamCache.terminalResult(event); err != nil || applied {
+			if applied {
+				result.Applied = false
+			}
+			return result, err
 		}
-		n.messageEventStreamCache.markTerminalPersisted(event, result)
-		n.setMessageEventStreamCache(n.messageEventStreamCache.observation())
-		n.observeMessageEventAppend(messageEventPathDurable, event, messageEventResultOK, time.Since(start))
-		return result, nil
+		return n.appendMessageEventFinishLocal(ctx, event)
 	}
 	start := time.Now()
 	result, err := n.appendMessageEventDurable(ctx, event)
@@ -623,9 +839,19 @@ func (n *Node) appendMessageEventLocal(ctx context.Context, event metadb.Message
 func (n *Node) appendMessageEventFinishLocal(ctx context.Context, event metadb.MessageEventAppend) (metadb.MessageEventAppendResult, error) {
 	start := time.Now()
 	stageStart := time.Now()
-	openStates := n.messageEventStreamCache.openStatesForFinish(event)
+	var err error
+	event, openStates, err := n.messageEventStreamCache.prepareFinish(event)
+	if err != nil {
+		return metadb.MessageEventAppendResult{}, err
+	}
 	cacheOpenDur := time.Since(stageStart)
-	if len(openStates) == 0 && !messageEventPayloadHasSnapshot(event.Payload) {
+	hasDurableRun, err := n.hasDurableMessageEventRun(ctx, event)
+	if err != nil {
+		n.messageEventStreamCache.abortFinish(event)
+		return metadb.MessageEventAppendResult{}, err
+	}
+	if len(openStates) == 0 && !hasDurableRun && !messageEventPayloadHasSnapshot(event.Payload) {
+		n.messageEventStreamCache.abortFinish(event)
 		n.observeMessageEventAppendStage(messageEventPathFinishBatch, messageEventResultCacheMiss, messageEventAppendStageFinishCacheOpen, cacheOpenDur)
 		n.observeMessageEventAppend(messageEventPathFinishBatch, event, messageEventResultCacheMiss, time.Since(start))
 		n.setMessageEventStreamCache(n.messageEventStreamCache.observation())
@@ -634,29 +860,67 @@ func (n *Node) appendMessageEventFinishLocal(ctx context.Context, event metadb.M
 	stageStart = time.Now()
 	events := make([]metadb.MessageEventAppend, 0, len(openStates)+1)
 	for _, state := range openStates {
-		events = append(events, finishFlushMessageEvent(event, state))
+		if state.EventKey == event.EventKey {
+			event.Payload = mergeMessageEventTerminalPayload(event.Payload, state.SnapshotPayload)
+			continue
+		}
+		projection := finishFlushMessageEvent(event, state)
+		projection.ProjectionOnly = true
+		projection.Payload = cloneBytes(state.SnapshotPayload)
+		events = append(events, projection)
 	}
 	events = append(events, event)
 	batchBuildDur := time.Since(stageStart)
 	var (
 		result metadb.MessageEventAppendResult
 		path   string
-		err    error
 	)
 	result, path, err = n.appendMessageEventFinishPrepared(ctx, event, events)
 	appendResult := messageEventResultForError(err)
 	n.observeMessageEventAppendStage(path, appendResult, messageEventAppendStageFinishCacheOpen, cacheOpenDur)
 	n.observeMessageEventAppendStage(path, appendResult, messageEventAppendStageFinishBatchBuild, batchBuildDur)
 	if err != nil {
+		n.messageEventStreamCache.abortFinish(event)
 		n.observeMessageEventAppend(path, event, appendResult, time.Since(start))
 		return metadb.MessageEventAppendResult{}, err
 	}
 	stageStart = time.Now()
-	observation := n.messageEventStreamCache.removeObserved(event)
+	observation := n.messageEventStreamCache.completeRunObserved(event, result)
 	n.observeMessageEventAppendStage(path, messageEventResultOK, messageEventAppendStageFinishCacheRemove, time.Since(stageStart))
 	n.setMessageEventStreamCache(observation)
 	n.observeMessageEventAppend(path, event, messageEventResultOK, time.Since(start))
 	return result, nil
+}
+
+func (n *Node) messageEventRunTerminalState(ctx context.Context, hashSlot uint16, event metadb.MessageEventAppend) (bool, error) {
+	if n == nil || n.defaultSlotMetaDB == nil {
+		return false, nil
+	}
+	cursor, found, err := n.defaultSlotMetaDB.ForHashSlot(hashSlot).GetMessageEventCursor(ctx, event.ChannelID, event.ChannelType, event.ClientMsgNo, event.RunID)
+	if err != nil {
+		return false, err
+	}
+	return found && cursor.Terminal, nil
+}
+
+func (n *Node) hasDurableMessageEventRun(ctx context.Context, event metadb.MessageEventAppend) (bool, error) {
+	if n == nil || n.defaultSlotMetaDB == nil {
+		return false, nil
+	}
+	route, err := n.RouteKey(event.ChannelID)
+	if err != nil {
+		return false, err
+	}
+	states, err := n.defaultSlotMetaDB.ForHashSlot(route.HashSlot).ListMessageEventStates(ctx, event.ChannelID, event.ChannelType, event.ClientMsgNo, maxMessageEventLanesPerRun+1)
+	if err != nil {
+		return false, err
+	}
+	for _, state := range states {
+		if state.RunID == event.RunID && state.LastEventType != metadb.EventTypeFinish {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (n *Node) appendMessageEventFinishPrepared(ctx context.Context, event metadb.MessageEventAppend, events []metadb.MessageEventAppend) (metadb.MessageEventAppendResult, string, error) {
@@ -688,7 +952,7 @@ func (c *messageEventFinishCoalescer) append(ctx context.Context, n *Node, event
 		events: cloneMessageEventAppends(events),
 		done:   make(chan messageEventFinishCoalesceResult, 1),
 	}
-	key := messageEventFinishCoalesceKey{channelID: event.ChannelID, channelType: event.ChannelType}
+	key := messageEventFinishCoalesceKey{channelID: event.ChannelID, channelType: event.ChannelType, clientMsgNo: event.ClientMsgNo, runID: event.RunID}
 	c.mu.Lock()
 	group := c.groups[key]
 	if group == nil {
@@ -756,14 +1020,10 @@ func (c *messageEventFinishCoalescer) flush(n *Node, key messageEventFinishCoale
 	if len(live) == 0 {
 		return
 	}
+	primary := live[0]
 	path := messageEventPathFinishBatch
-	ctx := messageEventFinishCoalesceContext(live)
-	allEvents := make([]metadb.MessageEventAppend, 0, len(live))
-	for _, req := range live {
-		allEvents = append(allEvents, req.events...)
-	}
-	results, err := n.appendMessageEventsCoalesced(ctx, allEvents)
-	if len(allEvents) == 1 {
+	results, err := n.appendMessageEventsCoalesced(messageEventFinishCoalesceContext(live), primary.events)
+	if len(primary.events) == 1 {
 		path = messageEventPathDurable
 	}
 	if err != nil {
@@ -776,11 +1036,18 @@ func (c *messageEventFinishCoalescer) flush(n *Node, key messageEventFinishCoale
 	for _, result := range results {
 		byEvent[messageEventResultKey{clientMsgNo: result.ClientMsgNo, eventID: result.EventID}] = result
 	}
-	for _, req := range live {
+	for index, req := range live {
+		if index > 0 && req.event.EventID != primary.event.EventID {
+			req.done <- messageEventFinishCoalesceResult{path: path, err: ErrMessageEventRunTerminal}
+			continue
+		}
 		result, ok := byEvent[messageEventResultKey{clientMsgNo: req.event.ClientMsgNo, eventID: req.event.EventID}]
 		if !ok {
 			req.done <- messageEventFinishCoalesceResult{path: path, err: metadb.ErrCorruptValue}
 			continue
+		}
+		if index > 0 {
+			result.Applied = false
 		}
 		req.done <- messageEventFinishCoalesceResult{result: result, path: path}
 	}
@@ -840,8 +1107,12 @@ func finishFlushMessageEvent(finish metadb.MessageEventAppend, state metadb.Mess
 	event := finish
 	event.EventID = finishFlushMessageEventID(finish.EventID, state.EventKey)
 	event.EventKey = state.EventKey
-	event.EventType = metadb.EventTypeStreamClose
-	event.Payload = mergeMessageEventTerminalPayload(finish.Payload, state.SnapshotPayload)
+	event.EventType = metadb.EventTypeSnapshot
+	event.Payload = cloneBytes(state.SnapshotPayload)
+	event.AuthoritySequence = state.LastAuthoritySequence
+	event.MsgEventSeq = state.LastMsgEventSeq
+	event.OccurredAt = state.LastOccurredAt
+	event.UpdatedAt = state.UpdatedAt
 	return event
 }
 
@@ -972,28 +1243,32 @@ func messageEventCacheKey(event metadb.MessageEventAppend) messageEventStreamCac
 
 func cachedMessageEventState(event metadb.MessageEventAppend) metadb.MessageEventState {
 	return metadb.MessageEventState{
-		ChannelID:       event.ChannelID,
-		ChannelType:     event.ChannelType,
-		ClientMsgNo:     event.ClientMsgNo,
-		EventKey:        event.EventKey,
-		Status:          metadb.EventStatusOpen,
-		LastEventID:     event.EventID,
-		LastEventType:   event.EventType,
-		LastVisibility:  event.Visibility,
-		LastOccurredAt:  event.OccurredAt,
-		UpdatedAt:       event.UpdatedAt,
-		LastMsgEventSeq: 0,
-		EndReason:       0,
-		Error:           "",
+		ChannelID:             event.ChannelID,
+		ChannelType:           event.ChannelType,
+		ClientMsgNo:           event.ClientMsgNo,
+		RunID:                 event.RunID,
+		EventKey:              event.EventKey,
+		Status:                metadb.EventStatusOpen,
+		LastEventID:           event.EventID,
+		LastEventType:         event.EventType,
+		LastVisibility:        event.Visibility,
+		LastOccurredAt:        event.OccurredAt,
+		UpdatedAt:             event.UpdatedAt,
+		LastMsgEventSeq:       event.MsgEventSeq,
+		LastAuthoritySequence: event.AuthoritySequence,
+		EndReason:             0,
+		Error:                 "",
 	}
 }
 
 func cachedMessageEventResult(event metadb.MessageEventAppend, state metadb.MessageEventState) metadb.MessageEventAppendResult {
 	state = cloneMessageEventState(state)
 	return metadb.MessageEventAppendResult{
+		Applied:     true,
 		ChannelID:   event.ChannelID,
 		ChannelType: event.ChannelType,
 		ClientMsgNo: event.ClientMsgNo,
+		RunID:       event.RunID,
 		EventID:     event.EventID,
 		EventKey:    state.EventKey,
 		MsgEventSeq: state.LastMsgEventSeq,
@@ -1004,28 +1279,39 @@ func cachedMessageEventResult(event metadb.MessageEventAppend, state metadb.Mess
 
 func reduceCachedMessageEventDelta(existing []byte, payload []byte) []byte {
 	var delta struct {
-		Kind  string `json:"kind"`
-		Delta string `json:"delta"`
+		TextDelta         string `json:"text_delta"`
+		AuthoritySequence uint64 `json:"authority_sequence"`
+		ProjectionDigest  string `json:"projection_digest_sha256"`
 	}
-	if err := json.Unmarshal(payload, &delta); err != nil || delta.Kind != metadb.SnapshotKindText {
+	if err := json.Unmarshal(payload, &delta); err != nil || delta.TextDelta == "" {
 		return cloneBytes(payload)
 	}
 	text := ""
-	var current struct {
-		Kind string `json:"kind"`
-		Text string `json:"text"`
+	var current map[string]any
+	if json.Unmarshal(existing, &current) != nil {
+		current = map[string]any{"state": "running", "complete": false}
 	}
-	if err := json.Unmarshal(existing, &current); err == nil && current.Kind == metadb.SnapshotKindText {
-		text = current.Text
+	if currentText, ok := current["text"].(string); ok {
+		text = currentText
 	}
-	out, err := json.Marshal(struct {
-		Kind string `json:"kind"`
-		Text string `json:"text"`
-	}{Kind: metadb.SnapshotKindText, Text: text + delta.Delta})
+	current["text"] = text + delta.TextDelta
+	current["authority_sequence"] = delta.AuthoritySequence
+	current["projection_digest_sha256"] = delta.ProjectionDigest
+	out, err := json.Marshal(current)
 	if err != nil {
 		return cloneBytes(payload)
 	}
 	return out
+}
+
+func cachedMessageEventSnapshotFromPayload(payload []byte) []byte {
+	var body struct {
+		Snapshot json.RawMessage `json:"snapshot"`
+	}
+	if json.Unmarshal(payload, &body) != nil || len(body.Snapshot) == 0 || string(body.Snapshot) == "null" {
+		return nil
+	}
+	return cloneBytes(body.Snapshot)
 }
 
 func mergeMessageEventTerminalPayload(payload []byte, snapshot []byte) []byte {
@@ -1083,7 +1369,7 @@ func cloneJSONRawMessage(in []byte) json.RawMessage {
 
 func isMessageEventCacheOnlyEvent(eventType string) bool {
 	switch eventType {
-	case metadb.EventTypeStreamOpen, metadb.EventTypeStreamDelta, metadb.EventTypeStreamSnapshot:
+	case metadb.EventTypeOpen, metadb.EventTypeDelta, metadb.EventTypeSnapshot:
 		return true
 	default:
 		return false
@@ -1091,12 +1377,7 @@ func isMessageEventCacheOnlyEvent(eventType string) bool {
 }
 
 func isMessageEventTerminalEvent(eventType string) bool {
-	switch eventType {
-	case metadb.EventTypeStreamClose, metadb.EventTypeStreamError, metadb.EventTypeStreamCancel, metadb.EventTypeStreamFinish:
-		return true
-	default:
-		return false
-	}
+	return eventType == metadb.EventTypeFinish
 }
 
 func isMessageEventTerminalStatus(status string) bool {
@@ -1132,6 +1413,11 @@ func cloneMessageEventAppends(events []metadb.MessageEventAppend) []metadb.Messa
 
 func cloneMessageEventAppendResult(result metadb.MessageEventAppendResult) metadb.MessageEventAppendResult {
 	result.State = cloneMessageEventState(result.State)
+	return result
+}
+
+func lightweightMessageEventAppendResult(result metadb.MessageEventAppendResult) metadb.MessageEventAppendResult {
+	result.State.SnapshotPayload = nil
 	return result
 }
 

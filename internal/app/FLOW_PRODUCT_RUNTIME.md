@@ -197,9 +197,9 @@ If that runtime also implements the committed channel message read surface,
 `New` wires a `ChannelMessageReader` so `/channel/messagesync` can use the same
 message usecase as the gateway send path.
 If that runtime also implements the message event projection surface, `New`
-wires `MessageEventStore` so `/message/event` appends and `/channel/messagesync`
+wires `MessageEventStore` so `/message/events:append` appends and `/channel/messagesync`
 event summaries share the same Slot/meta reducer as other cluster-owned message
-metadata. `/message/eventsync` remains outside the app surface in this phase.
+metadata.
 
 If the runtime exposes CMD memberships and committed CMD Channel reads, New
 wires internal/usecase/cmdsync through CMDSyncStore. Explicit bind/unbind

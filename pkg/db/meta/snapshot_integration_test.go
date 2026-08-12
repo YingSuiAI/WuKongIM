@@ -195,7 +195,7 @@ func TestImportHashSlotSnapshotReaderForRestoreInvalidatesAuthenticationTokens(t
 	if err := shard.CreateUser(ctx, User{UID: "u-stream", Token: "user-token", DeviceFlag: 1, DeviceLevel: 2}); err != nil {
 		t.Fatalf("CreateUser(): %v", err)
 	}
-	if err := shard.UpsertDevice(ctx, Device{UID: "u-stream", DeviceFlag: 1, Token: "device-token", DeviceLevel: 2}); err != nil {
+	if err := shard.UpsertDevice(ctx, Device{UID: "u-stream", DeviceFlag: 1, DeviceID: "device-1", AppInstanceID: "app-1", Token: "device-token", DeviceLevel: 2}); err != nil {
 		t.Fatalf("UpsertDevice(): %v", err)
 	}
 	reader, err := source.db.OpenBackupHashSlotSnapshot(ctx, []uint16{5})
@@ -214,7 +214,7 @@ func TestImportHashSlotSnapshotReaderForRestoreInvalidatesAuthenticationTokens(t
 	if err != nil || !ok || user.Token != "" || user.DeviceFlag != 1 || user.DeviceLevel != 2 {
 		t.Fatalf("restored user = %#v, %v, %v", user, ok, err)
 	}
-	device, ok, err := target.db.HashSlot(5).GetDevice(ctx, "u-stream", 1)
+	device, ok, err := target.db.HashSlot(5).GetDevice(ctx, "u-stream", 1, "device-1", "app-1")
 	if err != nil || !ok || device.Token != "" || device.DeviceLevel != 2 {
 		t.Fatalf("restored device = %#v, %v, %v", device, ok, err)
 	}

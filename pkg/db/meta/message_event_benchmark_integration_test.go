@@ -26,7 +26,7 @@ func BenchmarkMessageEventAppend(b *testing.B) {
 			ChannelType: 2,
 			ClientMsgNo: "cmn-" + strconv.Itoa(i),
 			EventID:     "evt-" + strconv.Itoa(i),
-			EventType:   EventTypeStreamDelta,
+			EventType:   EventTypeDelta,
 			Payload:     payload,
 			UpdatedAt:   int64(i + 1),
 		})
@@ -47,7 +47,7 @@ func BenchmarkMessageEventAppendIdempotent(b *testing.B) {
 		ChannelType: 2,
 		ClientMsgNo: "cmn-idempotent",
 		EventID:     "evt-idempotent",
-		EventType:   EventTypeStreamDelta,
+		EventType:   EventTypeDelta,
 		Payload:     []byte(`{"kind":"text","delta":"x"}`),
 		UpdatedAt:   1,
 	}
@@ -86,7 +86,7 @@ func BenchmarkMessageEventWriteBatchAppend(b *testing.B) {
 						ChannelType: 2,
 						ClientMsgNo: fmt.Sprintf("cmn-%d-%d", i, j),
 						EventID:     "evt-" + strconv.Itoa(n),
-						EventType:   EventTypeStreamDelta,
+						EventType:   EventTypeDelta,
 						Payload:     payload,
 						UpdatedAt:   int64(n + 1),
 					})

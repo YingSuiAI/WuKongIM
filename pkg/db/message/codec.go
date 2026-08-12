@@ -8,7 +8,7 @@ import (
 	"github.com/WuKongIM/WuKongIM/pkg/db/internal/rowcodec"
 )
 
-const messageValueVersion byte = 1
+const messageValueVersion byte = 2
 
 func encodeMessageHeader(key []byte, row messageRow) ([]byte, error) {
 	row = normalizeMessageRow(row)
@@ -25,9 +25,6 @@ func encodeMessageHeader(key []byte, row messageRow) ([]byte, error) {
 	if err := w.Uint8(messageColumnIDSetting, row.Setting); err != nil {
 		return nil, err
 	}
-	if err := w.Uint8(messageColumnIDStreamFlag, row.StreamFlag); err != nil {
-		return nil, err
-	}
 	if err := w.String(messageColumnIDMsgKey, row.MsgKey); err != nil {
 		return nil, err
 	}
@@ -38,12 +35,6 @@ func encodeMessageHeader(key []byte, row messageRow) ([]byte, error) {
 		return nil, err
 	}
 	if err := w.String(messageColumnIDClientMsgNo, row.ClientMsgNo); err != nil {
-		return nil, err
-	}
-	if err := w.String(messageColumnIDStreamNo, row.StreamNo); err != nil {
-		return nil, err
-	}
-	if err := w.Uint64(messageColumnIDStreamID, row.StreamID); err != nil {
 		return nil, err
 	}
 	if err := w.Int64(messageColumnIDTimestamp, row.Timestamp); err != nil {
@@ -83,13 +74,10 @@ func encodedMessageHeaderLen(row messageRow) int {
 	payloadLen += encodedUint64ColumnLen(&last, messageColumnIDMessageID, row.MessageID)
 	payloadLen += encodedUint8ColumnLen(&last, messageColumnIDFramerFlags, row.FramerFlags)
 	payloadLen += encodedUint8ColumnLen(&last, messageColumnIDSetting, row.Setting)
-	payloadLen += encodedUint8ColumnLen(&last, messageColumnIDStreamFlag, row.StreamFlag)
 	payloadLen += encodedStringColumnLen(&last, messageColumnIDMsgKey, row.MsgKey)
 	payloadLen += encodedUint64ColumnLen(&last, messageColumnIDExpire, row.Expire)
 	payloadLen += encodedUint64ColumnLen(&last, messageColumnIDClientSeq, row.ClientSeq)
 	payloadLen += encodedStringColumnLen(&last, messageColumnIDClientMsgNo, row.ClientMsgNo)
-	payloadLen += encodedStringColumnLen(&last, messageColumnIDStreamNo, row.StreamNo)
-	payloadLen += encodedUint64ColumnLen(&last, messageColumnIDStreamID, row.StreamID)
 	payloadLen += encodedInt64ColumnLen(&last, messageColumnIDTimestamp, row.Timestamp)
 	payloadLen += encodedStringColumnLen(&last, messageColumnIDChannelID, row.ChannelID)
 	payloadLen += encodedUint8ColumnLen(&last, messageColumnIDChannelType, row.ChannelType)
@@ -116,13 +104,10 @@ func encodeMessageHeaderTo(dst []byte, key []byte, row messageRow) error {
 	pos = putUint64Column(payload, pos, &last, messageColumnIDMessageID, row.MessageID)
 	pos = putUint8Column(payload, pos, &last, messageColumnIDFramerFlags, row.FramerFlags)
 	pos = putUint8Column(payload, pos, &last, messageColumnIDSetting, row.Setting)
-	pos = putUint8Column(payload, pos, &last, messageColumnIDStreamFlag, row.StreamFlag)
 	pos = putStringColumn(payload, pos, &last, messageColumnIDMsgKey, row.MsgKey)
 	pos = putUint64Column(payload, pos, &last, messageColumnIDExpire, row.Expire)
 	pos = putUint64Column(payload, pos, &last, messageColumnIDClientSeq, row.ClientSeq)
 	pos = putStringColumn(payload, pos, &last, messageColumnIDClientMsgNo, row.ClientMsgNo)
-	pos = putStringColumn(payload, pos, &last, messageColumnIDStreamNo, row.StreamNo)
-	pos = putUint64Column(payload, pos, &last, messageColumnIDStreamID, row.StreamID)
 	pos = putInt64Column(payload, pos, &last, messageColumnIDTimestamp, row.Timestamp)
 	pos = putStringColumn(payload, pos, &last, messageColumnIDChannelID, row.ChannelID)
 	pos = putUint8Column(payload, pos, &last, messageColumnIDChannelType, row.ChannelType)
@@ -178,10 +163,6 @@ func decodeMessageHeaderColumn(s *rowcodec.Scanner, row *messageRow) error {
 		value, err := s.Uint8()
 		row.Setting = value
 		return err
-	case messageColumnIDStreamFlag:
-		value, err := s.Uint8()
-		row.StreamFlag = value
-		return err
 	case messageColumnIDMsgKey:
 		value, err := s.String()
 		row.MsgKey = value
@@ -197,14 +178,6 @@ func decodeMessageHeaderColumn(s *rowcodec.Scanner, row *messageRow) error {
 	case messageColumnIDClientMsgNo:
 		value, err := s.String()
 		row.ClientMsgNo = value
-		return err
-	case messageColumnIDStreamNo:
-		value, err := s.String()
-		row.StreamNo = value
-		return err
-	case messageColumnIDStreamID:
-		value, err := s.Uint64()
-		row.StreamID = value
 		return err
 	case messageColumnIDTimestamp:
 		value, err := s.Int64()

@@ -355,6 +355,7 @@ func TestParseCapacityMessageEventConfig(t *testing.T) {
 
 	cfg, code := parseCapacityMessageEventConfig([]string{
 		"--api", "http://127.0.0.1:5001,http://127.0.0.1:5002",
+		"--service-token", "message-event-secret",
 		"--run-id", "message-event-cli",
 		"--channels", "100",
 		"--streams-per-channel", "3",
@@ -376,6 +377,9 @@ func TestParseCapacityMessageEventConfig(t *testing.T) {
 	}
 	if cfg.RunID != "message-event-cli" {
 		t.Fatalf("run id = %q", cfg.RunID)
+	}
+	if cfg.ServiceToken != "message-event-secret" {
+		t.Fatalf("service token = %q", cfg.ServiceToken)
 	}
 	if cfg.Channels != 100 || cfg.StreamsPerChannel != 3 || cfg.LanesPerStream != 4 || cfg.DeltasPerLane != 5 {
 		t.Fatalf("shape = %+v", cfg)

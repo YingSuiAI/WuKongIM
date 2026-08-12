@@ -148,7 +148,6 @@
 | `setting`     | SettingFlags | 否   | 消息设置                         |
 | `msgKey`      | string       | 否   | 消息验证Key                      |
 | `expire`      | integer      | 否   | 消息过期时间(秒), 0表示不过期    |
-| `streamNo`    | string       | 否   | 流编号 (如果 setting.stream 为 true) |
 | `topic`       | string       | 否   | 消息 Topic (如果 setting.topic 为 true) |
 
 **最小示例**
@@ -216,9 +215,6 @@
 | `msgKey`      | string       | 否   | 消息验证Key                            |
 | `expire`      | integer      | 否   | 消息过期时间(秒) (协议版本 >= 3)       |
 | `clientMsgNo` | string       | 否   | 客户端消息唯一编号 (用于去重)          |
-| `streamNo`    | string       | 否   | 流编号 (协议版本 >= 2)                 |
-| `streamId`    | string       | 否   | 流序列号 (协议版本 >= 2)               |
-| `streamFlag`  | integer      | 否   | 流标记 (0:Start, 1:Ing, 2:End)         |
 | `topic`       | string       | 否   | 消息 Topic (如果 setting.topic 为 true) |
 
 **最小示例**

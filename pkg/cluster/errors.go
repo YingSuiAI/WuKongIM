@@ -25,4 +25,8 @@ var (
 	ErrBackpressured = errors.New("cluster: backpressured")
 	// ErrMessageEventStreamCacheMiss indicates that a stream finish would lose cache-only event lanes.
 	ErrMessageEventStreamCacheMiss = errors.New("cluster: message event stream cache miss")
+	// ErrMessageEventRunTerminal rejects an event after its run terminal was committed.
+	ErrMessageEventRunTerminal = errors.New("cluster: message event run terminal")
+	// ErrMessageEventLaneLimit rejects a ninth projection lane in one run.
+	ErrMessageEventLaneLimit = errors.New("cluster: message event lane limit")
 )

@@ -40,12 +40,12 @@ Use these exact metadb constants in `pkg/db/meta/table_message_event.go`:
 
 ```go
 const (
-	EventTypeStreamDelta    = "stream.delta"
-	EventTypeStreamClose    = "stream.close"
-	EventTypeStreamError    = "stream.error"
-	EventTypeStreamCancel   = "stream.cancel"
-	EventTypeStreamSnapshot = "stream.snapshot"
-	EventTypeStreamFinish   = "stream.finish"
+	EventTypeDelta    = "delta"
+	EventTypeFinish    = "finish"
+	EventTypeFinish    = "finish"
+	EventTypeFinish   = "finish"
+	EventTypeSnapshot = "snapshot"
+	EventTypeFinish   = "finish"
 
 	EventStatusOpen      = "open"
 	EventStatusClosed    = "closed"
@@ -53,7 +53,7 @@ const (
 	EventStatusCancelled = "cancelled"
 
 	EventKeyDefault = "main"
-	EventKeyFinish  = "__finish__"
+	EventKeyTerminal  = "__finish__"
 
 	VisibilityPublic     = "public"
 	VisibilityPrivate    = "private"
@@ -145,7 +145,7 @@ func TestMessageEventAppendTextLifecycle(t *testing.T) {
 
 	first, err := shard.AppendMessageEvent(ctx, MessageEventAppend{
 		ChannelID: "g1", ChannelType: 2, ClientMsgNo: "cmn-text",
-		EventID: "evt-1", EventKey: "main", EventType: EventTypeStreamDelta,
+		EventID: "evt-1", EventKey: "main", EventType: EventTypeDelta,
 		Payload: []byte(`{"kind":"text","delta":"hello"}`), OccurredAt: 10, UpdatedAt: 11,
 	})
 	if err != nil {
@@ -157,7 +157,7 @@ func TestMessageEventAppendTextLifecycle(t *testing.T) {
 
 	second, err := shard.AppendMessageEvent(ctx, MessageEventAppend{
 		ChannelID: "g1", ChannelType: 2, ClientMsgNo: "cmn-text",
-		EventID: "evt-2", EventKey: "main", EventType: EventTypeStreamDelta,
+		EventID: "evt-2", EventKey: "main", EventType: EventTypeDelta,
 		Payload: []byte(`{"kind":"text","delta":" world"}`), OccurredAt: 12, UpdatedAt: 13,
 	})
 	if err != nil {
@@ -169,7 +169,7 @@ func TestMessageEventAppendTextLifecycle(t *testing.T) {
 
 	closed, err := shard.AppendMessageEvent(ctx, MessageEventAppend{
 		ChannelID: "g1", ChannelType: 2, ClientMsgNo: "cmn-text",
-		EventID: "evt-3", EventKey: "main", EventType: EventTypeStreamClose,
+		EventID: "evt-3", EventKey: "main", EventType: EventTypeFinish,
 		Payload: []byte(`{"end_reason":2}`), OccurredAt: 14, UpdatedAt: 15,
 	})
 	if err != nil {
@@ -214,7 +214,7 @@ func TestMessageEventAppendIdempotentByLastEventID(t *testing.T) {
 	shard := store.db.ForHashSlot(4)
 	first, err := shard.AppendMessageEvent(ctx, MessageEventAppend{
 		ChannelID: "g1", ChannelType: 2, ClientMsgNo: "cmn-idem",
-		EventID: "evt-same", EventKey: "main", EventType: EventTypeStreamDelta,
+		EventID: "evt-same", EventKey: "main", EventType: EventTypeDelta,
 		Payload: []byte(`{"kind":"text","delta":"A"}`), UpdatedAt: 10,
 	})
 	if err != nil {
@@ -222,7 +222,7 @@ func TestMessageEventAppendIdempotentByLastEventID(t *testing.T) {
 	}
 	second, err := shard.AppendMessageEvent(ctx, MessageEventAppend{
 		ChannelID: "g1", ChannelType: 2, ClientMsgNo: "cmn-idem",
-		EventID: "evt-same", EventKey: "main", EventType: EventTypeStreamDelta,
+		EventID: "evt-same", EventKey: "main", EventType: EventTypeDelta,
 		Payload: []byte(`{"kind":"text","delta":"B"}`), UpdatedAt: 11,
 	})
 	if err != nil {
@@ -247,14 +247,14 @@ func TestMessageEventAppendTerminalDoesNotAdvanceSeq(t *testing.T) {
 	shard := store.db.ForHashSlot(4)
 	closed, err := shard.AppendMessageEvent(ctx, MessageEventAppend{
 		ChannelID: "g1", ChannelType: 2, ClientMsgNo: "cmn-terminal",
-		EventID: "evt-close", EventKey: "main", EventType: EventTypeStreamClose, UpdatedAt: 10,
+		EventID: "evt-close", EventKey: "main", EventType: EventTypeFinish, UpdatedAt: 10,
 	})
 	if err != nil {
 		t.Fatalf("AppendMessageEvent(close): %v", err)
 	}
 	ignored, err := shard.AppendMessageEvent(ctx, MessageEventAppend{
 		ChannelID: "g1", ChannelType: 2, ClientMsgNo: "cmn-terminal",
-		EventID: "evt-after", EventKey: "main", EventType: EventTypeStreamDelta,
+		EventID: "evt-after", EventKey: "main", EventType: EventTypeDelta,
 		Payload: []byte(`{"kind":"text","delta":"ignored"}`), UpdatedAt: 11,
 	})
 	if err != nil {
@@ -270,7 +270,7 @@ func TestMessageEventAppendNormalizesEmptyEventKey(t *testing.T) {
 	defer store.close(t)
 	result, err := store.db.ForHashSlot(4).AppendMessageEvent(context.Background(), MessageEventAppend{
 		ChannelID: "g1", ChannelType: 2, ClientMsgNo: "cmn-key",
-		EventID: "evt-1", EventKey: "   ", EventType: EventTypeStreamDelta, UpdatedAt: 10,
+		EventID: "evt-1", EventKey: "   ", EventType: EventTypeDelta, UpdatedAt: 10,
 	})
 	if err != nil {
 		t.Fatalf("AppendMessageEvent(): %v", err)
@@ -285,12 +285,12 @@ func TestMessageEventAppendFinishUsesFinishKey(t *testing.T) {
 	defer store.close(t)
 	result, err := store.db.ForHashSlot(4).AppendMessageEvent(context.Background(), MessageEventAppend{
 		ChannelID: "g1", ChannelType: 2, ClientMsgNo: "cmn-finish",
-		EventID: "evt-finish", EventType: EventTypeStreamFinish, UpdatedAt: 10,
+		EventID: "evt-finish", EventType: EventTypeFinish, UpdatedAt: 10,
 	})
 	if err != nil {
 		t.Fatalf("AppendMessageEvent(): %v", err)
 	}
-	if result.EventKey != EventKeyFinish || result.Status != EventStatusClosed {
+	if result.EventKey != EventKeyTerminal || result.Status != EventStatusClosed {
 		t.Fatalf("result = %#v, want finish key closed", result)
 	}
 }
@@ -303,14 +303,14 @@ func TestMessageEventAppendBatchOverlayAllocatesDistinctSeq(t *testing.T) {
 	defer batch.Close()
 	first, err := batch.AppendMessageEvent(4, MessageEventAppend{
 		ChannelID: "g1", ChannelType: 2, ClientMsgNo: "cmn-batch",
-		EventID: "evt-1", EventKey: "main", EventType: EventTypeStreamDelta, UpdatedAt: 10,
+		EventID: "evt-1", EventKey: "main", EventType: EventTypeDelta, UpdatedAt: 10,
 	})
 	if err != nil {
 		t.Fatalf("AppendMessageEvent(first): %v", err)
 	}
 	second, err := batch.AppendMessageEvent(4, MessageEventAppend{
 		ChannelID: "g1", ChannelType: 2, ClientMsgNo: "cmn-batch",
-		EventID: "evt-2", EventKey: "tool", EventType: EventTypeStreamDelta, UpdatedAt: 11,
+		EventID: "evt-2", EventKey: "tool", EventType: EventTypeDelta, UpdatedAt: 11,
 	})
 	if err != nil {
 		t.Fatalf("AppendMessageEvent(second): %v", err)
@@ -335,8 +335,8 @@ func TestMessageEventListStatesByClientMsgNo(t *testing.T) {
 	defer store.close(t)
 	ctx := context.Background()
 	shard := store.db.ForHashSlot(4)
-	_, _ = shard.AppendMessageEvent(ctx, MessageEventAppend{ChannelID: "g1", ChannelType: 2, ClientMsgNo: "cmn-a", EventID: "evt-a", EventKey: "main", EventType: EventTypeStreamDelta, UpdatedAt: 10})
-	_, _ = shard.AppendMessageEvent(ctx, MessageEventAppend{ChannelID: "g1", ChannelType: 2, ClientMsgNo: "cmn-b", EventID: "evt-b", EventKey: "main", EventType: EventTypeStreamDelta, UpdatedAt: 11})
+	_, _ = shard.AppendMessageEvent(ctx, MessageEventAppend{ChannelID: "g1", ChannelType: 2, ClientMsgNo: "cmn-a", EventID: "evt-a", EventKey: "main", EventType: EventTypeDelta, UpdatedAt: 10})
+	_, _ = shard.AppendMessageEvent(ctx, MessageEventAppend{ChannelID: "g1", ChannelType: 2, ClientMsgNo: "cmn-b", EventID: "evt-b", EventKey: "main", EventType: EventTypeDelta, UpdatedAt: 11})
 	states, err := shard.ListMessageEventStates(ctx, "g1", 2, "cmn-a", 10)
 	if err != nil {
 		t.Fatalf("ListMessageEventStates(): %v", err)
@@ -387,7 +387,7 @@ func (s *Shard) AppendMessageEvent(ctx context.Context, event MessageEventAppend
 func (b *Batch) AppendMessageEvent(hashSlot HashSlot, event MessageEventAppend) (MessageEventAppendResult, error)
 ```
 
-The reducer must lower-case `EventType`, normalize empty `EventKey` to `main`, convert `stream.finish` to event key `__finish__`, and keep payload byte slices cloned before storage. Use `json.Unmarshal` for text deltas and encode text snapshots with compact `json.Marshal(map[string]string{"kind":"text","text": text})`. Add private overlay maps to `Batch` so staged message event appends in one commit see each other's cursor and state updates.
+The reducer must lower-case `EventType`, normalize empty `EventKey` to `main`, convert `event.terminal` to event key `__finish__`, and keep payload byte slices cloned before storage. Use `json.Unmarshal` for text deltas and encode text snapshots with compact `json.Marshal(map[string]string{"kind":"text","text": text})`. Add private overlay maps to `Batch` so staged message event appends in one commit see each other's cursor and state updates.
 
 - [ ] **Step 5: Add compatibility batch methods**
 
@@ -577,7 +577,7 @@ func TestStateMachineAppliesMessageEventAppend(t *testing.T) {
 		Term:   1,
 		Data: EncodeAppendMessageEventCommand(metadb.MessageEventAppend{
 			ChannelID: "g1", ChannelType: 2, ClientMsgNo: "cmn-1",
-			EventID: "evt-1", EventKey: "main", EventType: metadb.EventTypeStreamDelta,
+			EventID: "evt-1", EventKey: "main", EventType: metadb.EventTypeDelta,
 			Payload: []byte(`{"kind":"text","delta":"hi"}`), OccurredAt: 10, UpdatedAt: 11,
 		}),
 	})
@@ -657,7 +657,7 @@ func TestClusterMessageEventFacadeUsesChannelHashSlotAndReturnsSeq(t *testing.T)
 
 	first, err := node.AppendMessageEvent(ctx, metadb.MessageEventAppend{
 		ChannelID: channelID, ChannelType: 2, ClientMsgNo: "cmn-1",
-		EventID: "evt-1", EventKey: "main", EventType: metadb.EventTypeStreamDelta,
+		EventID: "evt-1", EventKey: "main", EventType: metadb.EventTypeDelta,
 		Payload: []byte(`{"kind":"text","delta":"hi"}`), OccurredAt: 10, UpdatedAt: 11,
 	})
 	if err != nil {
@@ -669,7 +669,7 @@ func TestClusterMessageEventFacadeUsesChannelHashSlotAndReturnsSeq(t *testing.T)
 
 	second, err := node.AppendMessageEvent(ctx, metadb.MessageEventAppend{
 		ChannelID: channelID, ChannelType: 2, ClientMsgNo: "cmn-1",
-		EventID: "evt-2", EventKey: "main", EventType: metadb.EventTypeStreamDelta,
+		EventID: "evt-2", EventKey: "main", EventType: metadb.EventTypeDelta,
 		Payload: []byte(`{"kind":"text","delta":"!"}`), OccurredAt: 12, UpdatedAt: 13,
 	})
 	if err != nil {
@@ -732,7 +732,7 @@ func TestMessageEventStoreAppendMapsToNode(t *testing.T) {
 	store := NewMessageEventStore(node)
 	result, err := store.AppendMessageEvent(context.Background(), message.EventAppend{
 		ChannelID: "g1", ChannelType: 2, ClientMsgNo: "cmn-1",
-		EventID: "evt-1", EventKey: "main", EventType: metadb.EventTypeStreamDelta,
+		EventID: "evt-1", EventKey: "main", EventType: metadb.EventTypeDelta,
 	})
 	if err != nil {
 		t.Fatalf("AppendMessageEvent() error = %v", err)
@@ -831,7 +831,7 @@ func TestAppendEventNormalizesPersonChannelAndRequiresExistingMessage(t *testing
 	app := New(Options{Events: store, Now: func() time.Time { return time.UnixMilli(1234) }})
 	result, err := app.AppendEvent(context.Background(), AppendEventCommand{
 		FromUID: "u1", ChannelID: "u2", ChannelType: channelTypePerson,
-		ClientMsgNo: "cmn-1", EventID: "evt-1", EventType: metadb.EventTypeStreamDelta,
+		ClientMsgNo: "cmn-1", EventID: "evt-1", EventType: metadb.EventTypeDelta,
 		Payload: []byte(`{"kind":"text","delta":"hi"}`),
 	})
 	if err != nil {
@@ -850,7 +850,7 @@ func TestAppendEventRejectsMissingMessage(t *testing.T) {
 	app := New(Options{Events: &recordingEventStore{}})
 	_, err := app.AppendEvent(context.Background(), AppendEventCommand{
 		FromUID: "u1", ChannelID: "g1", ChannelType: 2,
-		ClientMsgNo: "missing", EventID: "evt-1", EventType: metadb.EventTypeStreamDelta,
+		ClientMsgNo: "missing", EventID: "evt-1", EventType: metadb.EventTypeDelta,
 	})
 	if !errors.Is(err, ErrMessageEventTargetNotFound) {
 		t.Fatalf("error = %v, want ErrMessageEventTargetNotFound", err)
@@ -910,7 +910,7 @@ func TestSyncChannelMessagesBasicModeOmitsSnapshots(t *testing.T) {
 func TestBuildMessageEventMetaExcludesFinishKeyAndMarksCompleted(t *testing.T) {
 	meta, hint, _, _, _, _ := buildMessageEventMeta("cmn-1", []EventState{
 		{EventKey: metadb.EventKeyDefault, Status: metadb.EventStatusClosed, LastMsgEventSeq: 2},
-		{EventKey: metadb.EventKeyFinish, Status: metadb.EventStatusClosed, LastMsgEventSeq: 3},
+		{EventKey: metadb.EventKeyTerminal, Status: metadb.EventStatusClosed, LastMsgEventSeq: 3},
 	}, "full")
 	if meta == nil || !meta.Completed || meta.LastMsgEventSeq != 3 || meta.EventVersion != 3 {
 		t.Fatalf("meta = %#v, want completed version 3", meta)
@@ -959,7 +959,7 @@ Rules:
 - trim `FromUID`, `ChannelID`, `ClientMsgNo`, `EventID`, `EventType`, `EventKey`, and `Visibility`.
 - require `from_uid`, `channel_id`, `channel_type`, `client_msg_no`, `event_id`, and `event_type`.
 - normalize person channel IDs with `runtimechannelid.NormalizePersonChannel(cmd.FromUID, cmd.ChannelID)`.
-- default empty `EventKey` to `metadb.EventKeyDefault`; map `stream.finish` to `metadb.EventKeyFinish`.
+- default empty `EventKey` to `metadb.EventKeyDefault`; map `event.terminal` to `metadb.EventKeyTerminal`.
 - default empty `Visibility` to `metadb.VisibilityPublic`.
 - default empty `OccurredAt` to `a.now().UTC().UnixMilli()`.
 - call `Events.LookupMessage` before append and return `ErrMessageEventTargetNotFound` when it misses.
@@ -1042,7 +1042,7 @@ func TestMessageEventMapsCompatibleRequestToUsecase(t *testing.T) {
 	}
 	srv := New(Options{Messages: messages})
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/message/event", bytes.NewBufferString(`{"from_uid":"u1","channel_id":"g1","channel_type":2,"client_msg_no":"cmn-1","event_id":"evt-1","event_type":"stream.delta","payload":{"kind":"text","delta":"hi"}}`))
+	req := httptest.NewRequest(http.MethodPost, "/message/event", bytes.NewBufferString(`{"from_uid":"u1","channel_id":"g1","channel_type":2,"client_msg_no":"cmn-1","event_id":"evt-1","event_type":"delta","payload":{"kind":"text","delta":"hi"}}`))
 	req.Header.Set("Content-Type", "application/json")
 
 	srv.Handler().ServeHTTP(rec, req)
@@ -1071,9 +1071,9 @@ func TestMessageEventReturnsCompatibleErrors(t *testing.T) {
 		want     string
 	}{
 		{name: "invalid json", body: `{"from_uid":`, status: http.StatusBadRequest, want: `{"error":"invalid request"}`},
-		{name: "missing usecase", body: `{"from_uid":"u1","channel_id":"g1","channel_type":2,"client_msg_no":"cmn-1","event_id":"evt-1","event_type":"stream.delta"}`, status: http.StatusInternalServerError, want: `{"error":"message usecase not configured"}`},
-		{name: "missing from uid", messages: &recordingMessageUsecase{eventErr: messageusecase.ErrEventFromUIDRequired}, body: `{"channel_id":"g1","channel_type":2,"client_msg_no":"cmn-1","event_id":"evt-1","event_type":"stream.delta"}`, status: http.StatusBadRequest, want: `{"msg":"from_uid不能为空！","status":400}`},
-		{name: "missing target", messages: &recordingMessageUsecase{eventErr: messageusecase.ErrMessageEventTargetNotFound}, body: `{"from_uid":"u1","channel_id":"g1","channel_type":2,"client_msg_no":"cmn-1","event_id":"evt-1","event_type":"stream.delta"}`, status: http.StatusBadRequest, want: `{"msg":"message event target message not found","status":400}`},
+		{name: "missing usecase", body: `{"from_uid":"u1","channel_id":"g1","channel_type":2,"client_msg_no":"cmn-1","event_id":"evt-1","event_type":"delta"}`, status: http.StatusInternalServerError, want: `{"error":"message usecase not configured"}`},
+		{name: "missing from uid", messages: &recordingMessageUsecase{eventErr: messageusecase.ErrEventFromUIDRequired}, body: `{"channel_id":"g1","channel_type":2,"client_msg_no":"cmn-1","event_id":"evt-1","event_type":"delta"}`, status: http.StatusBadRequest, want: `{"msg":"from_uid不能为空！","status":400}`},
+		{name: "missing target", messages: &recordingMessageUsecase{eventErr: messageusecase.ErrMessageEventTargetNotFound}, body: `{"from_uid":"u1","channel_id":"g1","channel_type":2,"client_msg_no":"cmn-1","event_id":"evt-1","event_type":"delta"}`, status: http.StatusBadRequest, want: `{"msg":"message event target message not found","status":400}`},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			srv := New(Options{Messages: tt.messages})
@@ -1231,7 +1231,7 @@ func TestNewWiresMessageEventStoreWhenClusterSupportsIt(t *testing.T) {
 	}
 	_, err = app.Messages().AppendEvent(context.Background(), message.AppendEventCommand{
 		FromUID: "u1", ChannelID: "g1", ChannelType: 2,
-		ClientMsgNo: "cmn-1", EventID: "evt-1", EventType: metadb.EventTypeStreamDelta,
+		ClientMsgNo: "cmn-1", EventID: "evt-1", EventType: metadb.EventTypeDelta,
 	})
 	if !errors.Is(err, message.ErrMessageEventTargetNotFound) {
 		t.Fatalf("AppendEvent() error = %v, want target-not-found from wired event store", err)

@@ -24,16 +24,19 @@ func TestClusterGetMessageEventStatesBatchReadsLeaderCacheFromFollower(t *testin
 	defer cancel()
 
 	if _, err := follower.AppendMessageEvent(ctx, metadb.MessageEventAppend{
-		ChannelID:   channelID,
-		ChannelType: 2,
-		ClientMsgNo: "cmn-remote-cache",
-		EventID:     "evt-remote-delta",
-		EventKey:    "main",
-		EventType:   metadb.EventTypeStreamDelta,
-		Visibility:  metadb.VisibilityPublic,
-		OccurredAt:  1000,
-		Payload:     []byte(`{"kind":"text","delta":"remote"}`),
-		UpdatedAt:   1001,
+		ChannelID:          channelID,
+		ChannelType:        2,
+		ClientMsgNo:        "cmn-remote-cache",
+		RunID:              "run-1",
+		AuthorizationFence: "fence-1",
+		AuthoritySequence:  1,
+		EventID:            "evt-remote-delta",
+		EventKey:           "main",
+		EventType:          metadb.EventTypeDelta,
+		Visibility:         metadb.VisibilityPublic,
+		OccurredAt:         1000,
+		Payload:            messageEventDeltaForIntegrationTest("remote", 1),
+		UpdatedAt:          1001,
 	}); err != nil {
 		t.Fatalf("AppendMessageEvent(follower delta) error = %v", err)
 	}
@@ -43,7 +46,7 @@ func TestClusterGetMessageEventStatesBatchReadsLeaderCacheFromFollower(t *testin
 	if err != nil {
 		t.Fatalf("GetMessageEventStatesBatch(follower) error = %v", err)
 	}
-	if len(got[key]) != 1 || got[key][0].Status != metadb.EventStatusOpen || got[key][0].LastMsgEventSeq != 0 {
+	if len(got[key]) != 1 || got[key][0].Status != metadb.EventStatusOpen || got[key][0].LastMsgEventSeq != 1 {
 		t.Fatalf("follower state batch = %#v, want leader cached open state", got[key])
 	}
 	if !strings.Contains(string(got[key][0].SnapshotPayload), "remote") {

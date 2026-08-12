@@ -286,8 +286,8 @@ func (s *Store) UpsertDevice(ctx context.Context, d metadb.Device) error {
 	return proposeWithHashSlot(ctx, s.cluster, slotID, hashSlot, cmd)
 }
 
-func (s *Store) GetDevice(ctx context.Context, uid string, deviceFlag int64) (metadb.Device, error) {
+func (s *Store) GetDevice(ctx context.Context, uid string, deviceFlag int64, deviceID, appInstanceID string) (metadb.Device, error) {
 	slotID := s.cluster.SlotForKey(uid)
 	hashSlot := hashSlotForKey(s.cluster, uid)
-	return s.getDeviceAuthoritative(ctx, slotID, hashSlot, uid, deviceFlag)
+	return s.getDeviceAuthoritative(ctx, slotID, hashSlot, uid, deviceFlag, deviceID, appInstanceID)
 }

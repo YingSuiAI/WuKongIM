@@ -30,13 +30,10 @@ const (
 	messageColumnIDMessageID         uint16 = 2
 	messageColumnIDFramerFlags       uint16 = 3
 	messageColumnIDSetting           uint16 = 4
-	messageColumnIDStreamFlag        uint16 = 5
 	messageColumnIDMsgKey            uint16 = 6
 	messageColumnIDExpire            uint16 = 7
 	messageColumnIDClientSeq         uint16 = 8
 	messageColumnIDClientMsgNo       uint16 = 9
-	messageColumnIDStreamNo          uint16 = 10
-	messageColumnIDStreamID          uint16 = 11
 	messageColumnIDTimestamp         uint16 = 12
 	messageColumnIDChannelID         uint16 = 13
 	messageColumnIDChannelType       uint16 = 14
@@ -57,13 +54,10 @@ var MessageTable = schema.Table{
 		{ID: messageColumnIDMessageID, Name: "message_id", Type: schema.TypeUint64, Required: true},
 		{ID: messageColumnIDFramerFlags, Name: "framer_flags", Type: schema.TypeUint8},
 		{ID: messageColumnIDSetting, Name: "setting", Type: schema.TypeUint8},
-		{ID: messageColumnIDStreamFlag, Name: "stream_flag", Type: schema.TypeUint8},
 		{ID: messageColumnIDMsgKey, Name: "msg_key", Type: schema.TypeString},
 		{ID: messageColumnIDExpire, Name: "expire", Type: schema.TypeUint64},
 		{ID: messageColumnIDClientSeq, Name: "client_seq", Type: schema.TypeUint64},
 		{ID: messageColumnIDClientMsgNo, Name: "client_msg_no", Type: schema.TypeString},
-		{ID: messageColumnIDStreamNo, Name: "stream_no", Type: schema.TypeString},
-		{ID: messageColumnIDStreamID, Name: "stream_id", Type: schema.TypeUint64},
 		{ID: messageColumnIDTimestamp, Name: "timestamp", Type: schema.TypeInt64},
 		{ID: messageColumnIDChannelID, Name: "channel_id", Type: schema.TypeString},
 		{ID: messageColumnIDChannelType, Name: "channel_type", Type: schema.TypeUint8},
@@ -82,13 +76,10 @@ var MessageTable = schema.Table{
 				messageColumnIDMessageID,
 				messageColumnIDFramerFlags,
 				messageColumnIDSetting,
-				messageColumnIDStreamFlag,
 				messageColumnIDMsgKey,
 				messageColumnIDExpire,
 				messageColumnIDClientSeq,
 				messageColumnIDClientMsgNo,
-				messageColumnIDStreamNo,
-				messageColumnIDStreamID,
 				messageColumnIDTimestamp,
 				messageColumnIDChannelID,
 				messageColumnIDChannelType,

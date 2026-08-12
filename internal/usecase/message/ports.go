@@ -29,6 +29,8 @@ type ChannelMessageBatchReader interface {
 
 // MessageEventStore owns durable message event projection reads and writes.
 type MessageEventStore interface {
+	// LookupMessageEventAnchor returns one committed base message by exact message id.
+	LookupMessageEventAnchor(context.Context, string, int64, uint64) (MessageEventAnchor, bool, error)
 	// AppendMessageEvent persists one message event projection update.
 	AppendMessageEvent(context.Context, MessageEventAppend) (MessageEventAppendResult, error)
 	// GetMessageEventStatesBatch reads compact event lane states for message keys.

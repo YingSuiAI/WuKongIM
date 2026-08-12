@@ -386,7 +386,6 @@ func (s *Server) rewriteRouteResponse(response *http.Response) error {
 func isProductAPIPath(path string) bool {
 	for _, prefix := range []string{
 		"/demo", "/route", "/user", "/channel", "/tmpchannel", "/message", "/conversation", "/conversations",
-		"/streammessage",
 	} {
 		if path == prefix || strings.HasPrefix(path, prefix+"/") {
 			return true

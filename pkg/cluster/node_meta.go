@@ -2,8 +2,11 @@ package cluster
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	channelruntime "github.com/WuKongIM/WuKongIM/pkg/channel"
@@ -63,7 +66,7 @@ func (n *Node) UpsertDeviceMetadata(ctx context.Context, device metadb.Device) e
 }
 
 // GetDeviceMetadata reads durable per-device token metadata from the current Slot route.
-func (n *Node) GetDeviceMetadata(ctx context.Context, uid string, deviceFlag int64) (metadb.Device, error) {
+func (n *Node) GetDeviceMetadata(ctx context.Context, uid string, deviceFlag int64, deviceID, appInstanceID string) (metadb.Device, error) {
 	if err := ctxErr(ctx); err != nil {
 		return metadb.Device{}, err
 	}
@@ -77,7 +80,25 @@ func (n *Node) GetDeviceMetadata(ctx context.Context, uid string, deviceFlag int
 	if err != nil {
 		return metadb.Device{}, err
 	}
-	return n.defaultSlotMetaDB.ForHashSlot(route.HashSlot).GetDevice(ctx, uid, deviceFlag)
+	return n.defaultSlotMetaDB.ForHashSlot(route.HashSlot).GetDevice(ctx, uid, deviceFlag, deviceID, appInstanceID)
+}
+
+// ListDeviceMetadataByUID reads every durable installation row for one user.
+func (n *Node) ListDeviceMetadataByUID(ctx context.Context, uid string) ([]metadb.Device, error) {
+	if err := ctxErr(ctx); err != nil {
+		return nil, err
+	}
+	if err := n.ensureForeground(); err != nil {
+		return nil, err
+	}
+	if n.defaultSlotMetaDB == nil {
+		return nil, ErrNotStarted
+	}
+	route, err := n.RouteKey(uid)
+	if err != nil {
+		return nil, err
+	}
+	return n.defaultSlotMetaDB.ForHashSlot(route.HashSlot).ListDevicesByUID(ctx, uid)
 }
 
 // BindPluginUser persists one UID-owned plugin binding through Slot ownership.
@@ -447,6 +468,72 @@ func (n *Node) AppendMessageEvent(ctx context.Context, event metadb.MessageEvent
 		return result, err
 	}
 	return n.appendMessageEventLocal(ctx, event)
+}
+
+// MessageEventAnchor is the exact committed message identity accepted by event append.
+// It intentionally excludes the message payload from the node RPC response.
+type MessageEventAnchor struct {
+	ChannelID          string `json:"channel_id"`
+	ChannelType        int64  `json:"channel_type"`
+	FromUID            string `json:"from_uid"`
+	MessageID          uint64 `json:"message_id"`
+	ClientMsgNo        string `json:"client_msg_no"`
+	RunID              string `json:"run_id"`
+	AuthorizationFence string `json:"authorization_fence"`
+}
+
+// LookupMessageEventAnchor reads one committed base message identity from the current Channel leader.
+func (n *Node) LookupMessageEventAnchor(ctx context.Context, channelID string, channelType int64, messageID uint64) (MessageEventAnchor, bool, error) {
+	if err := ctxErr(ctx); err != nil {
+		return MessageEventAnchor{}, false, err
+	}
+	if messageID == 0 || channelID == "" || channelType <= 0 {
+		return MessageEventAnchor{}, false, metadb.ErrInvalidArgument
+	}
+	meta, err := n.GetChannelRuntimeMeta(ctx, channelID, channelType)
+	if errors.Is(err, metadb.ErrNotFound) {
+		return MessageEventAnchor{}, false, nil
+	}
+	if err != nil {
+		return MessageEventAnchor{}, false, err
+	}
+	if meta.Leader == 0 {
+		return MessageEventAnchor{}, false, ErrNoSlotLeader
+	}
+	if meta.Leader != n.cfg.NodeID {
+		return n.forwardMessageEventAnchorLookup(ctx, meta.Leader, channelID, channelType, messageID)
+	}
+	return n.lookupMessageEventAnchorLocal(ctx, channelID, channelType, messageID)
+}
+
+func (n *Node) lookupMessageEventAnchorLocal(ctx context.Context, channelID string, channelType int64, messageID uint64) (MessageEventAnchor, bool, error) {
+	if n == nil || n.channels == nil {
+		return MessageEventAnchor{}, false, ErrNotStarted
+	}
+	lookup, ok := n.channels.(channelruntime.CommittedMessageLookup)
+	if !ok {
+		return MessageEventAnchor{}, false, ErrNotStarted
+	}
+	anchor, found, err := lookup.LookupCommittedMessage(ctx, channelruntime.ChannelID{ID: channelID, Type: uint8(channelType)}, messageID)
+	if err != nil || !found {
+		return MessageEventAnchor{}, found, err
+	}
+	var identity struct {
+		RunID              string `json:"run_id"`
+		AuthorizationFence uint64 `json:"authorization_fence"`
+	}
+	if err := json.Unmarshal(anchor.Payload, &identity); err != nil || strings.TrimSpace(identity.RunID) == "" || identity.AuthorizationFence == 0 {
+		return MessageEventAnchor{}, false, metadb.ErrInvalidArgument
+	}
+	return MessageEventAnchor{
+		ChannelID:          anchor.ChannelID,
+		ChannelType:        int64(anchor.ChannelType),
+		FromUID:            anchor.FromUID,
+		MessageID:          anchor.MessageID,
+		ClientMsgNo:        anchor.ClientMsgNo,
+		RunID:              strings.TrimSpace(identity.RunID),
+		AuthorizationFence: strconv.FormatUint(identity.AuthorizationFence, 10),
+	}, true, nil
 }
 
 // GetMessageEventStatesBatch reads projected event lanes for message keys through each channel route.

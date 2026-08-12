@@ -113,6 +113,8 @@ const (
 	RPCChannelCommittedReads
 	// RPCSlotUserMembership serves Slot-leader ordinary and CMD membership reads.
 	RPCSlotUserMembership
+	// RPCDeliveryEventPush serves typed WKProto EVENT owner pushes.
+	RPCDeliveryEventPush
 	// RPCSlotRuntimeMetadata serves Slot-leader Channel runtime metadata reads.
 	RPCSlotRuntimeMetadata
 	// RPCSlotPermissionMetadataBatch serves Slot-leader batched send-permission facts.
@@ -235,6 +237,8 @@ func transportServiceAlias(serviceID uint8) string {
 		return "channel migration meta"
 	case RPCMessageEventAppend:
 		return "message event append"
+	case RPCDeliveryEventPush:
+		return "delivery event push"
 	default:
 		return "unknown service"
 	}

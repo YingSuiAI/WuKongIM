@@ -133,7 +133,7 @@ type Node struct {
 	defaultSlotProposer propose.SlotRuntime
 	// messageEventStreamCache keeps in-flight stream event projections on the Slot leader.
 	messageEventStreamCache *messageEventStreamCache
-	// messageEventFinishCoalescer groups concurrent stream.finish proposals for the same channel.
+	// messageEventFinishCoalescer groups concurrent finish proposals for the same channel.
 	messageEventFinishCoalescer *messageEventFinishCoalescer
 	// pendingRPCHandlers stores public RPC handlers until the default transport exists.
 	pendingRPCHandlers map[uint8]clusternet.Handler

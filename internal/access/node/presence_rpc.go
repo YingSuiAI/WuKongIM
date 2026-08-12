@@ -7,6 +7,7 @@ import (
 	"fmt"
 
 	backupcontract "github.com/WuKongIM/WuKongIM/internal/contracts/backup"
+	"github.com/WuKongIM/WuKongIM/internal/contracts/onlinedelivery"
 	"github.com/WuKongIM/WuKongIM/internal/observability/diagnostics"
 	runtimedelivery "github.com/WuKongIM/WuKongIM/internal/runtime/delivery"
 	authoritypresence "github.com/WuKongIM/WuKongIM/internal/runtime/presence"
@@ -74,6 +75,11 @@ type PresenceOwner interface {
 // DeliveryOwnerPush accepts owner-node delivery batches over node RPC.
 type DeliveryOwnerPush interface {
 	Push(context.Context, runtimedelivery.PushCommand) (runtimedelivery.PushResult, error)
+}
+
+// DeliveryEventPush accepts typed EVENT batches over node RPC.
+type DeliveryEventPush interface {
+	PushEventOwner(context.Context, onlinedelivery.EventPush) (onlinedelivery.OwnerPushResult, error)
 }
 
 // ManagerConnectionReader handles owner-local manager connection inventory requests.
@@ -231,6 +237,8 @@ type Options struct {
 	Owner PresenceOwner
 	// Delivery handles owner-local delivery push batches after payload decoding.
 	Delivery DeliveryOwnerPush
+	// DeliveryEvent handles typed EVENT owner pushes.
+	DeliveryEvent DeliveryEventPush
 	// ManagerConnections handles owner-local manager connection inventory requests.
 	ManagerConnections ManagerConnectionReader
 	// ManagerLogs handles node-local manager distributed log page requests.
@@ -291,6 +299,8 @@ type Adapter struct {
 	owner PresenceOwner
 	// delivery pushes messages into owner-local delivery sessions.
 	delivery DeliveryOwnerPush
+	// deliveryEvent pushes typed EVENT frames into owner-local sessions.
+	deliveryEvent DeliveryEventPush
 	// presence owns UID connection authority decisions.
 	// managerConnections reads owner-local connection inventory for manager pages.
 	managerConnections ManagerConnectionReader
@@ -353,6 +363,7 @@ func New(opts Options) *Adapter {
 		authority:                opts.Authority,
 		owner:                    opts.Owner,
 		delivery:                 opts.Delivery,
+		deliveryEvent:            opts.DeliveryEvent,
 		managerConnections:       opts.ManagerConnections,
 		managerLogs:              opts.ManagerLogs,
 		managerControllerRaft:    opts.ManagerControllerRaft,

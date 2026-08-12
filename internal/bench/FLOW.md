@@ -11,7 +11,7 @@ Shared wkbench schema, plan, report, and bench/v1 API DTOs live in `pkg/bench/mo
 - `worker`: HTTP control server plus the default workload runner used by worker processes.
 - `devsim`: long-running development simulator supervisor used by `wkbench dev-sim`; it derives compact simulator config into normal wkbench target/scenario/plan inputs and runs an in-process worker.
 - `capacity`: maximum stable ingress QPS search used by `wkbench capacity send` and `wkbench capacity hot-channel`; it discovers target gateway addresses, generates attempt scenarios, runs a temporary local worker, and writes capacity summaries.
-- `messageevent`: fixed-shape `/message/event` stream pressure runner used by `wkbench capacity message-event`; it creates channels through public `/channel`, sends stream base messages through `/message/send`, sends cache-only `stream.delta` updates, completes each stream with `stream.finish`, captures `/metrics` before/after snapshots, and writes message event reports.
+- `messageevent`: fixed-shape typed event pressure runner used by `wkbench capacity message-event`; it creates channels through public `/channel`, sends anchor messages through `/message/send`, appends typed deltas and terminal events through service-only `/message/events:append`, captures `/metrics` before/after snapshots, and writes message event reports.
 - `chatlifecycle`: deterministic three-worker chat lifecycle planning, authenticated protocol-v2 worker control, coordinator-owned globally apportioned grant delivery, bounded verification/evidence, group setup, preflight, service observation, and an independent bounded natural hot-cold-reheat proof module. Coordinator assignment, start, grant, status, qualification, and final barriers use fixed concurrent worker rounds; observation spans readiness and the measured run. Empty-dataset bootstrap uses one fixed global 25-login/second stream until all 10,000 users are simultaneously online; each login still completes real WKProto CONNECT/CONNACK and a fresh version-zero full conversation sync, and each worker retains 256 concurrent starting slots. Missed or unused bootstrap credit is discarded rather than caught up in a burst. Coordinator-controlled workers remain all-new after reaching their local shares until the first global grant clears bootstrap credit and fractional remainder and begins the unchanged 250,000-new-user/day 80/20 steady stream. The first complete grant remains a pre-clock control round and uses the ordinary bounded control deadline; after it crosses all workers and fixes the measured-run start, each later fail-closed sequenced grant vector is capped to the one-second cadence. Assignments disable worker-local primary token release, and that one vector drives all three workers every logical second without resumable state. The lifecycle proof leases only current revisit timers from a fixed 12-by-100 primary owner index backed by per-Slot standby heaps whose aggregate index is bounded by Engine WorkCapacity; primary removal promotes the best valid same-Slot standby without expanding the at-most-1,200 lease scan. Each lease carries an exact generation-local timer token and post-activity version. The proof asynchronously probes three nodes without eviction, transiently merges every bounded batch before one atomic state transition, tolerates bounded staggered replica cooling, admits only that exact existing scheduled real SEND through a fenced worker call strictly before its deterministic due instant, proves sequence continuity from post-reheat probes, and reconciles fixed per-Slot metadata-create deltas against physical-hash-slot expected-unique growth. Product-transition failures use fixed identity-free reason counters whose saturating total equals the aggregate product-failure count even when an atomic observation batch rolls back. Later activity invalidates the lease and records harness evidence instead of silently approving or dropping a different timer. Its mapping boundary accepts a copied live 256-entry assignment, while current worker composition indexes against and requires the validated continuous no-migration profile. Production composition integrates lifecycle, resource, metadata-create, qualification/final report, and capacity evidence through one coordinator hook.
 - `workload`: reusable connection, person traffic, and group traffic executors.
 - `target`: black-box HTTP client for target health, readiness, bench capabilities, capacity target, setup snapshot, presence snapshot, conversation sync, token, channel, and subscriber APIs. Setup mutation calls use the first healthy target API address and fall back on failure; targets such as `cmd/wukongim` route real metadata writes through their cluster runtime.
@@ -404,9 +404,9 @@ stop contract in their temporary-worker cleanup traps.
 ## Capacity Message-Event Flow
 
 `capacity message-event` is a fixed-size pressure run for the migrated message
-event stream path. It does not use `/message/eventsync`, does not start workers,
+event stream path. It does not start workers,
 and does not depend on `/bench/v1/*`; it only requires already-running target
-API nodes with `/channel`, `/message/send`, `/message/event`, and `/metrics`.
+API nodes with `/channel`, `/message/send`, `/message/events:append`, and `/metrics`.
 
 ```text
 cmd/wkbench capacity message-event
@@ -416,9 +416,9 @@ cmd/wkbench capacity message-event
   -> capture before Prometheus snapshots from every --api node
   -> create generated group channels through POST /channel when not warmed
   -> run stream workflows with bounded concurrency
-       -> POST /message/send with the legacy stream setting bit
-       -> POST /message/event stream.delta for each lane/delta
-       -> POST /message/event stream.finish once per stream
+       -> POST /message/send for one ordinary anchor message
+       -> POST /message/events:append with typed delta events
+       -> POST /message/events:append with one typed finish event
   -> capture after Prometheus snapshots from every --api node
   -> metrics.AnalyzeWukongIMPrometheus for message event cache/propose counters and append/propose stage p99s
   -> messageevent.WriteResult(message_event_report.json, summary.md)

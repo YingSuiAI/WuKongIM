@@ -28,16 +28,6 @@ func decodeSend(f frame.Frame, data []byte, version uint8) (frame.Frame, error) 
 		return nil, errors.Wrap(err, "解码ClientMsgNo失败！")
 	}
 
-	// 是否开启了stream
-	if version < 5 { // 5版本后不再支持send里不再需要streamNo
-		if version >= 2 && sendPacket.Setting.IsSet(frame.SettingStream) {
-			// 流式编号
-			if sendPacket.StreamNo, err = dec.String(); err != nil {
-				return nil, errors.Wrap(err, "解码StreamNo失败！")
-			}
-		}
-	}
-
 	// 频道ID
 	if sendPacket.ChannelID, err = dec.String(); err != nil {
 		return nil, errors.Wrap(err, "解码ChannelId失败！")
@@ -76,14 +66,6 @@ func encodeSend(sendPacket *frame.SendPacket, enc *Encoder, version uint8) error
 	enc.WriteUint32(uint32(sendPacket.ClientSeq))
 	// 客户端唯一标示
 	enc.WriteString(sendPacket.ClientMsgNo)
-	// 是否开启了stream
-	if version < 5 { // 5版本后不再支持send里不再需要streamNo
-		if version >= 2 && sendPacket.Setting.IsSet(frame.SettingStream) {
-			// 流式编号
-			enc.WriteString(sendPacket.StreamNo)
-		}
-	}
-
 	// 频道ID
 	enc.WriteString(sendPacket.ChannelID)
 	// 频道类型
@@ -109,9 +91,6 @@ func encodeSendSize(sendPacket *frame.SendPacket, version uint8) int {
 	size += frame.SettingByteSize
 	size += frame.ClientSeqByteSize
 	size += len(sendPacket.ClientMsgNo) + frame.StringFixLenByteSize
-	if version < 5 && version >= 2 && sendPacket.Setting.IsSet(frame.SettingStream) {
-		size += len(sendPacket.StreamNo) + frame.StringFixLenByteSize
-	}
 	size += len(sendPacket.ChannelID) + frame.StringFixLenByteSize
 	size += frame.ChannelTypeByteSize
 	if version >= 3 {

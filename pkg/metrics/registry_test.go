@@ -1658,7 +1658,7 @@ func TestRegistryExposesMessageMetrics(t *testing.T) {
 	reg.Message.ObserveAppend("local", "ok", 5*time.Millisecond)
 	reg.Message.ObserveAppendError("channelplane", "timeout")
 	reg.Message.ObserveSendBatchStage("permission", "ok", 2, 5*time.Millisecond)
-	reg.Message.ObserveEventAppend("cache", "stream.delta", "ok", 2*time.Millisecond)
+	reg.Message.ObserveEventAppend("cache", "delta", "ok", 2*time.Millisecond)
 	reg.Message.ObserveEventAppendStage("finish_batch", "ok", "finish_batch_build", 4*time.Millisecond)
 	reg.Message.ObserveEventPropose("finish_batch", "ok", 3, 8*time.Millisecond)
 	reg.Message.ObserveEventProposeStage("finish_batch", "ok", "slot_propose_wait", 7*time.Millisecond)
@@ -1694,7 +1694,7 @@ func TestRegistryExposesMessageMetrics(t *testing.T) {
 		"node_id":    "1",
 		"node_name":  "n1",
 		"path":       "cache",
-		"event_type": "stream.delta",
+		"event_type": "delta",
 		"result":     "ok",
 	}).GetCounter().GetValue())
 	requireMetricFamily(t, families, "wukongim_message_event_append_duration_seconds")

@@ -16,7 +16,6 @@ const (
 	defaultSyncMessagesLimit  = 100
 	maxSyncMessagesLimit      = 10000
 	maxSyncMessagesBatchItems = 200
-	legacySettingStream       = 1 << 1
 )
 
 // PullMode selects the compatible /channel/messagesync direction.
@@ -65,18 +64,8 @@ type SyncedMessage struct {
 	Timestamp int32
 	// Payload is the immutable message payload.
 	Payload []byte
-	// End reports the legacy stream terminal marker.
-	End uint8
-	// EndReason stores the stream terminal reason when present.
-	EndReason uint8
-	// Error stores the stream terminal error when present.
-	Error string
-	// StreamData stores the legacy compact stream payload derived from the main event lane.
-	StreamData []byte
 	// EventMeta is the compact event lane summary for compatible clients.
 	EventMeta *MessageEventMeta
-	// EventHint points to the message-level event sync cursor for compatible clients.
-	EventHint *MessageEventSyncHint
 }
 
 // SyncChannelMessagesQuery describes a compatible channel message sync request.
@@ -97,8 +86,6 @@ type SyncChannelMessagesQuery struct {
 	PullMode PullMode
 	// IncludeEventMeta asks sync to include compact event metadata when available.
 	IncludeEventMeta bool
-	// EventSummaryMode is accepted for compatibility with older stream-message clients.
-	EventSummaryMode string
 }
 
 // SyncChannelMessagesResult contains one compatible channel message sync page.
@@ -382,22 +369,16 @@ func cloneSyncedMessages(in []SyncedMessage) []SyncedMessage {
 	copy(out, in)
 	for i := range out {
 		out[i].Payload = cloneBytes(out[i].Payload)
-		out[i].StreamData = cloneBytes(out[i].StreamData)
 		out[i].EventMeta = cloneMessageEventMeta(out[i].EventMeta)
-		if out[i].EventHint != nil {
-			hint := *out[i].EventHint
-			out[i].EventHint = &hint
-		}
 	}
 	return out
 }
 
 func normalizeEventSummaryMode(query SyncChannelMessagesQuery) string {
-	mode := strings.ToLower(strings.TrimSpace(query.EventSummaryMode))
-	if mode == "" && query.IncludeEventMeta {
+	if query.IncludeEventMeta {
 		return "full"
 	}
-	return mode
+	return ""
 }
 
 func (a *App) enrichSyncedMessagesWithEvents(ctx context.Context, mode string, messages []SyncedMessage) error {
@@ -410,9 +391,6 @@ func (a *App) enrichSyncedMessagesWithEvents(ctx context.Context, mode string, m
 	keys := make([]MessageEventMessageKey, 0, len(messages))
 	seen := make(map[MessageEventMessageKey]struct{}, len(messages))
 	for _, msg := range messages {
-		if !isLegacyStreamMessage(msg.Setting) {
-			continue
-		}
 		if strings.TrimSpace(msg.ClientMsgNo) == "" || strings.TrimSpace(msg.ChannelID) == "" || msg.ChannelType == 0 {
 			continue
 		}
@@ -444,10 +422,6 @@ func (a *App) enrichSyncedMessagesWithEvents(ctx context.Context, mode string, m
 
 const maxMessageEventSummaryLanes = 32
 
-func isLegacyStreamMessage(setting uint8) bool {
-	return setting&legacySettingStream != 0
-}
-
 func applyMessageEventSummary(msg *SyncedMessage, states []MessageEventState, full bool) {
 	if msg == nil || len(states) == 0 {
 		return
@@ -459,9 +433,11 @@ func applyMessageEventSummary(msg *SyncedMessage, states []MessageEventState, fu
 		Events:    make([]MessageEventKeyMeta, 0, len(states)),
 	}
 	for _, state := range states {
-		if state.EventKey == EventKeyFinish {
+		if state.LastEventType == EventTypeFinish {
 			meta.Completed = true
-			continue
+			if len(state.SnapshotPayload) == 0 {
+				continue
+			}
 		}
 		keyMeta := MessageEventKeyMeta{
 			EventKey:        state.EventKey,
@@ -487,54 +463,6 @@ func applyMessageEventSummary(msg *SyncedMessage, states []MessageEventState, fu
 	}
 	meta.EventVersion = meta.LastMsgEventSeq
 	msg.EventMeta = meta
-	msg.EventHint = &MessageEventSyncHint{ClientMsgNo: msg.ClientMsgNo, FromMsgEventSeq: 0}
-	if mainState := findMainEventState(states); mainState != nil {
-		msg.StreamData = toLegacyStreamData(mainState.SnapshotPayload)
-		msg.End = toLegacyEnd(mainState.Status)
-		msg.EndReason = mainState.EndReason
-		msg.Error = mainState.Error
-	}
-}
-
-func findMainEventState(states []MessageEventState) *MessageEventState {
-	for _, state := range states {
-		if state.EventKey == EventKeyDefault {
-			cp := state
-			return &cp
-		}
-	}
-	return nil
-}
-
-func toLegacyEnd(status string) uint8 {
-	switch status {
-	case EventStatusClosed, EventStatusError, EventStatusCancelled:
-		return 1
-	default:
-		return 0
-	}
-}
-
-func toLegacyStreamData(snapshotPayload []byte) []byte {
-	if len(snapshotPayload) == 0 {
-		return nil
-	}
-	var raw map[string]any
-	if err := json.Unmarshal(snapshotPayload, &raw); err != nil {
-		return cloneBytes(snapshotPayload)
-	}
-	kind, _ := raw["kind"].(string)
-	switch kind {
-	case metadb.SnapshotKindText:
-		text, _ := raw["text"].(string)
-		return []byte(text)
-	case "binary":
-		data, _ := raw["data"].(string)
-		if data != "" {
-			return []byte(data)
-		}
-	}
-	return cloneBytes(snapshotPayload)
 }
 
 func decodeMessageEventSnapshot(snapshotPayload []byte) any {

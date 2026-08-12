@@ -96,10 +96,7 @@ message Message {
     uint64 messageSeq = 2;
     // 客户端消息编号
     string clientMsgNo = 3;
-    // 流编号
-    string streamNo = 4;
-    // 流序号
-    uint64 streamId = 5;
+    reserved 4, 5;
     // 消息时间戳
     uint32 timestamp = 6;
     // 发送者
@@ -247,47 +244,6 @@ message Header  {
 }
 
 // 流基本信息
-message Stream {
-    Header header = 1; // 头部
-    string clientMsgNo = 2;// 客户端消息编号（相同编号，客户端只会显示一条，可以为空）
-    string fromUid = 3; // 发送者uid
-    string channelId = 4; // 频道id
-    uint32 channelType = 5; // 频道类型
-    bytes payload = 6; // 消息内容
-}
-
-// 流开启结果
-message StreamOpenResp {
-    string streamNo = 1; // 流编号
-}
-
-// 流关闭请求
-message StreamCloseReq {
-    string streamNo = 1; // 流编号
-    string channelId = 2; // 频道id
-    uint32 channelType = 3; // 频道类型
-}
-
-// 流写入请求
-message StreamWriteReq {
-    Header header = 1; // 头部
-    string streamNo = 2; // 流编号
-    string clientMsgNo = 3;// 客户端消息编号（相同编号，客户端只会显示一条，可以为空）
-    string fromUid = 4; // 发送者uid
-    string channelId = 5; // 频道id
-    uint32 channelType = 6; // 频道类型
-    bytes payload = 7; // 消息内容
-
-}
-
-// 流写入结果
-message StreamWriteResp {
-     // 消息唯一id（全局唯一）
-    int64 messageId = 1;
-    // 客户端消息编号
-    string clientMsgNo = 2;
-}
-
 // 发送消息请求
 message SendReq {
     Header header = 1; // 头部

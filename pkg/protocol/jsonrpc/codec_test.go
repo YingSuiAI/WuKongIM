@@ -154,7 +154,6 @@ func TestEncodeDecode_SendRecv(t *testing.T) {
 		Setting: SettingFlags{
 			Receipt: true,
 			Signal:  true,
-			Stream:  true,
 			Topic:   true,
 		},
 		ChannelID:   "user123",

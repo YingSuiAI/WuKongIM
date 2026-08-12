@@ -73,7 +73,7 @@ const messageAvatarURL = (message: MessageAvatarSource): string => {
 
 title.value = `${uid || ""}(未连接)`
 
-// renderStreamText 从 event_meta 或 stream_data 中提取流文本到 message.streamText
+// renderStreamText 从 typed EVENT compact snapshot 提取正文
 const renderStreamText = (m: any) => {
     // 优先使用 event_meta 中的 snapshot
     const eventMeta = m.eventMeta
@@ -88,7 +88,6 @@ const renderStreamText = (m: any) => {
             }
         }
     }
-    // fallback: stream_data 已经在 convert.ts 中处理
 }
 
 let connectStatusListener!: ConnectStatusListener
@@ -171,25 +170,25 @@ const connectIM = (addr: string) => {
         for (const message of messages.value) {
             if (message.clientMsgNo !== clientMsgNo) continue
 
-            if (event.type === "stream.delta") {
+            if (event.type === "delta") {
                 // 增量事件：从 payload 中提取文本 delta
                 const payload = pushData.payload
-                if (payload && payload.kind === "text" && payload.delta) {
-                    message.streamText = (message.streamText || "") + payload.delta
+                if (payload?.text_delta) {
+                    message.streamText = (message.streamText || "") + payload.text_delta
                     const htmlText = await marked.parse(message.streamText)
                     message.content = new MessageText(htmlText || "")
                 }
-            } else if (event.type === "stream.close" || event.type === "stream.error" || event.type === "stream.cancel") {
-                // 终态事件：可能携带最终 snapshot
+            } else if (event.type === "snapshot" || event.type === "finish") {
                 const payload = pushData.payload
-                const snapshotText = payload?.snapshot?.kind === "text" ? (payload.snapshot.text as string) : ""
+                const snapshotText = payload?.snapshot?.text as string || ""
                 if (snapshotText) {
                     message.streamText = snapshotText
                     const htmlText = await marked.parse(message.streamText)
                     message.content = new MessageText(htmlText || "")
                 }
-            } else if (event.type === "stream.finish") {
-                (message as any).completed = true
+                if (event.type === "finish") {
+                    (message as any).completed = true
+                }
             }
 
             // 刷新 UI

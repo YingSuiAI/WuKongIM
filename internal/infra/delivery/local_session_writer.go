@@ -92,6 +92,34 @@ func (w *LocalSessionWriter) WriteSession(ctx context.Context, write runtimedeli
 	return runtimedelivery.SessionWriteResult{Disposition: runtimedelivery.SessionWriteAccepted}
 }
 
+// WriteEventSession validates one exact route and writes a WKProto EVENT frame.
+func (w *LocalSessionWriter) WriteEventSession(ctx context.Context, push onlinedelivery.EventPush, route onlinedelivery.Route) runtimedelivery.SessionWriteResult {
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return runtimedelivery.SessionWriteResult{Disposition: runtimedelivery.SessionWriteRetryable, Err: err}
+		}
+	}
+	if w == nil || w.online == nil {
+		return runtimedelivery.SessionWriteResult{Disposition: runtimedelivery.SessionWriteRetryable, Err: runtimedelivery.ErrSessionWriterUnavailable}
+	}
+	session, ok := exactLocalSession(w.online, route)
+	if !ok {
+		return runtimedelivery.SessionWriteResult{Disposition: runtimedelivery.SessionWriteDropped}
+	}
+	if route.ProtocolVersion < uint8(frame.LatestVersion) {
+		return runtimedelivery.SessionWriteResult{Disposition: runtimedelivery.SessionWriteDropped}
+	}
+	packet := &frame.EventPacket{Id: push.EventID, Type: push.EventType, Timestamp: push.Timestamp, Data: push.Payload}
+	if err := session.Session.WriteDelivery(packet); err != nil {
+		disposition := runtimedelivery.SessionWriteRetryable
+		if terminalOnlineDeliveryWriteError(err) {
+			disposition = runtimedelivery.SessionWriteDropped
+		}
+		return runtimedelivery.SessionWriteResult{Disposition: disposition, Err: err}
+	}
+	return runtimedelivery.SessionWriteResult{Disposition: runtimedelivery.SessionWriteAccepted}
+}
+
 func exactLocalSession(registry *online.Registry, route onlinedelivery.Route) (online.LocalSession, bool) {
 	if registry == nil || route.UID == "" || route.SessionID == 0 || route.OwnerNodeID == 0 || route.OwnerBootID == 0 || route.OwnerSeq == 0 {
 		return online.LocalSession{}, false
@@ -107,6 +135,9 @@ func exactLocalSession(registry *online.Registry, route onlinedelivery.Route) (o
 		local.OwnerBootID != route.OwnerBootID ||
 		local.OwnerSeq != route.OwnerSeq ||
 		local.DeviceID != route.DeviceID ||
+		local.AppInstanceID != route.AppInstanceID ||
+		local.SessionGeneration != route.SessionGeneration ||
+		local.ProtocolVersion != route.ProtocolVersion ||
 		local.DeviceFlag != route.DeviceFlag ||
 		local.DeviceLevel != route.DeviceLevel {
 		return online.LocalSession{}, false

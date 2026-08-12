@@ -32,9 +32,6 @@ func TestSendPacketUniqueKeyAndRecvReset(t *testing.T) {
 		MessageID:   11,
 		MessageSeq:  12,
 		ClientMsgNo: "client-msg",
-		StreamNo:    "stream-no",
-		StreamId:    13,
-		StreamFlag:  StreamFlagEnd,
 		Timestamp:   14,
 		ChannelID:   "channel-2",
 		ChannelType: 3,
@@ -52,7 +49,7 @@ func TestSendPacketUniqueKeyAndRecvReset(t *testing.T) {
 	if recv.Framer.GetRemainingLength() != 0 || recv.Framer.GetNoPersist() || recv.Framer.GetRedDot() || recv.Framer.GetsyncOnce() || recv.Framer.GetDUP() || recv.Framer.GetHasServerVersion() || recv.Framer.GetEnd() || recv.Framer.GetFrameSize() != 0 {
 		t.Fatal("RecvPacket.Reset() did not clear framer fields")
 	}
-	if recv.Setting != 0 || recv.MsgKey != "" || recv.Expire != 0 || recv.MessageID != 0 || recv.MessageSeq != 0 || recv.ClientMsgNo != "" || recv.StreamNo != "" || recv.StreamId != 0 || recv.StreamFlag != 0 || recv.Timestamp != 0 || recv.ChannelID != "" || recv.ChannelType != 0 || recv.Topic != "" || recv.FromUID != "" || recv.Payload != nil || recv.ClientSeq != 0 {
+	if recv.Setting != 0 || recv.MsgKey != "" || recv.Expire != 0 || recv.MessageID != 0 || recv.MessageSeq != 0 || recv.ClientMsgNo != "" || recv.Timestamp != 0 || recv.ChannelID != "" || recv.ChannelType != 0 || recv.Topic != "" || recv.FromUID != "" || recv.Payload != nil || recv.ClientSeq != 0 {
 		t.Fatal("RecvPacket.Reset() did not clear packet fields")
 	}
 }

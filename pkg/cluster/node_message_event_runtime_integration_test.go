@@ -5,6 +5,7 @@ package cluster
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -26,16 +27,19 @@ func TestClusterMessageEventFacadeAppendsTerminalThroughChannelHashSlot(t *testi
 	defer cancel()
 
 	result, err := node.AppendMessageEvent(ctx, metadb.MessageEventAppend{
-		ChannelID:   channelID,
-		ChannelType: 2,
-		ClientMsgNo: "cmn-event-1",
-		EventID:     "evt-1",
-		EventKey:    "main",
-		EventType:   metadb.EventTypeStreamClose,
-		Visibility:  metadb.VisibilityPublic,
-		OccurredAt:  1000,
-		Payload:     []byte(`{"snapshot":{"kind":"text","text":"hello"}}`),
-		UpdatedAt:   1001,
+		ChannelID:          channelID,
+		ChannelType:        2,
+		ClientMsgNo:        "cmn-event-1",
+		RunID:              "run-1",
+		AuthorizationFence: "fence-1",
+		AuthoritySequence:  1,
+		EventID:            "evt-1",
+		EventKey:           "main",
+		EventType:          metadb.EventTypeFinish,
+		Visibility:         metadb.VisibilityPublic,
+		OccurredAt:         1000,
+		Payload:            messageEventFinishForIntegrationTest("hello", 1),
+		UpdatedAt:          1001,
 	})
 	if err != nil {
 		t.Fatalf("AppendMessageEvent() error = %v", err)
@@ -67,32 +71,34 @@ func TestClusterMessageEventFacadeCachesStreamUntilTerminalEvent(t *testing.T) {
 		ChannelID:   channelID,
 		ChannelType: 2,
 		ClientMsgNo: "cmn-stream-cache",
-		EventID:     "evt-delta-1",
-		EventKey:    "main",
-		EventType:   metadb.EventTypeStreamDelta,
-		Visibility:  metadb.VisibilityPublic,
-		OccurredAt:  1000,
-		Payload:     []byte(`{"kind":"text","delta":"hello "}`),
-		UpdatedAt:   1001,
+		RunID:       "run-1", AuthorizationFence: "fence-1", AuthoritySequence: 1,
+		EventID:    "evt-delta-1",
+		EventKey:   "main",
+		EventType:  metadb.EventTypeDelta,
+		Visibility: metadb.VisibilityPublic,
+		OccurredAt: 1000,
+		Payload:    messageEventDeltaForIntegrationTest("hello ", 1),
+		UpdatedAt:  1001,
 	})
 	if err != nil {
 		t.Fatalf("AppendMessageEvent(delta 1) error = %v", err)
 	}
-	if result.MsgEventSeq != 0 || result.Status != metadb.EventStatusOpen {
-		t.Fatalf("delta result = %#v, want cache-only open seq 0", result)
+	if result.MsgEventSeq != 1 || result.Status != metadb.EventStatusOpen {
+		t.Fatalf("delta result = %#v, want cache-only open authority seq 1", result)
 	}
 
 	result, err = node.AppendMessageEvent(ctx, metadb.MessageEventAppend{
 		ChannelID:   channelID,
 		ChannelType: 2,
 		ClientMsgNo: "cmn-stream-cache",
-		EventID:     "evt-delta-2",
-		EventKey:    "main",
-		EventType:   metadb.EventTypeStreamDelta,
-		Visibility:  metadb.VisibilityPublic,
-		OccurredAt:  1002,
-		Payload:     []byte(`{"kind":"text","delta":"world"}`),
-		UpdatedAt:   1003,
+		RunID:       "run-1", AuthorizationFence: "fence-1", AuthoritySequence: 2,
+		EventID:    "evt-delta-2",
+		EventKey:   "main",
+		EventType:  metadb.EventTypeDelta,
+		Visibility: metadb.VisibilityPublic,
+		OccurredAt: 1002,
+		Payload:    messageEventDeltaForIntegrationTest("world", 2),
+		UpdatedAt:  1003,
 	})
 	if err != nil {
 		t.Fatalf("AppendMessageEvent(delta 2) error = %v", err)
@@ -113,7 +119,7 @@ func TestClusterMessageEventFacadeCachesStreamUntilTerminalEvent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetMessageEventStatesBatch(before terminal) error = %v", err)
 	}
-	if len(summary[key]) != 1 || summary[key][0].LastMsgEventSeq != 0 || summary[key][0].Status != metadb.EventStatusOpen {
+	if len(summary[key]) != 1 || summary[key][0].LastMsgEventSeq != 2 || summary[key][0].Status != metadb.EventStatusOpen {
 		t.Fatalf("summary before terminal = %#v, want one cached open state", summary[key])
 	}
 	if !strings.Contains(string(summary[key][0].SnapshotPayload), "hello world") {
@@ -124,18 +130,19 @@ func TestClusterMessageEventFacadeCachesStreamUntilTerminalEvent(t *testing.T) {
 		ChannelID:   channelID,
 		ChannelType: 2,
 		ClientMsgNo: "cmn-stream-cache",
-		EventID:     "evt-close",
-		EventKey:    "main",
-		EventType:   metadb.EventTypeStreamClose,
-		Visibility:  metadb.VisibilityPublic,
-		OccurredAt:  1004,
-		Payload:     []byte(`{"end_reason":2}`),
-		UpdatedAt:   1005,
+		RunID:       "run-1", AuthorizationFence: "fence-1", AuthoritySequence: 3,
+		EventID:    "evt-close",
+		EventKey:   "main",
+		EventType:  metadb.EventTypeFinish,
+		Visibility: metadb.VisibilityPublic,
+		OccurredAt: 1004,
+		Payload:    messageEventFinishForIntegrationTest("hello world", 3),
+		UpdatedAt:  1005,
 	})
 	if err != nil {
 		t.Fatalf("AppendMessageEvent(close) error = %v", err)
 	}
-	if closed.MsgEventSeq != 1 || closed.Status != metadb.EventStatusClosed || closed.State.EndReason != 2 {
+	if closed.MsgEventSeq != 3 || closed.Status != metadb.EventStatusClosed {
 		t.Fatalf("close result = %#v, want one durable closed event", closed)
 	}
 	if !strings.Contains(string(closed.State.SnapshotPayload), "hello world") {
@@ -146,14 +153,14 @@ func TestClusterMessageEventFacadeCachesStreamUntilTerminalEvent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListMessageEventStates(after terminal) error = %v", err)
 	}
-	if len(states) != 1 || states[0].LastMsgEventSeq != 1 || states[0].LastEventID != "evt-close" {
+	if len(states) != 1 || states[0].LastMsgEventSeq != 3 || states[0].LastEventID != "evt-close" {
 		t.Fatalf("states after terminal = %#v, want one closed durable state", states)
 	}
 	summary, err = node.GetMessageEventStatesBatch(ctx, []metadb.MessageEventMessageKey{key}, 10)
 	if err != nil {
 		t.Fatalf("GetMessageEventStatesBatch(after terminal) error = %v", err)
 	}
-	if len(summary[key]) != 1 || summary[key][0].LastMsgEventSeq != 1 || summary[key][0].Status != metadb.EventStatusClosed {
+	if len(summary[key]) != 1 || summary[key][0].LastMsgEventSeq != 3 || summary[key][0].Status != metadb.EventStatusClosed {
 		t.Fatalf("summary after terminal = %#v, want one durable closed state", summary[key])
 	}
 }
@@ -168,7 +175,7 @@ func TestClusterMessageEventFacadeFinishFlushesCachedLanes(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	for _, tc := range []struct {
+	for sequence, tc := range []struct {
 		eventID string
 		key     string
 		delta   string
@@ -180,13 +187,14 @@ func TestClusterMessageEventFacadeFinishFlushesCachedLanes(t *testing.T) {
 			ChannelID:   channelID,
 			ChannelType: 2,
 			ClientMsgNo: "cmn-stream-finish",
-			EventID:     tc.eventID,
-			EventKey:    tc.key,
-			EventType:   metadb.EventTypeStreamDelta,
-			Visibility:  metadb.VisibilityPublic,
-			OccurredAt:  1000,
-			Payload:     []byte(`{"kind":"text","delta":"` + tc.delta + `"}`),
-			UpdatedAt:   1001,
+			RunID:       "run-1", AuthorizationFence: "fence-1", AuthoritySequence: uint64(sequence + 1),
+			EventID:    tc.eventID,
+			EventKey:   tc.key,
+			EventType:  metadb.EventTypeDelta,
+			Visibility: metadb.VisibilityPublic,
+			OccurredAt: 1000,
+			Payload:    messageEventDeltaForIntegrationTest(tc.delta, uint64(sequence+1)),
+			UpdatedAt:  1001,
 		}); err != nil {
 			t.Fatalf("AppendMessageEvent(%s delta) error = %v", tc.key, err)
 		}
@@ -196,17 +204,19 @@ func TestClusterMessageEventFacadeFinishFlushesCachedLanes(t *testing.T) {
 		ChannelID:   channelID,
 		ChannelType: 2,
 		ClientMsgNo: "cmn-stream-finish",
-		EventID:     "evt-finish",
-		EventType:   metadb.EventTypeStreamFinish,
-		Visibility:  metadb.VisibilityPublic,
-		OccurredAt:  1002,
-		Payload:     []byte(`{"end_reason":3}`),
-		UpdatedAt:   1003,
+		RunID:       "run-1", AuthorizationFence: "fence-1", AuthoritySequence: 3,
+		EventKey:   "main",
+		EventID:    "evt-finish",
+		EventType:  metadb.EventTypeFinish,
+		Visibility: metadb.VisibilityPublic,
+		OccurredAt: 1002,
+		Payload:    messageEventFinishForIntegrationTest("answer", 3),
+		UpdatedAt:  1003,
 	})
 	if err != nil {
 		t.Fatalf("AppendMessageEvent(finish) error = %v", err)
 	}
-	if result.EventKey != metadb.EventKeyFinish || result.Status != metadb.EventStatusClosed {
+	if result.EventKey != "main" || result.Status != metadb.EventStatusClosed {
 		t.Fatalf("finish result = %#v, want closed finish marker", result)
 	}
 
@@ -236,7 +246,7 @@ func TestClusterMessageEventFacadeFinishFlushesCachedLanes(t *testing.T) {
 			t.Fatalf("%s lane snapshot = %s, want cached text %q", want.key, state.SnapshotPayload, want.text)
 		}
 	}
-	if _, ok := byKey[metadb.EventKeyFinish]; !ok {
+	if _, ok := byKey["main"]; !ok {
 		t.Fatalf("durable states after finish = %#v, missing finish marker", states)
 	}
 }
@@ -251,7 +261,7 @@ func TestClusterMessageEventFinishFlushUsesSingleProposal(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	for _, tc := range []struct {
+	for sequence, tc := range []struct {
 		eventID string
 		key     string
 		delta   string
@@ -263,13 +273,14 @@ func TestClusterMessageEventFinishFlushUsesSingleProposal(t *testing.T) {
 			ChannelID:   channelID,
 			ChannelType: 2,
 			ClientMsgNo: "cmn-finish-batch",
-			EventID:     tc.eventID,
-			EventKey:    tc.key,
-			EventType:   metadb.EventTypeStreamDelta,
-			Visibility:  metadb.VisibilityPublic,
-			OccurredAt:  1000,
-			Payload:     []byte(`{"kind":"text","delta":"` + tc.delta + `"}`),
-			UpdatedAt:   1001,
+			RunID:       "run-1", AuthorizationFence: "fence-1", AuthoritySequence: uint64(sequence + 1),
+			EventID:    tc.eventID,
+			EventKey:   tc.key,
+			EventType:  metadb.EventTypeDelta,
+			Visibility: metadb.VisibilityPublic,
+			OccurredAt: 1000,
+			Payload:    messageEventDeltaForIntegrationTest(tc.delta, uint64(sequence+1)),
+			UpdatedAt:  1001,
 		}); err != nil {
 			t.Fatalf("AppendMessageEvent(%s delta) error = %v", tc.key, err)
 		}
@@ -281,17 +292,216 @@ func TestClusterMessageEventFinishFlushUsesSingleProposal(t *testing.T) {
 		ChannelID:   channelID,
 		ChannelType: 2,
 		ClientMsgNo: "cmn-finish-batch",
-		EventID:     "evt-finish",
-		EventType:   metadb.EventTypeStreamFinish,
-		Visibility:  metadb.VisibilityPublic,
-		OccurredAt:  1002,
-		Payload:     []byte(`{"end_reason":3}`),
-		UpdatedAt:   1003,
+		RunID:       "run-1", AuthorizationFence: "fence-1", AuthoritySequence: 3,
+		EventKey:   "main",
+		EventID:    "evt-finish",
+		EventType:  metadb.EventTypeFinish,
+		Visibility: metadb.VisibilityPublic,
+		OccurredAt: 1002,
+		Payload:    messageEventFinishForIntegrationTest("answer", 3),
+		UpdatedAt:  1003,
 	}); err != nil {
 		t.Fatalf("AppendMessageEvent(finish) error = %v", err)
 	}
 	if got := proposer.resultCallCount() - before; got != 1 {
 		t.Fatalf("finish result proposals = %d, want 1", got)
+	}
+}
+
+func TestClusterMessageEventFinishPreservesLaneSequencesAndClosesRun(t *testing.T) {
+	node := newDefaultSingleNode(t)
+	startNode(t, node)
+	t.Cleanup(func() { stopNodes(t, node) })
+
+	channelID := "message-event-finish-sequences"
+	route := waitRouteKeyLeaderReady(t, node, channelID)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	clientMsgNo := "cmn-finish-sequences"
+	for _, event := range []metadb.MessageEventAppend{
+		{AuthoritySequence: 1, EventID: "main-1", EventKey: "main", Payload: messageEventDeltaForIntegrationTest("a", 1)},
+		{AuthoritySequence: 2, EventID: "tool-2", EventKey: "tool", Payload: messageEventDeltaForIntegrationTest("t", 2)},
+		{AuthoritySequence: 3, EventID: "tool-3", EventKey: "tool", Payload: messageEventDeltaForIntegrationTest("ool", 3)},
+		{AuthoritySequence: 4, EventID: "main-4", EventKey: "main", Payload: messageEventDeltaForIntegrationTest("nswer", 4)},
+		{AuthoritySequence: 5, EventID: "progress-5", EventKey: "progress", Payload: messageEventDeltaForIntegrationTest("5", 5)},
+		{AuthoritySequence: 6, EventID: "progress-6", EventKey: "progress", Payload: messageEventDeltaForIntegrationTest("6", 6)},
+	} {
+		event.ChannelID = channelID
+		event.ChannelType = 2
+		event.ClientMsgNo = clientMsgNo
+		event.RunID = "run-1"
+		event.AuthorizationFence = "fence-1"
+		event.EventType = metadb.EventTypeDelta
+		event.Visibility = metadb.VisibilityPublic
+		if _, err := node.AppendMessageEvent(ctx, event); err != nil {
+			t.Fatalf("AppendMessageEvent(%s) error = %v", event.EventID, err)
+		}
+	}
+
+	if _, err := node.AppendMessageEvent(ctx, metadb.MessageEventAppend{
+		ChannelID: channelID, ChannelType: 2, ClientMsgNo: clientMsgNo,
+		RunID: "run-1", AuthorizationFence: "fence-1", AuthoritySequence: 7,
+		EventID: "finish-7", EventKey: "final", EventType: metadb.EventTypeFinish,
+		Visibility: metadb.VisibilityPublic, Payload: messageEventFinishForIntegrationTest("done", 7),
+	}); err != nil {
+		t.Fatalf("AppendMessageEvent(finish) error = %v", err)
+	}
+
+	states, err := node.defaultSlotMetaDB.ForHashSlot(route.HashSlot).ListMessageEventStates(ctx, channelID, 2, clientMsgNo, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byKey := make(map[string]metadb.MessageEventState, len(states))
+	for _, state := range states {
+		byKey[state.EventKey] = state
+		if state.Status != metadb.EventStatusClosed {
+			t.Fatalf("state %s status = %s, want closed", state.EventKey, state.Status)
+		}
+	}
+	if byKey["main"].LastMsgEventSeq != 4 || byKey["tool"].LastMsgEventSeq != 3 || byKey["progress"].LastMsgEventSeq != 6 || byKey["final"].LastMsgEventSeq != 7 {
+		t.Fatalf("durable lane sequences = %#v, want main=4 tool=3 progress=6 final=7", byKey)
+	}
+	cursor, found, err := node.defaultSlotMetaDB.ForHashSlot(route.HashSlot).GetMessageEventCursor(ctx, channelID, 2, clientMsgNo, "run-1")
+	if err != nil || !found || cursor.LastMsgEventSeq != 7 || !cursor.Terminal {
+		t.Fatalf("cursor = %#v found=%v err=%v, want seq=7 terminal", cursor, found, err)
+	}
+	key := metadb.MessageEventMessageKey{ChannelID: channelID, ChannelType: 2, ClientMsgNo: clientMsgNo}
+	summary, err := node.GetMessageEventStatesBatch(ctx, []metadb.MessageEventMessageKey{key}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, state := range summary[key] {
+		if state.Status != metadb.EventStatusClosed {
+			t.Fatalf("summary state = %#v, want no open lanes", state)
+		}
+	}
+}
+
+func TestClusterMessageEventConcurrentDifferentFinishesHaveOneWinner(t *testing.T) {
+	node := newDefaultSingleNode(t)
+	startNode(t, node)
+	t.Cleanup(func() { stopNodes(t, node) })
+
+	channelID := "message-event-concurrent-finish"
+	route := waitRouteKeyLeaderReady(t, node, channelID)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	base := metadb.MessageEventAppend{
+		ChannelID: channelID, ChannelType: 2, ClientMsgNo: "cmn-concurrent-finish",
+		RunID: "run-1", AuthorizationFence: "fence-1", AuthoritySequence: 1,
+		EventID: "delta-1", EventKey: "main", EventType: metadb.EventTypeDelta,
+		Visibility: metadb.VisibilityPublic, Payload: messageEventDeltaForIntegrationTest("answer", 1),
+	}
+	if _, err := node.AppendMessageEvent(ctx, base); err != nil {
+		t.Fatal(err)
+	}
+
+	var wg sync.WaitGroup
+	results := make([]metadb.MessageEventAppendResult, 2)
+	errs := make([]error, 2)
+	for i := range errs {
+		i := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			finish := base
+			finish.AuthoritySequence = 2
+			finish.EventID = fmt.Sprintf("finish-%d", i)
+			finish.EventType = metadb.EventTypeFinish
+			finish.Payload = messageEventFinishForIntegrationTest(fmt.Sprintf("answer-%d", i), 2)
+			results[i], errs[i] = node.AppendMessageEvent(ctx, finish)
+		}()
+	}
+	wg.Wait()
+	successes := 0
+	failures := 0
+	for i, err := range errs {
+		if err == nil {
+			successes++
+			if !results[i].Applied || results[i].Status != metadb.EventStatusClosed {
+				t.Fatalf("winner result = %#v", results[i])
+			}
+			continue
+		}
+		if !errors.Is(err, metadb.ErrStaleMeta) && !errors.Is(err, ErrMessageEventRunTerminal) {
+			t.Fatalf("loser error = %v, want stale or terminal", err)
+		}
+		failures++
+	}
+	if successes != 1 || failures != 1 {
+		t.Fatalf("finish outcomes successes=%d failures=%d errs=%v", successes, failures, errs)
+	}
+	cursor, found, err := node.defaultSlotMetaDB.ForHashSlot(route.HashSlot).GetMessageEventCursor(ctx, channelID, 2, base.ClientMsgNo, base.RunID)
+	if err != nil || !found || cursor.LastMsgEventSeq != 2 || !cursor.Terminal {
+		t.Fatalf("cursor = %#v found=%v err=%v, want winner seq=2 terminal", cursor, found, err)
+	}
+}
+
+func TestClusterMessageEventConcurrentSameIDDifferentFinishPayloadRejectsConflict(t *testing.T) {
+	node := newDefaultSingleNode(t)
+	startNode(t, node)
+	t.Cleanup(func() { stopNodes(t, node) })
+
+	channelID := "message-event-concurrent-finish-digest"
+	route := waitRouteKeyLeaderReady(t, node, channelID)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	base := metadb.MessageEventAppend{
+		ChannelID: channelID, ChannelType: 2, ClientMsgNo: "cmn-concurrent-finish-digest",
+		RunID: "run-1", AuthorizationFence: "fence-1", AuthoritySequence: 1,
+		EventID: "delta-1", EventKey: "main", EventType: metadb.EventTypeDelta,
+		Visibility: metadb.VisibilityPublic, Payload: messageEventDeltaForIntegrationTest("answer", 1),
+	}
+	if _, err := node.AppendMessageEvent(ctx, base); err != nil {
+		t.Fatal(err)
+	}
+
+	start := make(chan struct{})
+	results := make([]metadb.MessageEventAppendResult, 2)
+	errs := make([]error, 2)
+	var wg sync.WaitGroup
+	for i := range errs {
+		i := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			finish := base
+			finish.AuthoritySequence = 2
+			finish.EventID = "finish-shared"
+			finish.EventKey = "terminal"
+			finish.EventType = metadb.EventTypeFinish
+			finish.Payload = messageEventFinishForIntegrationTest(fmt.Sprintf("winner-%d", i), 2)
+			results[i], errs[i] = node.AppendMessageEvent(ctx, finish)
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	winner := -1
+	for i, err := range errs {
+		if err == nil {
+			if winner >= 0 {
+				t.Fatalf("both conflicting finishes succeeded: results=%#v", results)
+			}
+			winner = i
+			continue
+		}
+		if !errors.Is(err, metadb.ErrStaleMeta) {
+			t.Fatalf("conflicting finish %d error = %v, want ErrStaleMeta", i, err)
+		}
+	}
+	if winner < 0 {
+		t.Fatalf("no finish succeeded: errors=%v", errs)
+	}
+	states, err := node.defaultSlotMetaDB.ForHashSlot(route.HashSlot).ListMessageEventStates(ctx, channelID, 2, base.ClientMsgNo, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, state := range states {
+		if state.EventKey == "terminal" && !strings.Contains(string(state.SnapshotPayload), fmt.Sprintf("winner-%d", winner)) {
+			t.Fatalf("terminal snapshot = %s, want successful finish payload", state.SnapshotPayload)
+		}
 	}
 }
 
@@ -310,13 +520,14 @@ func TestClusterMessageEventCoalescesConcurrentFinishesForSameChannel(t *testing
 			ChannelID:   channelID,
 			ChannelType: 2,
 			ClientMsgNo: clientMsgNo,
-			EventID:     "evt-delta-" + clientMsgNo,
-			EventKey:    "main",
-			EventType:   metadb.EventTypeStreamDelta,
-			Visibility:  metadb.VisibilityPublic,
-			OccurredAt:  1000,
-			Payload:     []byte(`{"kind":"text","delta":"` + clientMsgNo + `"}`),
-			UpdatedAt:   1001,
+			RunID:       "run-1", AuthorizationFence: "fence-1", AuthoritySequence: 1,
+			EventID:    "evt-delta-" + clientMsgNo,
+			EventKey:   "main",
+			EventType:  metadb.EventTypeDelta,
+			Visibility: metadb.VisibilityPublic,
+			OccurredAt: 1000,
+			Payload:    messageEventDeltaForIntegrationTest(clientMsgNo, 1),
+			UpdatedAt:  1001,
 		}); err != nil {
 			t.Fatalf("AppendMessageEvent(delta %s) error = %v", clientMsgNo, err)
 		}
@@ -336,12 +547,14 @@ func TestClusterMessageEventCoalescesConcurrentFinishesForSameChannel(t *testing
 				ChannelID:   channelID,
 				ChannelType: 2,
 				ClientMsgNo: clientMsgNo,
-				EventID:     "evt-finish-" + clientMsgNo,
-				EventType:   metadb.EventTypeStreamFinish,
-				Visibility:  metadb.VisibilityPublic,
-				OccurredAt:  1002 + int64(i),
-				Payload:     []byte(`{"end_reason":3}`),
-				UpdatedAt:   1004 + int64(i),
+				RunID:       "run-1", AuthorizationFence: "fence-1", AuthoritySequence: 2,
+				EventKey:   "terminal",
+				EventID:    "evt-finish-" + clientMsgNo,
+				EventType:  metadb.EventTypeFinish,
+				Visibility: metadb.VisibilityPublic,
+				OccurredAt: 1002 + int64(i),
+				Payload:    messageEventFinishForIntegrationTest(clientMsgNo, 2),
+				UpdatedAt:  1004 + int64(i),
 			})
 		}()
 	}
@@ -351,11 +564,11 @@ func TestClusterMessageEventCoalescesConcurrentFinishesForSameChannel(t *testing
 			t.Fatalf("AppendMessageEvent(finish %d) error = %v", i, err)
 		}
 	}
-	if got := proposer.resultCallCount() - before; got != 1 {
-		t.Fatalf("coalesced finish result proposals = %d, want 1", got)
+	if got := proposer.resultCallCount() - before; got != 2 {
+		t.Fatalf("independent anchor finish proposals = %d, want 2", got)
 	}
 	for i, clientMsgNo := range []string{"cmn-coalesce-a", "cmn-coalesce-b"} {
-		if results[i].ClientMsgNo != clientMsgNo || results[i].EventKey != metadb.EventKeyFinish || results[i].MsgEventSeq == 0 {
+		if results[i].ClientMsgNo != clientMsgNo || results[i].EventKey != "terminal" || results[i].MsgEventSeq == 0 {
 			t.Fatalf("finish result %d = %#v, want result for %s finish marker", i, results[i], clientMsgNo)
 		}
 		states, err := node.defaultSlotMetaDB.ForHashSlot(route.HashSlot).ListMessageEventStates(ctx, channelID, 2, clientMsgNo, 10)
@@ -381,15 +594,18 @@ func TestClusterMessageEventFinishWithoutCachedLanesFailsClosed(t *testing.T) {
 	proposer := wrapNodeResultProposer(t, node)
 	before := proposer.resultCallCount()
 	_, err := node.AppendMessageEvent(ctx, metadb.MessageEventAppend{
-		ChannelID:   channelID,
-		ChannelType: 2,
-		ClientMsgNo: "cmn-finish-cache-miss",
-		EventID:     "evt-finish",
-		EventType:   metadb.EventTypeStreamFinish,
-		Visibility:  metadb.VisibilityPublic,
-		OccurredAt:  1002,
-		Payload:     []byte(`{"end_reason":3}`),
-		UpdatedAt:   1003,
+		ChannelID:          channelID,
+		ChannelType:        2,
+		ClientMsgNo:        "cmn-finish-cache-miss",
+		RunID:              "run-1",
+		AuthorizationFence: "fence-1",
+		AuthoritySequence:  1,
+		EventID:            "evt-finish",
+		EventType:          metadb.EventTypeFinish,
+		Visibility:         metadb.VisibilityPublic,
+		OccurredAt:         1002,
+		Payload:            []byte(`{}`),
+		UpdatedAt:          1003,
 	})
 	if !errors.Is(err, ErrMessageEventStreamCacheMiss) {
 		t.Fatalf("AppendMessageEvent(finish without cache) error = %v, want ErrMessageEventStreamCacheMiss", err)
@@ -417,16 +633,19 @@ func TestClusterMessageEventCacheClearsWhenLocalSlotLeadershipIsLost(t *testing.
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	if _, err := node.AppendMessageEvent(ctx, metadb.MessageEventAppend{
-		ChannelID:   channelID,
-		ChannelType: 2,
-		ClientMsgNo: "cmn-clear-on-leader-loss",
-		EventID:     "evt-delta",
-		EventKey:    "main",
-		EventType:   metadb.EventTypeStreamDelta,
-		Visibility:  metadb.VisibilityPublic,
-		OccurredAt:  1000,
-		Payload:     []byte(`{"kind":"text","delta":"stale"}`),
-		UpdatedAt:   1001,
+		ChannelID:          channelID,
+		ChannelType:        2,
+		ClientMsgNo:        "cmn-clear-on-leader-loss",
+		RunID:              "run-1",
+		AuthorizationFence: "fence-1",
+		AuthoritySequence:  1,
+		EventID:            "evt-delta",
+		EventKey:           "main",
+		EventType:          metadb.EventTypeDelta,
+		Visibility:         metadb.VisibilityPublic,
+		OccurredAt:         1000,
+		Payload:            messageEventDeltaForIntegrationTest("stale", 1),
+		UpdatedAt:          1001,
 	}); err != nil {
 		t.Fatalf("AppendMessageEvent(delta) error = %v", err)
 	}
@@ -462,7 +681,7 @@ func TestClusterMessageEventAppendIsFencedDuringRestoreMaintenance(t *testing.T)
 		ClientMsgNo: "cmn-maintenance",
 		EventID:     "evt-delta",
 		EventKey:    "main",
-		EventType:   metadb.EventTypeStreamDelta,
+		EventType:   metadb.EventTypeDelta,
 		Visibility:  metadb.VisibilityPublic,
 		Payload:     []byte(`{"delta":"stale"}`),
 	})
@@ -491,16 +710,19 @@ func TestClusterMessageEventCacheClearsAcrossSerializedLocalRemoteLocalAuthority
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	if _, err := node.AppendMessageEvent(ctx, metadb.MessageEventAppend{
-		ChannelID:   "message-event-serialized-leader-loss",
-		ChannelType: 2,
-		ClientMsgNo: "cmn-serialized-leader-loss",
-		EventID:     "evt-delta",
-		EventKey:    "main",
-		EventType:   metadb.EventTypeStreamDelta,
-		Visibility:  metadb.VisibilityPublic,
-		OccurredAt:  1000,
-		Payload:     []byte(`{"kind":"text","delta":"stale"}`),
-		UpdatedAt:   1001,
+		ChannelID:          "message-event-serialized-leader-loss",
+		ChannelType:        2,
+		ClientMsgNo:        "cmn-serialized-leader-loss",
+		RunID:              "run-1",
+		AuthorizationFence: "fence-1",
+		AuthoritySequence:  1,
+		EventID:            "evt-delta",
+		EventKey:           "main",
+		EventType:          metadb.EventTypeDelta,
+		Visibility:         metadb.VisibilityPublic,
+		OccurredAt:         1000,
+		Payload:            messageEventDeltaForIntegrationTest("stale", 1),
+		UpdatedAt:          1001,
 	}); err != nil {
 		t.Fatalf("AppendMessageEvent(delta) error = %v", err)
 	}
@@ -570,7 +792,7 @@ func TestClusterMessageEventObserverTracksCacheAndFinishBatch(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	for _, tc := range []struct {
+	for sequence, tc := range []struct {
 		eventID string
 		key     string
 		delta   string
@@ -579,16 +801,19 @@ func TestClusterMessageEventObserverTracksCacheAndFinishBatch(t *testing.T) {
 		{eventID: "evt-tool-delta", key: "tool", delta: "lookup"},
 	} {
 		if _, err := node.AppendMessageEvent(ctx, metadb.MessageEventAppend{
-			ChannelID:   channelID,
-			ChannelType: 2,
-			ClientMsgNo: "cmn-observer",
-			EventID:     tc.eventID,
-			EventKey:    tc.key,
-			EventType:   metadb.EventTypeStreamDelta,
-			Visibility:  metadb.VisibilityPublic,
-			OccurredAt:  1000,
-			Payload:     []byte(`{"kind":"text","delta":"` + tc.delta + `"}`),
-			UpdatedAt:   1001,
+			ChannelID:          channelID,
+			ChannelType:        2,
+			ClientMsgNo:        "cmn-observer",
+			RunID:              "run-1",
+			AuthorizationFence: "fence-1",
+			AuthoritySequence:  uint64(sequence + 1),
+			EventID:            tc.eventID,
+			EventKey:           tc.key,
+			EventType:          metadb.EventTypeDelta,
+			Visibility:         metadb.VisibilityPublic,
+			OccurredAt:         1000,
+			Payload:            messageEventDeltaForIntegrationTest(tc.delta, uint64(sequence+1)),
+			UpdatedAt:          1001,
 		}); err != nil {
 			t.Fatalf("AppendMessageEvent(%s delta) error = %v", tc.key, err)
 		}
@@ -602,21 +827,24 @@ func TestClusterMessageEventObserverTracksCacheAndFinishBatch(t *testing.T) {
 	}
 
 	if _, err := node.AppendMessageEvent(ctx, metadb.MessageEventAppend{
-		ChannelID:   channelID,
-		ChannelType: 2,
-		ClientMsgNo: "cmn-observer",
-		EventID:     "evt-finish",
-		EventType:   metadb.EventTypeStreamFinish,
-		Visibility:  metadb.VisibilityPublic,
-		OccurredAt:  1002,
-		Payload:     []byte(`{"end_reason":3}`),
-		UpdatedAt:   1003,
+		ChannelID:          channelID,
+		ChannelType:        2,
+		ClientMsgNo:        "cmn-observer",
+		RunID:              "run-1",
+		AuthorizationFence: "fence-1",
+		AuthoritySequence:  3,
+		EventID:            "evt-finish",
+		EventType:          metadb.EventTypeFinish,
+		Visibility:         metadb.VisibilityPublic,
+		OccurredAt:         1002,
+		Payload:            messageEventFinishForIntegrationTest("answer", 3),
+		UpdatedAt:          1003,
 	}); err != nil {
 		t.Fatalf("AppendMessageEvent(finish) error = %v", err)
 	}
-	observer.requireAppend(t, "cache", metadb.EventTypeStreamDelta, "ok")
-	observer.requireAppend(t, "finish_batch", metadb.EventTypeStreamFinish, "ok")
-	observer.requirePropose(t, "finish_batch", "ok", 3)
+	observer.requireAppend(t, "cache", metadb.EventTypeDelta, "ok")
+	observer.requireAppend(t, "finish_batch", metadb.EventTypeFinish, "ok")
+	observer.requirePropose(t, "finish_batch", "ok", 2)
 	observer.requireAppendStage(t, "finish_batch", "ok", "finish_batch_build")
 	observer.requireAppendStage(t, "finish_batch", "ok", "finish_cache_remove")
 	observer.requireProposeStage(t, "finish_batch", "ok", "encode")
@@ -630,8 +858,8 @@ func TestClusterMessageEventObserverTracksCacheAndFinishBatch(t *testing.T) {
 	observer.requireProposeStage(t, "finish_batch", "ok", "slot_mark_applied")
 	observer.requireProposeStage(t, "finish_batch", "ok", "decode")
 	cache = observer.lastCache()
-	if cache.Sessions != 0 || cache.OpenLanes != 0 || cache.PayloadBytes != 0 {
-		t.Fatalf("cache observation after finish = %#v, want empty cache", cache)
+	if cache.Sessions != 1 || cache.OpenLanes != 0 || cache.PayloadBytes != 0 {
+		t.Fatalf("cache observation after finish = %#v, want lightweight terminal idempotency session", cache)
 	}
 }
 
@@ -648,30 +876,36 @@ func TestClusterGetMessageEventStatesBatchRoutesEachMessage(t *testing.T) {
 	defer cancel()
 
 	if _, err := node.AppendMessageEvent(ctx, metadb.MessageEventAppend{
-		ChannelID:   channelA,
-		ChannelType: 2,
-		ClientMsgNo: "cmn-a",
-		EventID:     "evt-a",
-		EventKey:    "main",
-		EventType:   metadb.EventTypeStreamClose,
-		Visibility:  metadb.VisibilityPublic,
-		OccurredAt:  1000,
-		Payload:     []byte(`{"snapshot":{"kind":"text","text":"a"}}`),
-		UpdatedAt:   1001,
+		ChannelID:          channelA,
+		ChannelType:        2,
+		ClientMsgNo:        "cmn-a",
+		RunID:              "run-a",
+		AuthorizationFence: "fence-1",
+		AuthoritySequence:  1,
+		EventID:            "evt-a",
+		EventKey:           "main",
+		EventType:          metadb.EventTypeFinish,
+		Visibility:         metadb.VisibilityPublic,
+		OccurredAt:         1000,
+		Payload:            messageEventFinishForIntegrationTest("a", 1),
+		UpdatedAt:          1001,
 	}); err != nil {
 		t.Fatalf("AppendMessageEvent(channelA) error = %v", err)
 	}
 	if _, err := node.AppendMessageEvent(ctx, metadb.MessageEventAppend{
-		ChannelID:   channelB,
-		ChannelType: 2,
-		ClientMsgNo: "cmn-b",
-		EventID:     "evt-b",
-		EventKey:    "tool",
-		EventType:   metadb.EventTypeStreamClose,
-		Visibility:  metadb.VisibilityPublic,
-		OccurredAt:  2000,
-		Payload:     []byte(`{"snapshot":{"kind":"text","text":"b"}}`),
-		UpdatedAt:   2001,
+		ChannelID:          channelB,
+		ChannelType:        2,
+		ClientMsgNo:        "cmn-b",
+		RunID:              "run-b",
+		AuthorizationFence: "fence-1",
+		AuthoritySequence:  1,
+		EventID:            "evt-b",
+		EventKey:           "tool",
+		EventType:          metadb.EventTypeFinish,
+		Visibility:         metadb.VisibilityPublic,
+		OccurredAt:         2000,
+		Payload:            messageEventFinishForIntegrationTest("b", 1),
+		UpdatedAt:          2001,
 	}); err != nil {
 		t.Fatalf("AppendMessageEvent(channelB) error = %v", err)
 	}
@@ -695,6 +929,14 @@ func TestClusterGetMessageEventStatesBatchRoutesEachMessage(t *testing.T) {
 	if _, ok := got[missing]; ok {
 		t.Fatalf("missing key returned states: %#v", got[missing])
 	}
+}
+
+func messageEventDeltaForIntegrationTest(text string, authoritySequence uint64) []byte {
+	return []byte(fmt.Sprintf(`{"text_delta":%q,"authority_sequence":%d,"projection_digest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`, text, authoritySequence))
+}
+
+func messageEventFinishForIntegrationTest(text string, authoritySequence uint64) []byte {
+	return []byte(fmt.Sprintf(`{"snapshot":{"state":"succeeded","complete":true,"text":%q,"authority_sequence":%d,"projection_digest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}`, text, authoritySequence))
 }
 
 type countingResultProposer struct {

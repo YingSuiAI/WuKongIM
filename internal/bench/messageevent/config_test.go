@@ -9,6 +9,7 @@ import (
 func TestDefaultConfigIsSmallAndComputesExpectedCounts(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.APIAddrs = []string{"http://127.0.0.1:5001"}
+	cfg.ServiceToken = "test-service-token"
 
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("default config should validate with api addrs: %v", err)
@@ -39,6 +40,7 @@ func TestDefaultConfigIsSmallAndComputesExpectedCounts(t *testing.T) {
 func TestValidateRejectsInvalidMessageEventConfig(t *testing.T) {
 	base := DefaultConfig()
 	base.APIAddrs = []string{"http://127.0.0.1:5001"}
+	base.ServiceToken = "test-service-token"
 
 	tests := []struct {
 		name string
@@ -46,6 +48,7 @@ func TestValidateRejectsInvalidMessageEventConfig(t *testing.T) {
 		want string
 	}{
 		{name: "api", edit: func(c *Config) { c.APIAddrs = nil }, want: "api"},
+		{name: "service token", edit: func(c *Config) { c.ServiceToken = "" }, want: "service token"},
 		{name: "channels", edit: func(c *Config) { c.Channels = 0 }, want: "channels"},
 		{name: "streams", edit: func(c *Config) { c.StreamsPerChannel = 0 }, want: "streams-per-channel"},
 		{name: "lanes", edit: func(c *Config) { c.LanesPerStream = 0 }, want: "lanes-per-stream"},
@@ -70,6 +73,7 @@ func TestValidateRejectsInvalidMessageEventConfig(t *testing.T) {
 func TestConfigAllowsLargeManualPressureShape(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.APIAddrs = []string{"http://127.0.0.1:5001", "http://127.0.0.1:5002"}
+	cfg.ServiceToken = "test-service-token"
 	cfg.Channels = 100000
 	cfg.StreamsPerChannel = 2
 	cfg.LanesPerStream = 3

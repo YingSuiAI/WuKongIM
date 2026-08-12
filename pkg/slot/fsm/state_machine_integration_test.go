@@ -884,12 +884,12 @@ func TestStateMachineApplyCreateUserAndUpsertDevice(t *testing.T) {
 		SlotID: 11,
 		Index:  3,
 		Term:   1,
-		Data:   EncodeUpsertDeviceCommand(metadb.Device{UID: "u1", DeviceFlag: 1, Token: "app-token", DeviceLevel: 5}),
+		Data:   EncodeUpsertDeviceCommand(metadb.Device{UID: "u1", DeviceFlag: 1, DeviceID: "device-1", AppInstanceID: "app-1", Token: "app-token", DeviceLevel: 5}),
 	}); err != nil {
 		t.Fatalf("Apply(upsert device) error = %v", err)
 	}
 
-	gotDevice, err := db.ForSlot(11).GetDevice(ctx, "u1", 1)
+	gotDevice, err := db.ForSlot(11).GetDevice(ctx, "u1", 1, "device-1", "app-1")
 	if err != nil {
 		t.Fatalf("GetDevice() error = %v", err)
 	}

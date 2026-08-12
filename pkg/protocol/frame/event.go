@@ -9,7 +9,7 @@ type EventPacket struct {
 	// 事件类型
 	Type string
 	// 事件时间戳
-	Timestamp int64
+	Timestamp uint64
 	// 事件数据
 	Data []byte
 }

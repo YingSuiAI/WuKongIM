@@ -19,6 +19,11 @@ type OwnerPushHandler interface {
 	PushOwner(context.Context, onlinedelivery.OwnerPush) (onlinedelivery.OwnerPushResult, error)
 }
 
+// EventOwnerPushHandler writes typed EVENT frames on one owner node.
+type EventOwnerPushHandler interface {
+	PushEventOwner(context.Context, onlinedelivery.EventPush) (onlinedelivery.OwnerPushResult, error)
+}
+
 // FeedbackHandler is the Online Delivery interface used by gateway feedback.
 type FeedbackHandler interface {
 	Recvack(context.Context, Recvack) error
@@ -41,6 +46,11 @@ type PlanPresenceResolver interface {
 // RemoteOwnerPusher forwards a push to a non-local owner node.
 type RemoteOwnerPusher interface {
 	PushOwner(context.Context, onlinedelivery.OwnerPush) (onlinedelivery.OwnerPushResult, error)
+}
+
+// RemoteEventPusher forwards typed EVENT frames to a non-local owner node.
+type RemoteEventPusher interface {
+	PushEventOwner(context.Context, onlinedelivery.EventPush) (onlinedelivery.OwnerPushResult, error)
 }
 
 // SessionWriteDisposition is the final classification of one exact local session write.
@@ -75,6 +85,10 @@ type SessionWriteResult struct {
 // It never receives pending-ACK tokens.
 type LocalSessionWriter interface {
 	WriteSession(context.Context, LocalSessionWrite) SessionWriteResult
+}
+
+type eventSessionWriter interface {
+	WriteEventSession(context.Context, onlinedelivery.EventPush, onlinedelivery.Route) SessionWriteResult
 }
 
 // OfflineRecipientsEvent reports durable recipients with no online route.

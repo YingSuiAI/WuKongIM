@@ -45,15 +45,13 @@ func TestSendEncodeAndDecode(t *testing.T) {
 	assert.Equal(t, packet.Setting, resultSendPacket.Setting)
 }
 
-func TestSendEncodeAndDecodeV5WithStreamDoesNotMiscalculateRemainingLength(t *testing.T) {
+func TestSendEncodeAndDecodeLatestDoesNotMiscalculateRemainingLength(t *testing.T) {
 	packet := &frame.SendPacket{
 		Framer: frame.Framer{
 			RedDot: true,
 		},
-		Setting:     frame.SettingStream,
 		ClientSeq:   7,
 		ClientMsgNo: "client-msg-no",
-		StreamNo:    "stream-no",
 		ChannelID:   "channel-1",
 		ChannelType: 2,
 		MsgKey:      "msg-key",
@@ -73,7 +71,6 @@ func TestSendEncodeAndDecodeV5WithStreamDoesNotMiscalculateRemainingLength(t *te
 	require.NotNil(t, resultSendPacket)
 	assert.Equal(t, packet.ClientSeq, resultSendPacket.ClientSeq)
 	assert.Equal(t, packet.ClientMsgNo, resultSendPacket.ClientMsgNo)
-	assert.Empty(t, resultSendPacket.StreamNo)
 	assert.Equal(t, packet.ChannelID, resultSendPacket.ChannelID)
 	assert.Equal(t, packet.ChannelType, resultSendPacket.ChannelType)
 	assert.Equal(t, packet.MsgKey, resultSendPacket.MsgKey)

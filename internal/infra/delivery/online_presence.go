@@ -63,7 +63,9 @@ func onlineDeliveryRoutesFromPresence(routes []presenceusecase.Route) []onlinede
 		out = append(out, onlinedelivery.Route{
 			UID: route.UID, OwnerNodeID: route.OwnerNodeID, OwnerBootID: route.OwnerBootID,
 			OwnerSeq: route.OwnerSeq, SessionID: route.SessionID, DeviceID: route.DeviceID,
-			DeviceFlag: route.DeviceFlag, DeviceLevel: route.DeviceLevel,
+			AppInstanceID: route.AppInstanceID, SessionGeneration: route.SessionGeneration,
+			ProtocolVersion: route.ProtocolVersion,
+			DeviceFlag:      route.DeviceFlag, DeviceLevel: route.DeviceLevel,
 		})
 	}
 	return out

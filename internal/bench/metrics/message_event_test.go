@@ -11,10 +11,10 @@ wukongim_message_event_stream_cache_sessions 0
 wukongim_message_event_stream_cache_open_lanes 0
 wukongim_message_event_stream_cache_payload_bytes 0
 wukongim_message_event_stream_cache_max_sessions 1024
-wukongim_message_event_append_total{path="cache",event_type="stream.delta",result="ok"} 10
-wukongim_message_event_append_total{path="finish_batch",event_type="stream.finish",result="ok"} 1
-wukongim_message_event_append_total{path="finish_batch",event_type="stream.finish",result="cache_miss"} 0
-wukongim_message_event_append_total{path="cache",event_type="stream.delta",result="backpressured"} 0
+wukongim_message_event_append_total{path="cache",event_type="delta",result="ok"} 10
+wukongim_message_event_append_total{path="finish_batch",event_type="finish",result="ok"} 1
+wukongim_message_event_append_total{path="finish_batch",event_type="finish",result="cache_miss"} 0
+wukongim_message_event_append_total{path="cache",event_type="delta",result="backpressured"} 0
 wukongim_message_event_propose_total{path="finish_batch",result="ok"} 1
 wukongim_message_event_propose_duration_seconds_bucket{path="finish_batch",result="ok",le="0.01"} 0
 wukongim_message_event_propose_duration_seconds_bucket{path="finish_batch",result="ok",le="0.05"} 1
@@ -40,10 +40,10 @@ wukongim_message_event_stream_cache_sessions 7
 wukongim_message_event_stream_cache_open_lanes 11
 wukongim_message_event_stream_cache_payload_bytes 4096
 wukongim_message_event_stream_cache_max_sessions 1024
-wukongim_message_event_append_total{path="cache",event_type="stream.delta",result="ok"} 30
-wukongim_message_event_append_total{path="finish_batch",event_type="stream.finish",result="ok"} 5
-wukongim_message_event_append_total{path="finish_batch",event_type="stream.finish",result="cache_miss"} 2
-wukongim_message_event_append_total{path="cache",event_type="stream.delta",result="backpressured"} 3
+wukongim_message_event_append_total{path="cache",event_type="delta",result="ok"} 30
+wukongim_message_event_append_total{path="finish_batch",event_type="finish",result="ok"} 5
+wukongim_message_event_append_total{path="finish_batch",event_type="finish",result="cache_miss"} 2
+wukongim_message_event_append_total{path="cache",event_type="delta",result="backpressured"} 3
 wukongim_message_event_propose_total{path="finish_batch",result="ok"} 5
 wukongim_message_event_propose_duration_seconds_bucket{path="finish_batch",result="ok",le="0.01"} 1
 wukongim_message_event_propose_duration_seconds_bucket{path="finish_batch",result="ok",le="0.05"} 4
@@ -82,8 +82,8 @@ wukongim_message_event_propose_batch_events_bucket{path="finish_batch",result="o
 	if report.MessageEventAppendCountByResult["cache_miss"] != 2 {
 		t.Fatalf("cache_miss count = %.0f, want 2", report.MessageEventAppendCountByResult["cache_miss"])
 	}
-	if report.MessageEventAppendCountByEventType["stream.delta"] != 23 {
-		t.Fatalf("stream.delta count = %.0f, want 23", report.MessageEventAppendCountByEventType["stream.delta"])
+	if report.MessageEventAppendCountByEventType["delta"] != 23 {
+		t.Fatalf("delta count = %.0f, want 23", report.MessageEventAppendCountByEventType["delta"])
 	}
 	if report.MessageEventProposeCountByPath["finish_batch"] != 4 {
 		t.Fatalf("finish_batch propose count = %.0f, want 4", report.MessageEventProposeCountByPath["finish_batch"])

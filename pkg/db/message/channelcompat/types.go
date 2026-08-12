@@ -18,8 +18,8 @@ const (
 	// DurableMessageCodecVersion and DurableMessageHeaderSize define the durable
 	// message payload contract shared by log encoding and store-side apply-fetch
 	// idempotency reconstruction.
-	DurableMessageCodecVersion byte = 1
-	DurableMessageHeaderSize        = 45
+	DurableMessageCodecVersion byte = 2
+	DurableMessageHeaderSize        = 36
 )
 
 type ChannelKey string
@@ -39,9 +39,6 @@ type Message struct {
 	ClientSeq  uint64
 
 	ClientMsgNo string
-	StreamNo    string
-	StreamID    uint64
-	StreamFlag  frame.StreamFlag
 	Timestamp   int32
 	ChannelID   string
 	ChannelType uint8

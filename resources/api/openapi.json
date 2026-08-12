@@ -1386,10 +1386,10 @@
         }
       }
     },
-    "/message/event": {
+    "/message/events:append": {
       "post": {
         "summary": "Append Message Event",
-        "description": "Append an event on a message identified by `client_msg_no`. Message is the anchor entity; events are projections on top of that message.\n\n`event_key` identifies an event lane within the same message (defaults to `main`).\n\n**Routing:**\n- `stream.delta` is handled in memory cache for low latency.\n- All other event types are persisted through Raft.\n- Requests are automatically forwarded to the slot leader node.",
+        "description": "Service-only append for a typed public message event. The committed anchor is matched by channel, message id, client message number, sender, run id, and authorization fence. `delta` and `snapshot` update the Slot-leader cache; `finish` persists the compact terminal projection through Raft.",
         "tags": ["Message Event"],
         "requestBody": {
           "required": true,
@@ -1422,55 +1422,7 @@
             }
           },
           "400": {
-            "description": "Bad request. Possible causes: missing required fields, stream already closed.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/message/eventsync": {
-      "post": {
-        "summary": "Sync Message Events",
-        "description": "Retrieve projected event states for a specific message by `client_msg_no`, ordered by `msg_event_seq`. Supports cursor-based pagination via `from_msg_event_seq` and optional `event_key` filtering.\n\nRequests are automatically forwarded to the slot leader node.",
-        "tags": ["Message Event"],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/EventSyncRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Events synced successfully",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "status": {
-                      "type": "integer",
-                      "example": 200
-                    },
-                    "data": {
-                      "$ref": "#/components/schemas/EventSyncResponse"
-                    }
-                  }
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Bad request",
+            "description": "Bad request. Possible causes include malformed typed payload, anchor mismatch, stale authority sequence, or a terminal run.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1485,7 +1437,7 @@
     "/channel/messagesync": {
       "post": {
         "summary": "Sync Channel Messages",
-        "description": "Synchronize messages from a channel with pagination support. For stream messages, response can include merged event state (`event_meta`) and sync hint (`event_sync_hint`).",
+        "description": "Synchronize messages from a channel with pagination support. Responses can include merged typed event state (`event_meta`).",
         "tags": ["Message"],
         "requestBody": {
           "required": true,
@@ -3292,33 +3244,8 @@
             "type": "string",
             "example": "client_msg_123"
           },
-          "end": {
-            "type": "integer",
-            "format": "uint8",
-            "description": "Legacy stream end flag (1 means stream reached terminal state).",
-            "example": 0
-          },
-          "end_reason": {
-            "type": "integer",
-            "format": "uint8",
-            "description": "Legacy stream end reason code.",
-            "example": 0
-          },
-          "error": {
-            "type": "string",
-            "description": "Legacy stream error message.",
-            "example": ""
-          },
-          "stream_data": {
-            "type": "string",
-            "format": "byte",
-            "description": "Legacy merged stream data from main event_key snapshot."
-          },
           "event_meta": {
             "$ref": "#/components/schemas/MessageEventMeta"
-          },
-          "event_sync_hint": {
-            "$ref": "#/components/schemas/MessageEventSyncHint"
           },
           "from_uid": {
             "type": "string",
@@ -3419,29 +3346,13 @@
           "end_reason": {
             "type": "integer",
             "format": "uint8",
-            "description": "Terminal reason code for stream-like event types.",
+            "description": "Terminal reason code for the typed event lane.",
             "example": 0
           },
           "error": {
             "type": "string",
-            "description": "Terminal error text for stream.error.",
+            "description": "Public terminal error code or text when present.",
             "example": ""
-          }
-        }
-      },
-      "MessageEventSyncHint": {
-        "type": "object",
-        "properties": {
-          "client_msg_no": {
-            "type": "string",
-            "description": "Anchor message client message number.",
-            "example": "550e8400-e29b-41d4-a716-446655440000"
-          },
-          "from_msg_event_seq": {
-            "type": "integer",
-            "format": "uint64",
-            "description": "Suggested cursor for `/message/eventsync`.",
-            "example": 0
           }
         }
       },
@@ -3966,12 +3877,11 @@
             "description": "Pull mode (0=down, 1=up)",
             "enum": [0, 1]
           },
-          "event_summary_mode": {
-            "type": "string",
-            "description": "Event summary mode for stream messages (`basic` or `full`). `full` includes snapshot payload.",
-            "example": "full",
-            "default": "full",
-            "enum": ["basic", "full"]
+          "include_event_meta": {
+            "type": "integer",
+            "description": "Set to 1 to include compact typed event state and snapshots.",
+            "example": 1,
+            "enum": [0, 1]
           }
         }
       },
@@ -4246,8 +4156,8 @@
       },
       "EventAppendRequest": {
         "type": "object",
-        "required": ["channel_id", "channel_type", "client_msg_no", "event_id", "event_type"],
-        "description": "Append an event to a message's event stream.",
+        "required": ["channel_id", "channel_type", "from_uid", "message_id", "client_msg_no", "run_id", "authorization_fence", "authority_sequence", "event_id", "event_type", "payload"],
+        "description": "Append one typed public event to an already committed AgentRun anchor.",
         "properties": {
           "channel_id": {
             "type": "string",
@@ -4261,13 +4171,13 @@
           },
           "from_uid": {
             "type": "string",
-            "description": "Sender UID. Auto-filled from cache if the anchor message was sent with `is_stream: 1` on the same node. Defaults to system UID if both cache miss and omitted.",
+            "description": "Exact sender UID of the committed anchor.",
             "example": "user_001"
           },
           "message_id": {
             "type": "integer",
             "format": "int64",
-            "description": "Message ID of the anchor message, used for online push correlation. Auto-filled from cache if the anchor message was sent with `is_stream: 1` on the same node.",
+            "description": "Exact committed anchor message ID.",
             "example": 123456789
           },
           "client_msg_no": {
@@ -4275,15 +4185,29 @@
             "description": "Client message number of the anchor message. The message must already exist.",
             "example": "550e8400-e29b-41d4-a716-446655440000"
           },
+          "run_id": {
+            "type": "string",
+            "description": "AgentRun identifier bound into the anchor and every event."
+          },
+          "authorization_fence": {
+            "type": "integer",
+            "format": "uint64"
+          },
+          "authority_sequence": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 1
+          },
           "event_id": {
             "type": "string",
-            "description": "Unique event identifier. Used for idempotency on persisted events (terminal events like stream.close / stream.error / stream.cancel).",
+            "description": "Unique event identifier used for idempotency.",
             "example": "evt_abc123"
           },
           "event_type": {
             "type": "string",
-            "description": "Event type. Case-insensitive. `stream.delta` uses in-memory fast path; other event types are persisted.",
-            "example": "stream.delta"
+            "description": "Typed event kind.",
+            "example": "delta",
+            "enum": ["open", "delta", "snapshot", "finish"]
           },
           "event_key": {
             "type": "string",
@@ -4293,9 +4217,9 @@
           },
           "visibility": {
             "type": "string",
-            "description": "Event visibility.",
+            "description": "Protocol v6 supports public projection only.",
             "example": "public",
-            "enum": ["public", "private", "restricted"]
+            "enum": ["public"]
           },
           "occurred_at": {
             "type": "integer",
@@ -4305,8 +4229,8 @@
           },
           "payload": {
             "type": "object",
-            "description": "Event payload. Structure depends on event_type. For text deltas: `{\"kind\":\"text\",\"delta\":\"...\"}`. For close: `{\"end_reason\":0}`. For error: `{\"error\":\"...\"}`. For non-text deltas: any JSON object.",
-            "example": {"kind": "text", "delta": "Hello"}
+            "description": "Typed AgentRun payload. Delta carries `text_delta`; snapshot and finish carry `snapshot`.",
+            "example": {"event_id": "evt_abc123", "run_id": "run_1", "event_key": "main", "event_type": "delta", "authority_sequence": 1, "text_delta": "Hello"}
           },
           "headers": {
             "type": "object",
@@ -4341,7 +4265,7 @@
             "description": "Message-level event sequence number. For delta events (cache path), this is the last persisted seq. For persisted events, this is the newly allocated seq.",
             "example": 5
           },
-          "stream_status": {
+          "event_status": {
             "type": "string",
             "description": "Current event-key status after applying this event.",
             "enum": ["open", "closed", "error", "cancelled"],
@@ -4361,139 +4285,6 @@
             "type": "string",
             "description": "Sender UID.",
             "example": "user_001"
-          }
-        }
-      },
-      "EventSyncRequest": {
-        "type": "object",
-        "required": ["channel_id", "channel_type", "client_msg_no"],
-        "description": "Sync events for a specific message.",
-        "properties": {
-          "channel_id": {
-            "type": "string",
-            "description": "Channel ID.",
-            "example": "user_002"
-          },
-          "channel_type": {
-            "type": "integer",
-            "description": "Channel type. 1 = person, 2 = group.",
-            "example": 1
-          },
-          "from_uid": {
-            "type": "string",
-            "description": "Sender UID. Required for person-to-person channels to compute the internal channel ID.",
-            "example": "user_001"
-          },
-          "client_msg_no": {
-            "type": "string",
-            "description": "Client message number to sync events for.",
-            "example": "550e8400-e29b-41d4-a716-446655440000"
-          },
-          "event_key": {
-            "type": "string",
-            "description": "Optional event_key filter. If set, only projected state for this event key is returned.",
-            "example": "main"
-          },
-          "from_msg_event_seq": {
-            "type": "integer",
-            "format": "uint64",
-            "description": "Cursor: only return events with `msg_event_seq > from_msg_event_seq`. Use 0 to fetch from the beginning.",
-            "example": 0,
-            "default": 0
-          },
-          "limit": {
-            "type": "integer",
-            "description": "Maximum number of events to return. Default 200, max 2000.",
-            "example": 50,
-            "default": 200,
-            "maximum": 2000
-          },
-          "include_private": {
-            "type": "integer",
-            "description": "Set to 1 to include events with `private` or `restricted` visibility. Default 0 (exclude).",
-            "example": 0,
-            "default": 0
-          }
-        }
-      },
-      "EventSyncResponse": {
-        "type": "object",
-        "properties": {
-          "client_msg_no": {
-            "type": "string",
-            "description": "Echoed client message number.",
-            "example": "550e8400-e29b-41d4-a716-446655440000"
-          },
-          "from_msg_event_seq": {
-            "type": "integer",
-            "format": "uint64",
-            "description": "The cursor that was passed in the request.",
-            "example": 0
-          },
-          "next_msg_event_seq": {
-            "type": "integer",
-            "format": "uint64",
-            "description": "Cursor for the next page. Pass this as `from_msg_event_seq` in the next request.",
-            "example": 5
-          },
-          "more": {
-            "type": "integer",
-            "description": "1 if there are more events beyond this page, 0 otherwise.",
-            "example": 0
-          },
-          "filtered_by_event_key": {
-            "type": "string",
-            "description": "The event_key filter applied, empty string if no filter.",
-            "example": ""
-          },
-          "events": {
-            "type": "array",
-            "description": "List of projected event states, ordered by msg_event_seq ascending.",
-            "items": {
-              "$ref": "#/components/schemas/EventSyncItem"
-            }
-          }
-        }
-      },
-      "EventSyncItem": {
-        "type": "object",
-        "description": "Projected event state built from stored message-event state, not the raw append log.",
-        "properties": {
-          "msg_event_seq": {
-            "type": "integer",
-            "format": "uint64",
-            "description": "Event sequence number.",
-            "example": 3
-          },
-          "event_id": {
-            "type": "string",
-            "description": "Last event ID applied to this event key.",
-            "example": "evt_close_1"
-          },
-          "event_key": {
-            "type": "string",
-            "description": "Event key identifier.",
-            "example": "main"
-          },
-          "event_type": {
-            "type": "string",
-            "description": "Last event type applied to this event key.",
-            "example": "stream.close"
-          },
-          "visibility": {
-            "type": "string",
-            "description": "Visibility of the last event.",
-            "example": "public"
-          },
-          "occurred_at": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Timestamp of the last event in milliseconds.",
-            "example": 1709827200000
-          },
-          "payload": {
-            "type": "object",
-            "description": "Projected payload/snapshot. For text streams, typically `{\"kind\":\"text\",\"text\":\"...\"}`."
           }
         }
       },

@@ -21,12 +21,7 @@ type legacyMessageResp struct {
 	MessageIDStr string              `json:"message_idstr"`
 	ClientMsgNo  string              `json:"client_msg_no"`
 
-	End           uint8                       `json:"end,omitempty"`
-	EndReason     uint8                       `json:"end_reason,omitempty"`
-	Error         string                      `json:"error,omitempty"`
-	StreamData    []byte                      `json:"stream_data,omitempty"`
-	EventMeta     *legacyMessageEventMeta     `json:"event_meta,omitempty"`
-	EventSyncHint *legacyMessageEventSyncHint `json:"event_sync_hint,omitempty"`
+	EventMeta *legacyMessageEventMeta `json:"event_meta,omitempty"`
 
 	MessageSeq  uint64 `json:"message_seq"`
 	FromUID     string `json:"from_uid"`
@@ -45,24 +40,19 @@ func newLegacyMessageResp(uid string, msg messageusecase.SyncedMessage) legacyMe
 			RedDot:    boolToInt(msg.Flags.RedDot),
 			SyncOnce:  boolToInt(msg.Flags.SyncOnce),
 		},
-		Setting:       msg.Setting,
-		MessageID:     int64(msg.MessageID),
-		MessageIDStr:  strconv.FormatUint(msg.MessageID, 10),
-		ClientMsgNo:   msg.ClientMsgNo,
-		MessageSeq:    msg.MessageSeq,
-		FromUID:       msg.FromUID,
-		ChannelID:     legacyMessageChannelID(uid, msg.ChannelID, msg.ChannelType),
-		ChannelType:   msg.ChannelType,
-		Topic:         msg.Topic,
-		Expire:        msg.Expire,
-		Timestamp:     msg.Timestamp,
-		Payload:       append([]byte(nil), msg.Payload...),
-		End:           msg.End,
-		EndReason:     msg.EndReason,
-		Error:         msg.Error,
-		StreamData:    append([]byte(nil), msg.StreamData...),
-		EventMeta:     newLegacyMessageEventMeta(msg.EventMeta),
-		EventSyncHint: newLegacyMessageEventSyncHint(msg.EventHint),
+		Setting:      msg.Setting,
+		MessageID:    int64(msg.MessageID),
+		MessageIDStr: strconv.FormatUint(msg.MessageID, 10),
+		ClientMsgNo:  msg.ClientMsgNo,
+		MessageSeq:   msg.MessageSeq,
+		FromUID:      msg.FromUID,
+		ChannelID:    legacyMessageChannelID(uid, msg.ChannelID, msg.ChannelType),
+		ChannelType:  msg.ChannelType,
+		Topic:        msg.Topic,
+		Expire:       msg.Expire,
+		Timestamp:    msg.Timestamp,
+		Payload:      append([]byte(nil), msg.Payload...),
+		EventMeta:    newLegacyMessageEventMeta(msg.EventMeta),
 	}
 }
 
@@ -83,11 +73,6 @@ type legacyMessageEventKeyMeta struct {
 	Snapshot        any    `json:"snapshot,omitempty"`
 	EndReason       uint8  `json:"end_reason,omitempty"`
 	Error           string `json:"error,omitempty"`
-}
-
-type legacyMessageEventSyncHint struct {
-	ClientMsgNo     string `json:"client_msg_no"`
-	FromMsgEventSeq uint64 `json:"from_msg_event_seq"`
 }
 
 func newLegacyMessageEventMeta(meta *messageusecase.MessageEventMeta) *legacyMessageEventMeta {
@@ -114,16 +99,6 @@ func newLegacyMessageEventMeta(meta *messageusecase.MessageEventMeta) *legacyMes
 		})
 	}
 	return out
-}
-
-func newLegacyMessageEventSyncHint(hint *messageusecase.MessageEventSyncHint) *legacyMessageEventSyncHint {
-	if hint == nil {
-		return nil
-	}
-	return &legacyMessageEventSyncHint{
-		ClientMsgNo:     hint.ClientMsgNo,
-		FromMsgEventSeq: hint.FromMsgEventSeq,
-	}
 }
 
 func legacyMessageChannelID(uid, channelID string, channelType uint8) string {
