@@ -34,11 +34,14 @@ func newRootCommand(stderr io.Writer) *cobra.Command {
 	cmd.SetErr(stderr)
 	cmd.AddCommand(
 		newRunCommand(stderr),
+		newSoakCommand(stderr),
 		newWorkerCommand(stderr),
+		newHostMetricsCommand(stderr),
 		newValidateCommand(stderr),
 		newDoctorCommand(stderr),
 		newDevSimCommand(stderr),
 		newCapacityCommand(stderr),
+		newFormalChainCommand(stderr),
 		newMetricsCommand(stderr),
 		newReportCommand(),
 	)

@@ -17,10 +17,12 @@ node_health_report_ttl = "30s"
 channel_reactor_count = 0
 channel_store_append_workers = 0
 channel_store_apply_workers = 0
-channel_rpc_workers = 50
+# Bounds blocking replication RPC work. The 160-worker default avoids the scheduler
+# and allocation overhead observed with oversized pools while retaining burst headroom.
+channel_rpc_workers = 160
 # Maximum same-target Pull or PullHint items coalesced into one bounded
 # replication transport call. Zero uses the runtime default.
-channel_rpc_batch_max_items = 8
+channel_rpc_batch_max_items = 16
 max_channels = 0
 channel_append_batch_max_records = 0
 channel_append_batch_max_wait = "0"
@@ -30,7 +32,9 @@ commit_coordinator_flush_window = "200us"
 commit_coordinator_max_requests = 0
 commit_coordinator_max_records = 0
 commit_coordinator_max_bytes = 0
-commit_coordinator_shards = 0
+# One coordinator maximizes durable group-commit batches for the single physical
+# message DB and avoids concurrent fsync contention. Increase only after storage-specific validation.
+commit_coordinator_shards = 1
 
 [channel]
 message_retention_physical_gc_enable = false
@@ -42,6 +46,8 @@ large_group_subscriber_threshold = 500
 
 [api]
 listen_addr = "127.0.0.1:5001"
+# Required for mutating service calls such as /user/token.
+service_token = ""
 external_tcp_addr = "127.0.0.1:5100"
 external_ws_addr = "ws://127.0.0.1:5200"
 
@@ -121,7 +127,9 @@ runtime_async_auth_workers = 16
 runtime_async_auth_queue_capacity = 8192
 runtime_async_pool_release_timeout = "100ms"
 default_session_async_send_batch_max_wait = "1ms"
-default_session_async_send_batch_max_records = 512
+# Maximum SEND frames coalesced into one asynchronous gateway dispatch batch.
+# The 128-record limit is qualified for sustained high-QPS workloads.
+default_session_async_send_batch_max_records = 128
 default_session_async_send_batch_max_bytes = 524288
 send_timeout = "5s"
 
@@ -139,25 +147,6 @@ touch_batch_size = 512
 touch_max_routes_per_flush = 65536
 route_ttl = "90s"
 
-[conversation]
-max_last_message_concurrency = 32
-authority_cache_max_rows_per_uid = 4096
-authority_cache_max_rows = 100000
-authority_list_db_window_max = 1000
-authority_handoff_timeout = "3s"
-# Coalesces receiver-only active_at persistence while keeping the latest
-# activity visible in the UID authority cache. Delete barriers invalidate the
-# cached durable baseline before any later message can reuse this cooldown.
-authority_active_cooldown = "2h"
-authority_flush_interval = "1s"
-authority_flush_timeout = "5s"
-# Maximum dirty active rows persisted by one periodic, pressure-woken, or authority-handoff flush attempt.
-authority_flush_batch_rows = 512
-authority_admit_batch_rows = 512
-authority_admit_concurrency = 16
-
-
-
 [delivery]
 enable = true
 fanout_page_size = 512
@@ -168,7 +157,8 @@ pending_ack_ttl = "30s"
 pending_ack_max_per_session = 1024
 # Maximum recipient delivery plans waiting for asynchronous processing.
 event_queue_size = 1024
-# Maximum recipient-authority delivery batches processed concurrently by this node.
+# Number of stable Channel-order delivery shards processed concurrently by this node.
+# Plans for one Channel stay FIFO on one shard; different Channels may run in parallel.
 # This is independent from channel_append.recipient_authority_dispatch_concurrency.
 recipient_worker_concurrency = 100
 
@@ -176,10 +166,14 @@ recipient_worker_concurrency = 100
 shard_count = 0
 advance_pool_size = 0
 effect_pool_size = 0
+# Deprecated compatibility input. Canonical Online Delivery plans admit all
+# exact-target groups together and ignore this value.
 recipient_authority_dispatch_concurrency = 0
 
 [webhook]
 http_addr = ""
+# Required when http_addr is configured.
+signing_secret = ""
 focus_events = []
 queue_size = 1024
 workers = 16

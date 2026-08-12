@@ -2,9 +2,13 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -14,7 +18,7 @@ import (
 
 type fakeChannelRuntimeBenchController struct {
 	snapshotQuery model.ChannelRuntimeQuery
-	probeQuery    model.ChannelRuntimeQuery
+	probeQuery    model.ChannelRuntimeProbeQuery
 	evictQuery    model.ChannelRuntimeQuery
 	snapshotErr   error
 	probeErr      error
@@ -38,7 +42,7 @@ func (f *fakeChannelRuntimeBenchController) Snapshot(_ context.Context, query mo
 	}, nil
 }
 
-func (f *fakeChannelRuntimeBenchController) Probe(_ context.Context, query model.ChannelRuntimeQuery) (model.ChannelRuntimeProbeResult, error) {
+func (f *fakeChannelRuntimeBenchController) Probe(_ context.Context, query model.ChannelRuntimeProbeQuery) (model.ChannelRuntimeProbeResult, error) {
 	f.probeQuery = query
 	if f.probeErr != nil {
 		return model.ChannelRuntimeProbeResult{}, f.probeErr
@@ -161,6 +165,100 @@ func TestBenchChannelRuntimeProbeRejectsStrictJSONViolations(t *testing.T) {
 	postJSON(t, httpSrv.URL+"/bench/v1/channel-runtime/probe", `{"run_id":"run-1","profile":"wide","channel_type":2,"range":{"start":0,"end":1}} {}`, http.StatusBadRequest)
 }
 
+func TestBenchChannelRuntimeProbeValidatesExplicitSelector(t *testing.T) {
+	controller := &fakeChannelRuntimeBenchController{}
+	srv := New(Options{BenchEnabled: true, BenchRuntime: controller})
+	httpSrv := httptest.NewServer(srv.Handler())
+	t.Cleanup(httpSrv.Close)
+
+	channels := func(count int) []map[string]any {
+		out := make([]map[string]any, 0, count)
+		for i := 0; i < count; i++ {
+			out = append(out, map[string]any{
+				"channel_id":   fmt.Sprintf("person-%04d", i),
+				"channel_type": 1,
+			})
+		}
+		return out
+	}
+
+	tests := []struct {
+		name string
+		body map[string]any
+	}{
+		{name: "neither selector", body: map[string]any{}},
+		{name: "both selectors", body: map[string]any{
+			"run_id": "run-a", "profile": "person", "channel_type": 1,
+			"range":    map[string]any{"start": 0, "end": 1},
+			"channels": channels(1),
+		}},
+		{name: "empty explicit selector", body: map[string]any{"channels": []any{}}},
+		{name: "over explicit selector bound", body: map[string]any{"channels": channels(1201)}},
+		{name: "duplicate identity", body: map[string]any{"channels": []map[string]any{
+			{"channel_id": "same", "channel_type": 1},
+			{"channel_id": "same", "channel_type": 1},
+		}}},
+		{name: "empty id", body: map[string]any{"channels": []map[string]any{{"channel_id": "", "channel_type": 1}}}},
+		{name: "whitespace id", body: map[string]any{"channels": []map[string]any{{"channel_id": " \t ", "channel_type": 1}}}},
+		{name: "zero type", body: map[string]any{"channels": []map[string]any{{"channel_id": "person-a", "channel_type": 0}}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data, err := json.Marshal(tt.body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			postJSON(t, httpSrv.URL+"/bench/v1/channel-runtime/probe", string(data), http.StatusBadRequest)
+		})
+	}
+
+	for _, count := range []int{1, 1200} {
+		t.Run(fmt.Sprintf("valid %d", count), func(t *testing.T) {
+			data, err := json.Marshal(map[string]any{"channels": channels(count)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			postJSON(t, httpSrv.URL+"/bench/v1/channel-runtime/probe", string(data), http.StatusOK)
+			if got := len(controller.probeQuery.Channels); got != count {
+				t.Fatalf("explicit query channels = %d, want %d", got, count)
+			}
+			if got := controller.probeQuery.Channels[0].ChannelID; got != "person-0000" {
+				t.Fatalf("first channel id = %q, want unchanged identity", got)
+			}
+		})
+	}
+}
+
+func TestBenchChannelRuntimeProbeGeneratedSelectorRegression(t *testing.T) {
+	controller := &fakeChannelRuntimeBenchController{}
+	srv := New(Options{BenchEnabled: true, BenchRuntime: controller})
+	httpSrv := httptest.NewServer(srv.Handler())
+	t.Cleanup(httpSrv.Close)
+
+	postJSON(t, httpSrv.URL+"/bench/v1/channel-runtime/probe", `{"run_id":"run-1","profile":"wide","channel_type":2,"range":{"start":4,"end":6}}`, http.StatusOK)
+	want := model.ChannelRuntimeProbeQuery{
+		RunID:       "run-1",
+		Profile:     "wide",
+		ChannelType: 2,
+		Range:       model.ChannelRuntimeRange{Start: 4, End: 6},
+	}
+	if !reflect.DeepEqual(controller.probeQuery, want) {
+		t.Fatalf("generated probe query = %+v, want %+v", controller.probeQuery, want)
+	}
+}
+
+func TestBenchChannelRuntimeEvictRejectsExplicitChannels(t *testing.T) {
+	controller := &fakeChannelRuntimeBenchController{}
+	srv := New(Options{BenchEnabled: true, BenchRuntime: controller})
+	httpSrv := httptest.NewServer(srv.Handler())
+	t.Cleanup(httpSrv.Close)
+
+	postJSON(t, httpSrv.URL+"/bench/v1/channel-runtime/evict", `{"channels":[{"channel_id":"person-a","channel_type":1}]}`, http.StatusBadRequest)
+	if controller.evictQuery != (model.ChannelRuntimeQuery{}) {
+		t.Fatalf("evict query = %+v, want no control call", controller.evictQuery)
+	}
+}
+
 func TestBenchChannelRuntimeEvict(t *testing.T) {
 	controller := &fakeChannelRuntimeBenchController{}
 	srv := New(Options{BenchEnabled: true, BenchRuntime: controller})
@@ -222,6 +320,64 @@ func TestBenchChannelRuntimeControllerFailureReturnsInternalServerError(t *testi
 
 	postJSON(t, httpSrv.URL+"/bench/v1/channel-runtime/probe", `{"run_id":"run-1","profile":"wide","channel_type":2,"range":{"start":0,"end":1}}`, http.StatusInternalServerError)
 	requireAPILogEntry(t, logger, "ERROR", "internal.access.api.http", "internal.access.api.bench_runtime_failed")
+}
+
+func TestBenchChannelRuntimeExplicitProbeFailureDoesNotExposeControllerError(t *testing.T) {
+	const channelID = "canonical-sensitive-person"
+	const tokenLikeValue = "probe-secret-value"
+	logger := newRecordingAPILogger("internal.access.api")
+	srv := New(Options{
+		BenchEnabled: true,
+		Logger:       logger,
+		BenchRuntime: &fakeChannelRuntimeBenchController{
+			probeErr: &model.ChannelRuntimeProbeFailure{
+				Reason: model.ChannelRuntimeProbeFailureInvalidEvidence,
+				Cause:  fmt.Errorf("runtime probe failed for %s using %s", channelID, tokenLikeValue),
+			},
+		},
+	})
+	httpSrv := httptest.NewServer(srv.Handler())
+	t.Cleanup(httpSrv.Close)
+
+	resp, err := http.Post(
+		httpSrv.URL+"/bench/v1/channel-runtime/probe",
+		"application/json",
+		strings.NewReader(`{"channels":[{"channel_id":"`+channelID+`","channel_type":1}]}`),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusInternalServerError)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), "explicit channel runtime probe failed") {
+		t.Fatalf("response = %s, want stable explicit probe failure", body)
+	}
+	for _, sensitive := range []string{channelID, tokenLikeValue} {
+		if strings.Contains(string(body), sensitive) {
+			t.Fatalf("response exposed sensitive controller error value %q", sensitive)
+		}
+	}
+	entry := requireAPILogEntry(t, logger, "ERROR", "internal.access.api.http", "internal.access.api.bench_runtime_failed")
+	foundReason := false
+	for _, field := range entry.fields {
+		if field.Key == "reason" && field.Value == string(model.ChannelRuntimeProbeFailureInvalidEvidence) {
+			foundReason = true
+		}
+		for _, sensitive := range []string{channelID, tokenLikeValue} {
+			if strings.Contains(fmt.Sprint(field.Value), sensitive) {
+				t.Fatalf("log field %q exposed sensitive controller error value %q", field.Key, sensitive)
+			}
+		}
+	}
+	if !foundReason {
+		t.Fatalf("log fields = %#v, want invalid_evidence reason", entry.fields)
+	}
 }
 
 type recordedAPILogEntry struct {

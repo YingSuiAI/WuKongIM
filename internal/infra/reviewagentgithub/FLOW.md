@@ -20,11 +20,16 @@ Review State Writer App token
 Review Agent App token
   -> App JWT verifies the protected policy App ID and slug before minting
      one exact repository-scoped installation token
-  -> fresh generation/governance fences
+  -> fresh generation and human-review fences
   -> one mutable status comment
   -> one formal Review with bounded inline comments
   -> one Review Agent Verdict Check Run
+  -> one exact-head merge only after fresh admin/member authorization
 ```
+
+An infrastructure-sourced terminal projection reports that no current findings
+were adjudicated. Findings retained in signed state for a later reconsideration
+are not republished as if the failed attempt had confirmed them.
 
 The bounded scheduler recovery never rewinds or rewrites the protected state
 ref. A strict successor may name that one legacy checkpoint; after the next
@@ -35,7 +40,9 @@ read-your-write lag only while GitHub still reports the exact expected parent.
 The committed head must become visible within the retry budget; any third head
 is real contention and fails immediately.
 
-The Review App adapter exposes no contents, branch, commit, merge, close,
-dismiss, resolve, Ruleset, Actions, or Secrets operation. The State Writer
-adapter accepts no caller-selected ref or path and exposes no Review, comment,
-Check, merge, or pull-request mutation.
+The Review App token includes GitHub's required `contents:write` permission for
+the pull-request merge endpoint, but the adapter exposes only an exact-head
+normal merge after the pure authorization plan succeeds. It exposes no generic
+contents, branch, commit, close, dismiss, resolve, Ruleset, Actions, or Secrets
+operation. The State Writer adapter accepts no caller-selected ref or path and
+exposes no Review, comment, Check, merge, or pull-request mutation.

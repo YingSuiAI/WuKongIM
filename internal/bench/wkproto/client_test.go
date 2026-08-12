@@ -2,8 +2,12 @@ package wkproto
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
+	"reflect"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -33,8 +37,119 @@ func TestClientInnerConfigUsesExactCapacities(t *testing.T) {
 		t.Fatalf("inner config = %#v, want 16/1/1024/4", cfg)
 	}
 	session := newClientSession(&wkclient.Client{}, client.frameBufferSize)
-	if got := cap(session.frameCh); got != 4 {
-		t.Fatalf("adapter frame queue capacity = %d, want 4", got)
+	if cap(session.recvCh) != 4 || cap(session.sendackCh) != 4 || cap(session.errCh) != 4 {
+		t.Fatalf("adapter queue capacities = recv:%d sendack:%d error:%d, want 4 each", cap(session.recvCh), cap(session.sendackCh), cap(session.errCh))
+	}
+	if cap(session.publicationPermit) != 4 {
+		t.Fatalf("publication capacity = %d, want 4", cap(session.publicationPermit))
+	}
+}
+
+func TestClientQueueSnapshotReportsBoundedAdapterState(t *testing.T) {
+	client, err := NewClient(ClientConfig{
+		Addr:            "127.0.0.1:5100",
+		FrameBufferSize: 4,
+	})
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	inner, err := wkclient.New(wkclient.Config{Addr: "127.0.0.1:5100", InboundFrameBufferSize: 4})
+	if err != nil {
+		t.Fatalf("wkclient.New() error = %v", err)
+	}
+	defer inner.Close()
+	session := newClientSession(inner, client.frameBufferSize)
+	for messageID := int64(1); messageID <= 4; messageID++ {
+		session.recvCh <- &frame.RecvPacket{MessageID: messageID}
+	}
+	client.session = session
+
+	snapshot := client.QueueSnapshot()
+
+	if snapshot.InnerRecvCapacity != 4 {
+		t.Fatalf("InnerRecvCapacity = %d, want 4", snapshot.InnerRecvCapacity)
+	}
+	if snapshot.InnerRecvDepth != 0 {
+		t.Fatalf("InnerRecvDepth = %d, want 0", snapshot.InnerRecvDepth)
+	}
+	if snapshot.AdapterDepth != 4 || snapshot.AdapterCapacity != 12 {
+		t.Fatalf("adapter queue = %d/%d, want 4/12", snapshot.AdapterDepth, snapshot.AdapterCapacity)
+	}
+	if snapshot.RecvDepth != 4 || snapshot.RecvCapacity != 4 {
+		t.Fatalf("recv queue = %d/%d, want saturated 4/4", snapshot.RecvDepth, snapshot.RecvCapacity)
+	}
+	if snapshot.SendackDepth != 0 || snapshot.SendackCapacity != 4 {
+		t.Fatalf("sendack queue = %d/%d, want 0/4", snapshot.SendackDepth, snapshot.SendackCapacity)
+	}
+	if snapshot.ErrorDepth != 0 || snapshot.ErrorCapacity != 4 {
+		t.Fatalf("error queue = %d/%d, want 0/4", snapshot.ErrorDepth, snapshot.ErrorCapacity)
+	}
+	if snapshot.PublicationCurrent != 0 || snapshot.PublicationCapacity != 4 || snapshot.PublicationPeak != 0 || snapshot.PublicationBlocked != 0 {
+		t.Fatalf("publication snapshot = current:%d capacity:%d peak:%d blocked:%d, want 0/4/0/0", snapshot.PublicationCurrent, snapshot.PublicationCapacity, snapshot.PublicationPeak, snapshot.PublicationBlocked)
+	}
+	typ := reflect.TypeOf(snapshot)
+	for i := 0; i < typ.NumField(); i++ {
+		switch typ.Field(i).Type.Kind() {
+		case reflect.Chan, reflect.Map, reflect.Pointer, reflect.Slice:
+			t.Fatalf("QueueSnapshot field %s exposes mutable state through %s", typ.Field(i).Name, typ.Field(i).Type)
+		}
+	}
+}
+
+func TestReadErrorKindDistinguishesAsyncSendFromTerminalSessionFailure(t *testing.T) {
+	t.Parallel()
+	session := newClientSession(nil, 2)
+	nonTerminal := errors.New("async send failed")
+	if !session.publishError(errorResult{err: nonTerminal, clientSeq: 17, clientMsgNo: "stable-message"}) {
+		t.Fatal("publish non-terminal error = false")
+	}
+	if _, err := session.readFrame(context.Background()); !errors.Is(err, nonTerminal) {
+		t.Fatalf("non-terminal ReadFrame error = %v", err)
+	} else if info, ok := ReadErrorInfoOf(err); !ok || info.Kind != ReadErrorNonTerminal || info.ClientSeq != 17 || info.ClientMsgNo != "stable-message" {
+		t.Fatalf("non-terminal ReadFrame info = %+v, %v", info, ok)
+	}
+
+	terminal := io.EOF
+	if !session.publishError(errorResult{err: terminal, terminal: true}) {
+		t.Fatal("publish terminal error = false")
+	}
+	if _, err := session.readFrame(context.Background()); !errors.Is(err, terminal) || ReadErrorKindOf(err) != ReadErrorTerminal {
+		t.Fatalf("terminal ReadFrame error = %v kind=%v", err, ReadErrorKindOf(err))
+	}
+}
+
+func TestClientReadFrameIgnoresShortOperationTimeoutUntilCallerCancels(t *testing.T) {
+	client, err := NewClient(ClientConfig{
+		Addr:             "127.0.0.1:5100",
+		OperationTimeout: time.Nanosecond,
+		FrameBufferSize:  1,
+	})
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	client.session = newClientSession(nil, client.frameBufferSize)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, readErr := client.ReadFrame(ctx)
+		result <- readErr
+	}()
+
+	select {
+	case readErr := <-result:
+		t.Fatalf("ReadFrame returned after operation timeout: %v", readErr)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	cancel()
+	select {
+	case readErr := <-result:
+		if !errors.Is(readErr, context.Canceled) {
+			t.Fatalf("ReadFrame cancellation error = %v, want %v", readErr, context.Canceled)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ReadFrame did not return after caller cancellation")
 	}
 }
 
@@ -339,6 +454,346 @@ func TestClientSendExposesSendackThroughReadFrame(t *testing.T) {
 	}
 }
 
+func TestClientInterleavedReceivePressurePreservesEveryRecvInWireOrder(t *testing.T) {
+	firstRecvWritten := make(chan struct{})
+	releaseBurst := make(chan struct{})
+	burstWritten := make(chan struct{})
+	releaseServer := make(chan struct{})
+	server := newFakeWKProtoServer(t, func(t *testing.T, conn net.Conn) {
+		if _, err := codec.New().DecodePacketWithConn(conn, frame.LatestVersion); err != nil {
+			t.Fatalf("decode connect: %v", err)
+		}
+		writeFrame(t, conn, &frame.ConnackPacket{ReasonCode: frame.ReasonSuccess, ServerVersion: frame.LatestVersion})
+
+		sends := make([]*frame.SendPacket, 0, 2)
+		for len(sends) < 2 {
+			f, err := codec.New().DecodePacketWithConn(conn, frame.LatestVersion)
+			if err != nil {
+				t.Fatalf("decode send: %v", err)
+			}
+			send, ok := f.(*frame.SendPacket)
+			if !ok {
+				t.Fatalf("client frame = %T, want *frame.SendPacket", f)
+			}
+			sends = append(sends, send)
+		}
+
+		writeFrame(t, conn, receivePressurePacket(1))
+		close(firstRecvWritten)
+		<-releaseBurst
+		writeFrame(t, conn, receivePressureSendack(sends[0], 101))
+		for seq := uint64(2); seq <= 5; seq++ {
+			writeFrame(t, conn, receivePressurePacket(seq))
+		}
+		writeFrame(t, conn, receivePressureSendack(sends[1], 102))
+		close(burstWritten)
+		<-releaseServer
+	})
+	defer server.close()
+	defer close(releaseServer)
+	defer close(releaseBurst)
+
+	client, err := NewClient(ClientConfig{
+		Addr:             server.addr,
+		OperationTimeout: time.Second,
+		FrameBufferSize:  2,
+	})
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	defer client.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := client.Connect(ctx, "u1", "d1"); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	for seq := uint64(1); seq <= 2; seq++ {
+		if err := client.Send(ctx, &frame.SendPacket{
+			ClientSeq:   seq,
+			ClientMsgNo: "pressure-" + strconv.FormatUint(seq, 10),
+			ChannelID:   "u2",
+			ChannelType: frame.ChannelTypePerson,
+			Payload:     []byte("pressure"),
+		}); err != nil {
+			t.Fatalf("Send(%d) error = %v", seq, err)
+		}
+	}
+
+	waitForSignal(t, firstRecvWritten, "first RECV write")
+	waitForQueueSnapshot(t, client, func(snapshot QueueSnapshot) bool {
+		return snapshot.AdapterDepth == 1
+	})
+	releaseBurst <- struct{}{}
+	waitForSignal(t, burstWritten, "interleaved pressure burst")
+	session, err := client.currentSession()
+	if err != nil {
+		t.Fatalf("currentSession() error = %v", err)
+	}
+	pendingDone := make(chan bool, 1)
+	go func() {
+		pendingDone <- session.waitPendingSendacks()
+	}()
+	select {
+	case settled := <-pendingDone:
+		if !settled {
+			t.Fatal("pending SENDACK publishers stopped before pressure burst settled")
+		}
+	case <-ctx.Done():
+		t.Fatalf("pending SENDACK publishers did not settle: %v", ctx.Err())
+	}
+
+	wantRecvSeqs := []uint64{1, 2, 3, 4, 5}
+	gotRecvSeqs := make([]uint64, 0, len(wantRecvSeqs))
+	gotAcks := make(map[uint64]bool, 2)
+	for len(gotRecvSeqs)+len(gotAcks) < len(wantRecvSeqs)+2 {
+		f, err := client.ReadFrame(ctx)
+		if err != nil {
+			t.Fatalf("ReadFrame() after RECV pressure error = %v; recv seqs = %v acks = %v", err, gotRecvSeqs, gotAcks)
+		}
+		switch pkt := f.(type) {
+		case *frame.RecvPacket:
+			gotRecvSeqs = append(gotRecvSeqs, pkt.MessageSeq)
+		case *frame.SendackPacket:
+			if gotAcks[pkt.ClientSeq] {
+				t.Fatalf("duplicate SENDACK client seq %d", pkt.ClientSeq)
+			}
+			gotAcks[pkt.ClientSeq] = true
+		default:
+			t.Fatalf("ReadFrame() = %T, want RECV or SENDACK", f)
+		}
+	}
+	if len(gotRecvSeqs) != len(wantRecvSeqs) {
+		t.Fatalf("RECV count = %d, want %d: %v", len(gotRecvSeqs), len(wantRecvSeqs), gotRecvSeqs)
+	}
+	for i, want := range wantRecvSeqs {
+		if gotRecvSeqs[i] != want {
+			t.Fatalf("RECV seqs = %v, want strict wire order %v", gotRecvSeqs, wantRecvSeqs)
+		}
+	}
+}
+
+func TestClientSendackPublicationPressureBoundsAdmission(t *testing.T) {
+	sendsObserved := make(chan uint64, 3)
+	server := newFakeWKProtoServer(t, func(t *testing.T, conn net.Conn) {
+		if _, err := codec.New().DecodePacketWithConn(conn, frame.LatestVersion); err != nil {
+			t.Fatalf("decode connect: %v", err)
+		}
+		writeFrame(t, conn, &frame.ConnackPacket{ReasonCode: frame.ReasonSuccess, ServerVersion: frame.LatestVersion})
+		for {
+			f, err := codec.New().DecodePacketWithConn(conn, frame.LatestVersion)
+			if err != nil {
+				return
+			}
+			send, ok := f.(*frame.SendPacket)
+			if !ok {
+				t.Fatalf("client frame = %T, want *frame.SendPacket", f)
+			}
+			sendsObserved <- send.ClientSeq
+			writeFrame(t, conn, receivePressureSendack(send, 300+int64(send.ClientSeq)))
+		}
+	})
+	defer server.close()
+
+	client, err := NewClient(ClientConfig{
+		Addr:             server.addr,
+		OperationTimeout: time.Second,
+		FrameBufferSize:  1,
+	})
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	defer client.Close()
+	connectCtx, cancelConnect := context.WithTimeout(context.Background(), time.Second)
+	defer cancelConnect()
+	if err := client.Connect(connectCtx, "u1", "d1"); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+
+	if err := client.Send(context.Background(), publicationPressureSend(1)); err != nil {
+		t.Fatalf("Send(1) error = %v", err)
+	}
+	waitForObservedSend(t, sendsObserved, 1)
+	waitForQueueSnapshot(t, client, func(snapshot QueueSnapshot) bool {
+		return snapshot.SendackDepth == 1 && snapshot.PublicationCurrent == 0
+	})
+	if err := client.Send(context.Background(), publicationPressureSend(2)); err != nil {
+		t.Fatalf("Send(2) error = %v", err)
+	}
+	waitForObservedSend(t, sendsObserved, 2)
+	saturated := waitForQueueSnapshot(t, client, func(snapshot QueueSnapshot) bool {
+		return snapshot.SendackDepth == 1 && snapshot.PublicationCurrent == 1
+	})
+	if saturated.PublicationCapacity != 1 || saturated.PublicationPeak != 1 {
+		t.Fatalf("publication snapshot = %+v, want capacity/peak 1", saturated)
+	}
+	session, err := client.currentSession()
+	if err != nil {
+		t.Fatalf("currentSession() error = %v", err)
+	}
+	session.pendingMu.Lock()
+	pending := session.pendingSendacks
+	session.pendingMu.Unlock()
+	if pending != 1 || pending > saturated.PublicationCapacity {
+		t.Fatalf("pending SENDACKs = %d, want 1 and <= publication capacity %d", pending, saturated.PublicationCapacity)
+	}
+	if err := client.TrySend(publicationPressureSend(3)); !errors.Is(err, wkclient.ErrSendQueueFull) {
+		t.Fatalf("TrySend(3) error = %v, want %v", err, wkclient.ErrSendQueueFull)
+	}
+	if snapshot := client.QueueSnapshot(); snapshot.PublicationBlocked != 0 || snapshot.PublicationCurrent != 1 || snapshot.AdmissionRejected != 1 {
+		t.Fatalf("TrySend(3) publication snapshot = %+v, want current/rejected 1 and no blocked caller", snapshot)
+	}
+	select {
+	case seq := <-sendsObserved:
+		t.Fatalf("server observed rejected TrySend %d", seq)
+	default:
+	}
+
+	thirdCtx, cancelThird := context.WithCancel(context.Background())
+	thirdStarted := make(chan struct{})
+	thirdDone := make(chan error, 1)
+	go func() {
+		close(thirdStarted)
+		thirdDone <- client.Send(thirdCtx, publicationPressureSend(3))
+	}()
+	waitForSignal(t, thirdStarted, "third Send admission start")
+	waitForQueueSnapshot(t, client, func(snapshot QueueSnapshot) bool {
+		return snapshot.PublicationBlocked == 1
+	})
+	select {
+	case seq := <-sendsObserved:
+		t.Fatalf("server observed SEND %d before publication capacity was released", seq)
+	default:
+	}
+	cancelThird()
+	select {
+	case err := <-thirdDone:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Send(3) error = %v, want %v", err, context.Canceled)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("blocked Send(3) did not return after context cancellation")
+	}
+	waitForQueueSnapshot(t, client, func(snapshot QueueSnapshot) bool {
+		return snapshot.PublicationBlocked == 0
+	})
+
+	readCtx, cancelRead := context.WithTimeout(context.Background(), time.Second)
+	defer cancelRead()
+	first, err := client.ReadFrame(readCtx)
+	if err != nil {
+		t.Fatalf("ReadFrame(ACK 1) error = %v", err)
+	}
+	if ack, ok := first.(*frame.SendackPacket); !ok || ack.ClientSeq != 1 {
+		t.Fatalf("ReadFrame(ACK 1) = %#v, want client seq 1", first)
+	}
+	waitForQueueSnapshot(t, client, func(snapshot QueueSnapshot) bool {
+		return snapshot.SendackDepth == 1 && snapshot.PublicationCurrent == 0
+	})
+	second, err := client.ReadFrame(readCtx)
+	if err != nil {
+		t.Fatalf("ReadFrame(ACK 2) error = %v", err)
+	}
+	if ack, ok := second.(*frame.SendackPacket); !ok || ack.ClientSeq != 2 {
+		t.Fatalf("ReadFrame(ACK 2) = %#v, want client seq 2", second)
+	}
+}
+
+func TestClientSendAsyncAdmissionFailureReleasesPublicationCapacity(t *testing.T) {
+	inner, err := wkclient.New(wkclient.Config{Addr: "127.0.0.1:5100", InboundFrameBufferSize: 1})
+	if err != nil {
+		t.Fatalf("wkclient.New() error = %v", err)
+	}
+	defer inner.Close()
+	client := &Client{
+		frameBufferSize: 1,
+		session:         newClientSession(inner, 1),
+	}
+
+	err = client.Send(context.Background(), publicationPressureSend(1))
+	if !errors.Is(err, wkclient.ErrNotConnected) {
+		t.Fatalf("Send() error = %v, want %v", err, wkclient.ErrNotConnected)
+	}
+	snapshot := client.QueueSnapshot()
+	if snapshot.PublicationCurrent != 0 || snapshot.PublicationBlocked != 0 || snapshot.PublicationCapacity != 1 || snapshot.PublicationPeak != 1 {
+		t.Fatalf("publication snapshot after SendAsync failure = %+v, want current/blocked 0 and capacity/peak 1", snapshot)
+	}
+	client.session.pendingMu.Lock()
+	pending := client.session.pendingSendacks
+	client.session.pendingMu.Unlock()
+	if pending != 0 {
+		t.Fatalf("pending SENDACKs after SendAsync failure = %d, want 0", pending)
+	}
+}
+
+func publicationPressureSend(seq uint64) *frame.SendPacket {
+	return &frame.SendPacket{
+		ClientSeq:   seq,
+		ClientMsgNo: "publication-" + strconv.FormatUint(seq, 10),
+		ChannelID:   "u2",
+		ChannelType: frame.ChannelTypePerson,
+		Payload:     []byte("publication-pressure"),
+	}
+}
+
+func waitForObservedSend(t *testing.T, observed <-chan uint64, want uint64) {
+	t.Helper()
+	select {
+	case got := <-observed:
+		if got != want {
+			t.Fatalf("observed SEND client seq = %d, want %d", got, want)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("timed out waiting for SEND client seq %d", want)
+	}
+}
+
+func receivePressurePacket(seq uint64) *frame.RecvPacket {
+	return &frame.RecvPacket{
+		MessageID:   int64(seq),
+		MessageSeq:  seq,
+		ClientMsgNo: "recv-pressure",
+		FromUID:     "u2",
+		ChannelID:   "u1",
+		ChannelType: frame.ChannelTypePerson,
+		Payload:     []byte("payload"),
+	}
+}
+
+func receivePressureSendack(send *frame.SendPacket, messageID int64) *frame.SendackPacket {
+	return &frame.SendackPacket{
+		ClientSeq:   send.ClientSeq,
+		ClientMsgNo: send.ClientMsgNo,
+		MessageID:   messageID,
+		MessageSeq:  uint64(messageID),
+		ReasonCode:  frame.ReasonSuccess,
+	}
+}
+
+func waitForQueueSnapshot(t *testing.T, client *Client, ready func(QueueSnapshot) bool) QueueSnapshot {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		snapshot := client.QueueSnapshot()
+		if ready(snapshot) {
+			return snapshot
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("queue snapshot did not reach expected state: %+v", snapshot)
+		}
+		runtime.Gosched()
+	}
+}
+
+func waitForSignal(t *testing.T, signal <-chan struct{}, description string) {
+	t.Helper()
+	select {
+	case <-signal:
+	case <-time.After(time.Second):
+		t.Fatalf("timed out waiting for %s", description)
+	}
+}
+
 func TestClientAckTimeoutCanExceedOperationTimeout(t *testing.T) {
 	server := newFakeWKProtoServer(t, func(t *testing.T, conn net.Conn) {
 		f, err := codec.New().DecodePacketWithConn(conn, frame.LatestVersion)
@@ -403,6 +858,122 @@ func TestClientAckTimeoutCanExceedOperationTimeout(t *testing.T) {
 	}
 }
 
+func TestClientParallelAttemptsDisambiguateStableMessageIdentityByClientSeq(t *testing.T) {
+	server := newFakeWKProtoServer(t, func(t *testing.T, conn net.Conn) {
+		if _, err := codec.New().DecodePacketWithConn(conn, frame.LatestVersion); err != nil {
+			t.Fatalf("decode connect: %v", err)
+		}
+		writeFrame(t, conn, &frame.ConnackPacket{ReasonCode: frame.ReasonSuccess, ServerVersion: frame.LatestVersion})
+
+		attempts := make([]*frame.SendPacket, 2)
+		for index := range attempts {
+			packet, err := codec.New().DecodePacketWithConn(conn, frame.LatestVersion)
+			if err != nil {
+				t.Fatalf("decode attempt %d: %v", index, err)
+			}
+			attempts[index] = packet.(*frame.SendPacket)
+		}
+		if attempts[0].ClientMsgNo != "stable-retry" || attempts[1].ClientMsgNo != "stable-retry" {
+			t.Fatalf("client_msg_no changed across attempts: %q %q", attempts[0].ClientMsgNo, attempts[1].ClientMsgNo)
+		}
+		if attempts[0].ClientSeq == attempts[1].ClientSeq {
+			t.Fatalf("parallel attempts reused ClientSeq %d", attempts[0].ClientSeq)
+		}
+		writeFrame(t, conn, sendackForAttempt(attempts[1], 902))
+		writeFrame(t, conn, sendackForAttempt(attempts[0], 901))
+	})
+	defer server.close()
+
+	client, err := NewClient(ClientConfig{Addr: server.addr, OperationTimeout: time.Second, AckTimeout: time.Second})
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	defer client.Close()
+	if err := client.Connect(context.Background(), "u1", "d1"); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	for _, clientSeq := range []uint64{41, 42} {
+		if err := client.Send(context.Background(), &frame.SendPacket{
+			ClientSeq: clientSeq, ClientMsgNo: "stable-retry", ChannelID: "u2",
+			ChannelType: frame.ChannelTypePerson, Payload: []byte("attempt"),
+		}); err != nil {
+			t.Fatalf("Send(ClientSeq=%d) error = %v", clientSeq, err)
+		}
+	}
+
+	seen := make(map[uint64]int64, 2)
+	for range 2 {
+		packet, readErr := client.ReadFrame(context.Background())
+		if readErr != nil {
+			t.Fatalf("ReadFrame() error = %v", readErr)
+		}
+		ack := packet.(*frame.SendackPacket)
+		seen[ack.ClientSeq] = ack.MessageID
+	}
+	if seen[41] != 901 || seen[42] != 902 {
+		t.Fatalf("attempt ACK ownership = %+v", seen)
+	}
+}
+
+func TestClientTimedOutAttemptLateAckCannotStealRetry(t *testing.T) {
+	server := newFakeWKProtoServer(t, func(t *testing.T, conn net.Conn) {
+		if _, err := codec.New().DecodePacketWithConn(conn, frame.LatestVersion); err != nil {
+			t.Fatalf("decode connect: %v", err)
+		}
+		writeFrame(t, conn, &frame.ConnackPacket{ReasonCode: frame.ReasonSuccess, ServerVersion: frame.LatestVersion})
+
+		firstFrame, err := codec.New().DecodePacketWithConn(conn, frame.LatestVersion)
+		if err != nil {
+			t.Fatalf("decode first attempt: %v", err)
+		}
+		secondFrame, err := codec.New().DecodePacketWithConn(conn, frame.LatestVersion)
+		if err != nil {
+			t.Fatalf("decode retry: %v", err)
+		}
+		first := firstFrame.(*frame.SendPacket)
+		second := secondFrame.(*frame.SendPacket)
+		writeFrame(t, conn, sendackForAttempt(first, 911))
+		writeFrame(t, conn, sendackForAttempt(second, 912))
+	})
+	defer server.close()
+
+	client, err := NewClient(ClientConfig{Addr: server.addr, OperationTimeout: time.Second, AckTimeout: 5 * time.Millisecond})
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	defer client.Close()
+	if err := client.Connect(context.Background(), "u1", "d1"); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	first := &frame.SendPacket{ClientSeq: 51, ClientMsgNo: "stable-timeout", ChannelID: "u2", ChannelType: frame.ChannelTypePerson, Payload: []byte("first")}
+	if err := client.Send(context.Background(), first); err != nil {
+		t.Fatalf("first Send() error = %v", err)
+	}
+	if _, readErr := client.ReadFrame(context.Background()); !errors.Is(readErr, wkclient.ErrAckTimeout) {
+		t.Fatalf("first result = %v, want %v", readErr, wkclient.ErrAckTimeout)
+	}
+	retry := *first
+	retry.ClientSeq = 52
+	if err := client.Send(context.Background(), &retry); err != nil {
+		t.Fatalf("retry Send() error = %v", err)
+	}
+	packet, readErr := client.ReadFrame(context.Background())
+	if readErr != nil {
+		t.Fatalf("retry ReadFrame() error = %v", readErr)
+	}
+	ack := packet.(*frame.SendackPacket)
+	if ack.ClientSeq != retry.ClientSeq || ack.ClientMsgNo != retry.ClientMsgNo || ack.MessageID != 912 {
+		t.Fatalf("retry ACK = %+v", ack)
+	}
+}
+
+func sendackForAttempt(send *frame.SendPacket, messageID int64) *frame.SendackPacket {
+	return &frame.SendackPacket{
+		ClientSeq: send.ClientSeq, ClientMsgNo: send.ClientMsgNo,
+		MessageID: messageID, MessageSeq: uint64(messageID), ReasonCode: frame.ReasonSuccess,
+	}
+}
+
 func TestClientReadFrameReportsRecvDecryptContext(t *testing.T) {
 	server := newFakeWKProtoServer(t, func(t *testing.T, conn net.Conn) {
 		f, err := codec.New().DecodePacketWithConn(conn, frame.LatestVersion)
@@ -461,6 +1032,100 @@ func TestClientReadFrameReportsRecvDecryptContext(t *testing.T) {
 		if !strings.Contains(msg, want) {
 			t.Fatalf("ReadFrame() error %q missing %q", msg, want)
 		}
+	}
+}
+
+func TestClientRemoteCloseReturnsOriginalTerminalErrorOnceAfterPendingSends(t *testing.T) {
+	server := newFakeWKProtoServer(t, func(t *testing.T, conn net.Conn) {
+		if _, err := codec.New().DecodePacketWithConn(conn, frame.LatestVersion); err != nil {
+			t.Fatalf("decode connect: %v", err)
+		}
+		writeFrame(t, conn, &frame.ConnackPacket{ReasonCode: frame.ReasonSuccess, ServerVersion: frame.LatestVersion})
+		for i := 0; i < 2; i++ {
+			if _, err := codec.New().DecodePacketWithConn(conn, frame.LatestVersion); err != nil {
+				t.Fatalf("decode send %d: %v", i+1, err)
+			}
+		}
+	})
+	defer server.close()
+
+	client, err := NewClient(ClientConfig{Addr: server.addr, OperationTimeout: time.Second})
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	defer client.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := client.Connect(ctx, "u1", "d1"); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	for seq := uint64(1); seq <= 2; seq++ {
+		if err := client.Send(ctx, &frame.SendPacket{
+			ClientSeq:   seq,
+			ClientMsgNo: "terminal-" + strconv.FormatUint(seq, 10),
+			ChannelID:   "u2",
+			ChannelType: frame.ChannelTypePerson,
+			Payload:     []byte("terminal"),
+		}); err != nil {
+			t.Fatalf("Send(%d) error = %v", seq, err)
+		}
+	}
+
+	if _, err := client.ReadFrame(ctx); !errors.Is(err, io.EOF) {
+		t.Fatalf("first terminal ReadFrame() error = %v, want original EOF", err)
+	}
+	if _, err := client.ReadFrame(ctx); !errors.Is(err, errClientNotConnected) {
+		t.Fatalf("second terminal ReadFrame() error = %v, want %v", err, errClientNotConnected)
+	}
+}
+
+func TestClientCompletedSendackIsReturnedBeforeRemoteTerminalError(t *testing.T) {
+	server := newFakeWKProtoServer(t, func(t *testing.T, conn net.Conn) {
+		if _, err := codec.New().DecodePacketWithConn(conn, frame.LatestVersion); err != nil {
+			t.Fatalf("decode connect: %v", err)
+		}
+		writeFrame(t, conn, &frame.ConnackPacket{ReasonCode: frame.ReasonSuccess, ServerVersion: frame.LatestVersion})
+		f, err := codec.New().DecodePacketWithConn(conn, frame.LatestVersion)
+		if err != nil {
+			t.Fatalf("decode send: %v", err)
+		}
+		send := f.(*frame.SendPacket)
+		writeFrame(t, conn, receivePressureSendack(send, 201))
+	})
+	defer server.close()
+
+	client, err := NewClient(ClientConfig{Addr: server.addr, OperationTimeout: time.Second, FrameBufferSize: 1})
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	defer client.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := client.Connect(ctx, "u1", "d1"); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	if err := client.Send(ctx, &frame.SendPacket{
+		ClientSeq:   1,
+		ClientMsgNo: "ack-before-terminal",
+		ChannelID:   "u2",
+		ChannelType: frame.ChannelTypePerson,
+		Payload:     []byte("terminal"),
+	}); err != nil {
+		t.Fatalf("Send() error = %v", err)
+	}
+
+	f, err := client.ReadFrame(ctx)
+	if err != nil {
+		t.Fatalf("first ReadFrame() error = %v, want SENDACK", err)
+	}
+	if ack, ok := f.(*frame.SendackPacket); !ok || ack.ClientSeq != 1 {
+		t.Fatalf("first ReadFrame() = %#v, want SENDACK 1", f)
+	}
+	if _, err := client.ReadFrame(ctx); !errors.Is(err, io.EOF) {
+		t.Fatalf("second ReadFrame() error = %v, want terminal EOF", err)
+	}
+	if _, err := client.ReadFrame(ctx); !errors.Is(err, errClientNotConnected) {
+		t.Fatalf("third ReadFrame() error = %v, want %v", err, errClientNotConnected)
 	}
 }
 
@@ -539,108 +1204,460 @@ func TestClientReconnectDoesNotLetOldReaderConsumeNewSessionFrames(t *testing.T)
 	}
 }
 
-func TestClientPublishFrameResultDoesNotBlockWhenQueueFull(t *testing.T) {
-	client := &Client{}
-	frameCh := make(chan frameResult, 1)
-	frameCh <- frameResult{frame: &frame.RecvPacket{MessageID: 1}}
-	stopCh := make(chan struct{})
+func TestClientSessionFullRecvQueueDoesNotBlockSendack(t *testing.T) {
+	session := newClientSession(nil, 1)
+	session.recvCh <- &frame.RecvPacket{MessageID: 1}
 
-	done := make(chan struct{})
+	if !session.publishSendack(&frame.SendackPacket{ClientSeq: 7}) {
+		t.Fatal("publishSendack() = false, want independent SENDACK admission")
+	}
+	ack := <-session.sendackCh
+	if ack.ClientSeq != 7 {
+		t.Fatalf("sendack client seq = %d, want 7", ack.ClientSeq)
+	}
+	recv := (<-session.recvCh).(*frame.RecvPacket)
+	if recv.MessageID != 1 {
+		t.Fatalf("recv message id = %d, want 1", recv.MessageID)
+	}
+}
+
+func TestClientSessionBlockedRecvPublishUnblocksOnClose(t *testing.T) {
+	session := newClientSession(nil, 1)
+	client := &Client{frameBufferSize: 1, session: session}
+	session.recvCh <- &frame.RecvPacket{MessageID: 1}
+	started := make(chan struct{})
+	done := make(chan bool, 1)
 	go func() {
-		client.publishFrameResult(frameCh, stopCh, frameResult{err: io.EOF})
-		close(done)
+		close(started)
+		done <- session.publishRecv(&frame.RecvPacket{MessageID: 2})
 	}()
-
+	waitForSignal(t, started, "blocked RECV publisher start")
+	waitForQueueSnapshot(t, client, func(snapshot QueueSnapshot) bool {
+		return snapshot.RecvDepth == snapshot.RecvCapacity
+	})
 	select {
-	case <-done:
-	case <-time.After(100 * time.Millisecond):
-		t.Fatal("publishFrameResult blocked behind a full queue")
+	case published := <-done:
+		t.Fatalf("RECV publisher completed before close: published=%t", published)
+	case <-time.After(20 * time.Millisecond):
 	}
 
+	if err := session.close(); err != nil {
+		t.Fatalf("close() error = %v", err)
+	}
 	select {
-	case result := <-frameCh:
-		if result.err != io.EOF {
-			t.Fatalf("published result error = %v, want %v", result.err, io.EOF)
+	case published := <-done:
+		if published {
+			t.Fatal("blocked RECV was published after session close")
 		}
+	case <-time.After(time.Second):
+		t.Fatal("blocked RECV publisher did not unblock after close")
+	}
+}
+
+func TestClientSessionBlockedErrorPublishUnblocksOnClose(t *testing.T) {
+	session := newClientSession(nil, 1)
+	client := &Client{frameBufferSize: 1, session: session}
+	session.errCh <- errorResult{err: errors.New("first")}
+	started := make(chan struct{})
+	done := make(chan bool, 1)
+	go func() {
+		close(started)
+		done <- session.publishError(errorResult{err: errors.New("second")})
+	}()
+	waitForSignal(t, started, "blocked error publisher start")
+	waitForQueueSnapshot(t, client, func(snapshot QueueSnapshot) bool {
+		return snapshot.ErrorDepth == snapshot.ErrorCapacity
+	})
+	select {
+	case published := <-done:
+		t.Fatalf("error publisher completed before close: published=%t", published)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	if err := session.close(); err != nil {
+		t.Fatalf("close() error = %v", err)
+	}
+	select {
+	case published := <-done:
+		if published {
+			t.Fatal("blocked error was published after session close")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("blocked error publisher did not unblock after close")
+	}
+}
+
+func TestClientErrorPublicationPressureCloseReleasesPublisherAndAdmission(t *testing.T) {
+	session := newClientSession(nil, 1)
+	client := &Client{frameBufferSize: 1, session: session}
+	session.errCh <- errorResult{err: errors.New("queued error")}
+
+	publisherAcquired := make(chan struct{})
+	publisherDone := make(chan bool, 1)
+	go func() {
+		if err := session.acquirePublication(context.Background()); err != nil {
+			publisherDone <- false
+			return
+		}
+		close(publisherAcquired)
+		published := session.publishError(errorResult{err: errors.New("blocked error")})
+		session.releasePublication()
+		publisherDone <- published
+	}()
+	waitForSignal(t, publisherAcquired, "error publisher publication admission")
+	waitForQueueSnapshot(t, client, func(snapshot QueueSnapshot) bool {
+		return snapshot.ErrorDepth == snapshot.ErrorCapacity && snapshot.PublicationCurrent == 1
+	})
+
+	waiterStarted := make(chan struct{})
+	waiterDone := make(chan error, 1)
+	go func() {
+		close(waiterStarted)
+		waiterDone <- session.acquirePublication(context.Background())
+	}()
+	waitForSignal(t, waiterStarted, "blocked publication waiter start")
+	saturated := waitForQueueSnapshot(t, client, func(snapshot QueueSnapshot) bool {
+		return snapshot.PublicationBlocked == 1
+	})
+	if saturated.PublicationCapacity != 1 || saturated.PublicationPeak != 1 {
+		t.Fatalf("publication snapshot = %+v, want capacity/peak 1", saturated)
+	}
+	select {
+	case published := <-publisherDone:
+		t.Fatalf("error publisher completed before close: published=%t", published)
 	default:
-		t.Fatal("frameCh is empty after publish")
+	}
+	select {
+	case err := <-waiterDone:
+		t.Fatalf("publication waiter completed before close: %v", err)
+	default:
+	}
+
+	if err := client.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	select {
+	case published := <-publisherDone:
+		if published {
+			t.Fatal("blocked error published after close")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("blocked error publisher did not return after close")
+	}
+	select {
+	case err := <-waiterDone:
+		if !errors.Is(err, errClientNotConnected) {
+			t.Fatalf("publication waiter error = %v, want %v", err, errClientNotConnected)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("publication waiter did not return after close")
+	}
+	if snapshot := sessionPublicationSnapshot(session); snapshot.current != 0 || snapshot.blocked != 0 {
+		t.Fatalf("terminal publication state = %+v, want current/blocked 0", snapshot)
 	}
 }
 
-func TestClientPublishFrameResultKeepsQueuedSendackWhenRecvArrivesFull(t *testing.T) {
-	client := &Client{}
-	frameCh := make(chan frameResult, 1)
-	frameCh <- frameResult{frame: &frame.SendackPacket{ClientSeq: 7}}
-	stopCh := make(chan struct{})
+type publicationState struct {
+	current int
+	blocked int
+}
 
-	client.publishFrameResult(frameCh, stopCh, frameResult{frame: &frame.RecvPacket{MessageID: 1}})
-
-	result := <-frameCh
-	ack, ok := result.frame.(*frame.SendackPacket)
-	if !ok {
-		t.Fatalf("published frame = %T, want *frame.SendackPacket", result.frame)
-	}
-	if ack.ClientSeq != 7 {
-		t.Fatalf("sendack client seq = %d, want 7", ack.ClientSeq)
+func sessionPublicationSnapshot(session *clientSession) publicationState {
+	return publicationState{
+		current: int(session.publicationCurrent.Load()),
+		blocked: int(session.publicationBlocked.Load()),
 	}
 }
 
-func TestClientPublishFrameResultEvictsRecvForSendack(t *testing.T) {
-	client := &Client{}
-	frameCh := make(chan frameResult, 1)
-	frameCh <- frameResult{frame: &frame.RecvPacket{MessageID: 1}}
-	stopCh := make(chan struct{})
-
-	client.publishFrameResult(frameCh, stopCh, frameResult{frame: &frame.SendackPacket{ClientSeq: 7}})
-
-	result := <-frameCh
-	ack, ok := result.frame.(*frame.SendackPacket)
-	if !ok {
-		t.Fatalf("published frame = %T, want *frame.SendackPacket", result.frame)
+func TestClientSessionBlockedSendackPublishUnblocksOnClose(t *testing.T) {
+	session := newClientSession(nil, 1)
+	client := &Client{frameBufferSize: 1, session: session}
+	session.sendackCh <- &frame.SendackPacket{ClientSeq: 1}
+	started := make(chan struct{})
+	done := make(chan bool, 1)
+	go func() {
+		close(started)
+		done <- session.publishSendack(&frame.SendackPacket{ClientSeq: 2})
+	}()
+	waitForSignal(t, started, "blocked SENDACK publisher start")
+	waitForQueueSnapshot(t, client, func(snapshot QueueSnapshot) bool {
+		return snapshot.SendackDepth == snapshot.SendackCapacity
+	})
+	select {
+	case published := <-done:
+		t.Fatalf("SENDACK publisher completed before close: published=%t", published)
+	case <-time.After(20 * time.Millisecond):
 	}
-	if ack.ClientSeq != 7 {
-		t.Fatalf("sendack client seq = %d, want 7", ack.ClientSeq)
+
+	if err := session.close(); err != nil {
+		t.Fatalf("close() error = %v", err)
+	}
+	select {
+	case published := <-done:
+		if published {
+			t.Fatal("blocked SENDACK was published after session close")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("blocked SENDACK publisher did not unblock after close")
 	}
 }
 
-func TestClientSessionPublishKeepsConcurrentPriorityResults(t *testing.T) {
-	const queueSize = 8
-	session := &clientSession{
-		frameCh: make(chan frameResult, queueSize),
-		stopCh:  make(chan struct{}),
+func TestClientReadFrameBoundedSendackPreferenceDoesNotStarveRecv(t *testing.T) {
+	session := newClientSession(nil, priorityResultQuota+2)
+	for seq := uint64(1); seq <= priorityResultQuota+1; seq++ {
+		session.sendackCh <- &frame.SendackPacket{ClientSeq: seq}
 	}
-	for i := 0; i < queueSize; i++ {
-		session.frameCh <- frameResult{frame: &frame.RecvPacket{MessageID: int64(i + 1)}}
-	}
+	session.recvCh <- &frame.RecvPacket{MessageID: 99}
 
-	var wg sync.WaitGroup
-	start := make(chan struct{})
-	started := make(chan struct{}, 2)
-	session.publishMu.Lock()
-	for _, clientSeq := range []uint64{1, 2} {
-		wg.Add(1)
-		go func(clientSeq uint64) {
-			defer wg.Done()
-			<-start
-			started <- struct{}{}
-			session.publishFrameResult(frameResult{frame: &frame.SendackPacket{ClientSeq: clientSeq}})
-		}(clientSeq)
-	}
-	close(start)
-	<-started
-	<-started
-	session.publishMu.Unlock()
-	wg.Wait()
-
-	seen := map[uint64]bool{}
-	for len(session.frameCh) > 0 {
-		result := <-session.frameCh
-		if ack, ok := result.frame.(*frame.SendackPacket); ok {
-			seen[ack.ClientSeq] = true
+	for seq := uint64(1); seq <= priorityResultQuota; seq++ {
+		f, err := session.readFrame(context.Background())
+		if err != nil {
+			t.Fatalf("readFrame(%d) error = %v", seq, err)
+		}
+		ack, ok := f.(*frame.SendackPacket)
+		if !ok || ack.ClientSeq != seq {
+			t.Fatalf("readFrame(%d) = %#v, want SENDACK %d", seq, f, seq)
 		}
 	}
-	if !seen[1] || !seen[2] {
-		t.Fatalf("queued sendacks = %#v, want client seqs 1 and 2", seen)
+	f, err := session.readFrame(context.Background())
+	if err != nil {
+		t.Fatalf("readFrame(RECV) error = %v", err)
+	}
+	recv, ok := f.(*frame.RecvPacket)
+	if !ok || recv.MessageID != 99 {
+		t.Fatalf("frame after %d preferred SENDACKs = %#v, want RECV 99", priorityResultQuota, f)
+	}
+}
+
+func TestClientReadFrameErrorPriorityIsBoundedByQueuedRecv(t *testing.T) {
+	session := newClientSession(nil, priorityResultQuota+2)
+	priorityErr := errors.New("priority error")
+	session.errCh <- errorResult{err: priorityErr}
+	session.sendackCh <- &frame.SendackPacket{ClientSeq: 1}
+	session.recvCh <- &frame.RecvPacket{MessageID: 99}
+
+	consecutivePriority := 0
+	recvCount := 0
+	for i := 0; i < priorityResultQuota*3; i++ {
+		f, err := session.readFrame(context.Background())
+		switch {
+		case errors.Is(err, priorityErr):
+			consecutivePriority++
+			session.errCh <- errorResult{err: priorityErr}
+		case err != nil:
+			t.Fatalf("readFrame(%d) error = %v, want priority error or frame", i, err)
+		case f != nil:
+			recv, ok := f.(*frame.RecvPacket)
+			if !ok {
+				t.Fatalf("readFrame(%d) = %T, want error before queued SENDACK", i, f)
+			}
+			if recv.MessageID != 99 {
+				t.Fatalf("recv message id = %d, want 99", recv.MessageID)
+			}
+			recvCount++
+			consecutivePriority = 0
+			session.recvCh <- &frame.RecvPacket{MessageID: 99}
+		}
+		if consecutivePriority > priorityResultQuota {
+			t.Fatalf("consecutive priority results = %d, want <= %d", consecutivePriority, priorityResultQuota)
+		}
+	}
+	if recvCount < 2 {
+		t.Fatalf("RECV count = %d, want repeated delivery under sustained priority errors", recvCount)
+	}
+}
+
+func TestClientConcurrentReadFrameCancellationWhileArbitrationBusy(t *testing.T) {
+	session := newClientSession(nil, 1)
+	firstCtx, cancelFirst := context.WithCancel(context.Background())
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := session.readFrame(firstCtx)
+		firstDone <- err
+	}()
+	waitForReadArbitrationHeld(t, session)
+
+	secondCtx, cancelSecond := context.WithCancel(context.Background())
+	secondStarted := make(chan struct{})
+	secondDone := make(chan error, 1)
+	go func() {
+		close(secondStarted)
+		_, err := session.readFrame(secondCtx)
+		secondDone <- err
+	}()
+	<-secondStarted
+	cancelSecond()
+
+	select {
+	case err := <-secondDone:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("second readFrame() error = %v, want %v", err, context.Canceled)
+		}
+	case <-time.After(100 * time.Millisecond):
+		cancelFirst()
+		<-firstDone
+		if err := session.close(); err != nil {
+			t.Fatalf("close() after arbitration timeout error = %v", err)
+		}
+		<-secondDone
+		t.Fatal("canceled reader remained blocked waiting for frame arbitration")
+	}
+
+	cancelFirst()
+	if err := <-firstDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("first readFrame() error = %v, want %v", err, context.Canceled)
+	}
+}
+
+func TestClientConcurrentReadFrameCloseUnblocksArbitrationWaiter(t *testing.T) {
+	session := newClientSession(nil, 1)
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := session.readFrame(context.Background())
+		firstDone <- err
+	}()
+	waitForReadArbitrationHeld(t, session)
+
+	secondStarted := make(chan struct{})
+	secondDone := make(chan error, 1)
+	go func() {
+		close(secondStarted)
+		_, err := session.readFrame(context.Background())
+		secondDone <- err
+	}()
+	<-secondStarted
+	if err := session.close(); err != nil {
+		t.Fatalf("close() error = %v", err)
+	}
+
+	for index, done := range []<-chan error{firstDone, secondDone} {
+		select {
+		case err := <-done:
+			if !errors.Is(err, errClientNotConnected) {
+				t.Fatalf("reader %d error = %v, want %v", index+1, err, errClientNotConnected)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("reader %d did not unblock after close", index+1)
+		}
+	}
+}
+
+func TestClientConcurrentReadFrameCancellationIsRepeatable(t *testing.T) {
+	session := newClientSession(nil, 1)
+	firstCtx, cancelFirst := context.WithCancel(context.Background())
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := session.readFrame(firstCtx)
+		firstDone <- err
+	}()
+	waitForReadArbitrationHeld(t, session)
+
+	const waiterCount = 32
+	cancels := make([]context.CancelFunc, 0, waiterCount)
+	started := make(chan struct{}, waiterCount)
+	done := make(chan error, waiterCount)
+	for i := 0; i < waiterCount; i++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancels = append(cancels, cancel)
+		go func(ctx context.Context) {
+			started <- struct{}{}
+			_, err := session.readFrame(ctx)
+			done <- err
+		}(ctx)
+	}
+	for i := 0; i < waiterCount; i++ {
+		<-started
+	}
+	for _, cancel := range cancels {
+		cancel()
+	}
+
+	deadline := time.After(time.Second)
+	for i := 0; i < waiterCount; i++ {
+		select {
+		case err := <-done:
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("canceled reader error = %v, want %v", err, context.Canceled)
+			}
+		case <-deadline:
+			cancelFirst()
+			<-firstDone
+			t.Fatalf("only %d/%d canceled arbitration waiters returned", i, waiterCount)
+		}
+	}
+	cancelFirst()
+	if err := <-firstDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("first readFrame() error = %v, want %v", err, context.Canceled)
+	}
+}
+
+func waitForReadArbitrationHeld(t *testing.T, session *clientSession) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		if len(session.readPermit) == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("reader did not acquire frame arbitration")
+		}
+		runtime.Gosched()
+	}
+}
+
+func TestClientSessionConcurrentCloseIsIdempotent(t *testing.T) {
+	session := newClientSession(nil, 1)
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := session.close(); err != nil {
+				t.Errorf("close() error = %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+func TestClientConcurrentCloseIsIdempotent(t *testing.T) {
+	client := &Client{
+		operationTimeout: time.Second,
+		session:          newClientSession(nil, 1),
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := client.Close(); err != nil {
+				t.Errorf("Close() error = %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+func TestClientReadFrameCancellationUnblocks(t *testing.T) {
+	client := &Client{
+		operationTimeout: time.Second,
+		session:          newClientSession(nil, 1),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := client.ReadFrame(ctx)
+		done <- err
+	}()
+	cancel()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("ReadFrame() error = %v, want %v", err, context.Canceled)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ReadFrame() did not unblock after context cancellation")
 	}
 }
 

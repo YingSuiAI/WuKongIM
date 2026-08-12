@@ -17,6 +17,9 @@ import (
 	"github.com/WuKongIM/WuKongIM/pkg/wklog"
 )
 
+// DefaultCommitShards keeps one group-commit stream per physical message DB.
+const DefaultCommitShards = 1
+
 // BackupChannelCut identifies one exact committed channel boundary selected by cluster coordination.
 type BackupChannelCut struct {
 	// Key is the stable channel storage partition key.
@@ -60,7 +63,7 @@ type MessageDBFactoryOptions struct {
 	CommitMaxRecords int
 	// CommitMaxBytes caps approximate payload bytes in one grouped physical commit.
 	CommitMaxBytes int
-	// CommitShards routes grouped commit requests across independent message DB coordinators. Zero keeps one coordinator.
+	// CommitShards routes grouped commit requests across independent message DB coordinators. Zero uses DefaultCommitShards.
 	CommitShards int
 	// CommitObserver receives message DB group-commit measurements.
 	CommitObserver messagedb.CommitCoordinatorObserver
@@ -86,6 +89,9 @@ func NewMessageDBFactory(path string) *MessageDBFactory {
 
 // NewMessageDBFactoryWithOptions opens a message DB engine behind the v2 adapter.
 func NewMessageDBFactoryWithOptions(path string, opts MessageDBFactoryOptions) *MessageDBFactory {
+	if opts.CommitShards == 0 {
+		opts.CommitShards = DefaultCommitShards
+	}
 	engine, err := messagedb.OpenWithLogger(path, opts.Logger)
 	if err != nil {
 		return &MessageDBFactory{}
@@ -267,14 +273,6 @@ func (f *MessageDBFactory) ListLatestMessages(ctx context.Context, beforeMessage
 	return out, page.HasMore, page.NextBeforeMessageID, nil
 }
 
-// DeleteLatestMessageIndexes removes retained rows from the manager-only global projection.
-func (f *MessageDBFactory) DeleteLatestMessageIndexes(ctx context.Context, messageIDs []uint64) error {
-	if err := f.availabilityError(); err != nil {
-		return err
-	}
-	return f.mapError(f.engine.DeleteLatestMessageIndexes(ctx, messageIDs))
-}
-
 // AppendLeaderBatch appends leader records for multiple channels through one message DB batch request when possible.
 func (f *MessageDBFactory) AppendLeaderBatch(ctx context.Context, items []AppendLeaderBatchItem) []AppendLeaderBatchResult {
 	results := make([]AppendLeaderBatchResult, len(items))
@@ -303,8 +301,9 @@ func (f *MessageDBFactory) AppendLeaderBatch(ctx context.Context, items []Append
 			continue
 		}
 		dbItems = append(dbItems, messagedb.AppendBatchItem{
-			Store:   dbStore,
-			Records: encodeRecordsForMessageDB(item.ChannelID, item.Request.Records),
+			Store:                     dbStore,
+			Records:                   encodeRecordsForMessageDB(item.ChannelID, item.Request.Records),
+			ServerAllocatedMessageIDs: item.Request.ServerAllocatedMessageIDs,
 		})
 		acquired = append(acquired, batchAcquiredStore{index: i, store: dbStore})
 	}
@@ -529,7 +528,15 @@ func (a *messageDBChannelStoreAdapter) AppendLeader(ctx context.Context, req App
 		return AppendLeaderResult{}, err
 	}
 	records := a.encodeRecords(req.Records)
-	base, err := a.store.Append(records)
+	var (
+		base uint64
+		err  error
+	)
+	if req.ServerAllocatedMessageIDs {
+		base, err = a.store.AppendServerAllocated(records)
+	} else {
+		base, err = a.store.Append(records)
+	}
 	if err != nil {
 		return AppendLeaderResult{}, a.mapError(err)
 	}
@@ -669,6 +676,17 @@ func (a *messageDBChannelStoreAdapter) LookupIdempotency(ctx context.Context, fr
 	msg.MessageSeq = entry.MessageSeq
 	msg.MessageID = entry.MessageID
 	return IdempotencyHit{Message: fromDBMessage(msg), PayloadHash: payloadHash}, true, nil
+}
+
+func (a *messageDBChannelStoreAdapter) GetLastSenderMessageSeq(ctx context.Context, fromUID string, throughSeq uint64) (uint64, bool, error) {
+	if err := a.ensureOpen(); err != nil {
+		return 0, false, err
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, false, err
+	}
+	seq, ok, err := a.store.GetLastSenderMessageSeq(ctx, fromUID, throughSeq)
+	return seq, ok, a.mapError(err)
 }
 
 func (a *messageDBChannelStoreAdapter) ReadLog(ctx context.Context, req ReadLogRequest) (ReadLogResult, error) {

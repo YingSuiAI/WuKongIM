@@ -364,6 +364,10 @@ func TestLoadBuildsRedactedStartupConfigSnapshot(t *testing.T) {
 		"WK_CLUSTER_JOIN_TOKEN=join-secret",
 		"WK_MANAGER_JWT_SECRET=jwt-secret",
 		`WK_MANAGER_USERS=[{"username":"admin","password":"plain"}]`,
+		"WK_WEBHOOK_HTTP_ADDR=http://127.0.0.1:18080/webhook",
+		"WK_WEBHOOK_SIGNING_SECRET=webhook-secret",
+		"WK_API_LISTEN_ADDR=127.0.0.1:18081",
+		"WK_API_SERVICE_TOKEN=api-service-secret",
 	}})
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
@@ -373,12 +377,12 @@ func TestLoadBuildsRedactedStartupConfigSnapshot(t *testing.T) {
 		t.Fatalf("snapshot metadata = %#v", snapshot)
 	}
 	text := snapshotText(snapshot)
-	for _, forbidden := range []string{"join-secret", "jwt-secret", "plain", "/tmp/wukongim-node"} {
+	for _, forbidden := range []string{"join-secret", "jwt-secret", "plain", "webhook-secret", "api-service-secret", "/tmp/wukongim-node"} {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("snapshot leaked %q: %s", forbidden, text)
 		}
 	}
-	for _, want := range []string{"WK_NODE_ID=1", "WK_CLUSTER_JOIN_TOKEN=******", "WK_MANAGER_JWT_SECRET=******", "WK_MANAGER_USERS=******"} {
+	for _, want := range []string{"WK_NODE_ID=1", "WK_CLUSTER_JOIN_TOKEN=******", "WK_MANAGER_JWT_SECRET=******", "WK_MANAGER_USERS=******", "WK_WEBHOOK_SIGNING_SECRET=******", "WK_API_SERVICE_TOKEN=******"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("snapshot text %q missing %q", text, want)
 		}
@@ -415,13 +419,12 @@ func TestLoadBuildsNormalizedEffectiveCriticalConfigSnapshot(t *testing.T) {
 		"WK_CLUSTER_CHANNEL_STORE_APPEND_WORKERS":      {value: "8", source: managementusecase.NodeConfigValueSourceDerived},
 		"WK_CLUSTER_CHANNEL_STORE_APPLY_WORKERS":       {value: "8", source: managementusecase.NodeConfigValueSourceDerived},
 		"WK_CLUSTER_CHANNEL_RPC_WORKERS":               {value: "50", source: managementusecase.NodeConfigValueSourceEnvironment},
-		"WK_CLUSTER_CHANNEL_RPC_BATCH_MAX_ITEMS":       {value: "8", source: managementusecase.NodeConfigValueSourceDerived},
+		"WK_CLUSTER_CHANNEL_RPC_BATCH_MAX_ITEMS":       {value: "16", source: managementusecase.NodeConfigValueSourceDerived},
 		"WK_GATEWAY_GNET_MULTICORE":                    {value: "true", source: managementusecase.NodeConfigValueSourceDerived},
 		"WK_GATEWAY_GNET_NUM_EVENT_LOOP":               {value: "2", source: managementusecase.NodeConfigValueSourceDerived},
 		"WK_GATEWAY_RUNTIME_ASYNC_SEND_WORKERS":        {value: "128", source: managementusecase.NodeConfigValueSourceDefault},
 		"WK_GATEWAY_RUNTIME_ASYNC_SEND_QUEUE_CAPACITY": {value: "131072", source: managementusecase.NodeConfigValueSourceDefault},
 		"WK_DELIVERY_RECIPIENT_WORKER_CONCURRENCY":     {value: "100", source: managementusecase.NodeConfigValueSourceDefault},
-		"WK_CONVERSATION_AUTHORITY_CACHE_MAX_ROWS":     {value: "100000", source: managementusecase.NodeConfigValueSourceDefault},
 	}
 	for key, want := range wants {
 		item, ok := snapshotItem(cfg.StartupConfigSnapshot, key)

@@ -8,6 +8,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/WuKongIM/WuKongIM/internal/contracts/onlinedelivery"
 )
 
 type capturePressureObserver struct {
@@ -321,7 +323,8 @@ func TestAdvanceDispatcherPublishesQueuedAndDrainedPressure(t *testing.T) {
 func TestWriterPressurePublicationCannotOverwriteDrainWithOlderSnapshot(t *testing.T) {
 	observer := newBlockingPressureObserverForTest()
 	handoff := newPostCommitHandoff(1)
-	if !handoff.tryAcquire() {
+	future := newFuture(1)
+	if !handoff.tryAcquire(future, 0) {
 		t.Fatal("tryAcquire() = false, want initial handoff reservation")
 	}
 	metrics := &groupMetrics{
@@ -346,7 +349,7 @@ func TestWriterPressurePublicationCannotOverwriteDrainWithOlderSnapshot(t *testi
 		t.Fatal("first pressure publication did not start")
 	}
 
-	handoff.release(1)
+	handoff.release(postCommitReservation{future: future, index: 0})
 	updatesDone := make(chan struct{})
 	go func() {
 		for range 10_000 {
@@ -386,7 +389,7 @@ func TestPostCommitEffectDoesNotBlockDurableAppendPool(t *testing.T) {
 		Appender:                   appender,
 		EffectPoolSize:             1,
 		RecipientAuthorityResolver: staticRecipientAuthorityResolverForCommitTest{nodeID: 1},
-		RecipientDeliveryEnqueuer:  delivery,
+		OnlineDeliveryEnqueuer:     delivery,
 		RecipientBatchSize:         16,
 	})
 	t.Cleanup(delivery.release)
@@ -426,7 +429,7 @@ func TestPostCommitSaturationRetainsDurableEffectsWithoutBlockingForegroundAppen
 		EffectPoolSize:             1,
 		PostCommitHandoffCapacity:  8,
 		RecipientAuthorityResolver: staticRecipientAuthorityResolverForCommitTest{nodeID: 1},
-		RecipientDeliveryEnqueuer:  delivery,
+		OnlineDeliveryEnqueuer:     delivery,
 		RecipientBatchSize:         16,
 		Observer:                   observer,
 	})
@@ -514,7 +517,7 @@ func TestPostCommitRetryBurstRefillsFreedWorkersBeforeFallbackTimer(t *testing.T
 		Appender:                   newRecordingAppenderForAppendTest(),
 		EffectPoolSize:             poolSize,
 		RecipientAuthorityResolver: staticRecipientAuthorityResolverForCommitTest{nodeID: 1},
-		RecipientDeliveryEnqueuer:  delivery,
+		OnlineDeliveryEnqueuer:     delivery,
 		RecipientBatchSize:         16,
 	})
 	group.postCommitRetries.retryInterval = 500 * time.Millisecond
@@ -580,7 +583,7 @@ func TestPostCommitRetryTurnParksNewAppendAndRefillsNextWriterWhileAppendPoolSat
 		EffectPoolSize:             1,
 		PostCommitHandoffCapacity:  16,
 		RecipientAuthorityResolver: staticRecipientAuthorityResolverForCommitTest{nodeID: 1},
-		RecipientDeliveryEnqueuer:  delivery,
+		OnlineDeliveryEnqueuer:     delivery,
 		RecipientBatchSize:         16,
 	})
 	// Keep the retry FIFO stable until the real capacity completion below wakes it.
@@ -764,9 +767,9 @@ func newBurstRefillRecipientEnqueuerForPressureTest(firstRetryMessageID uint64) 
 	}
 }
 
-func (e *burstRefillRecipientEnqueuerForPressureTest) EnqueueRecipientBatch(ctx context.Context, _ RecipientAuthorityTarget, batch RecipientBatch) error {
+func (e *burstRefillRecipientEnqueuerForPressureTest) EnqueueRecipientDeliveryPlan(ctx context.Context, plan onlinedelivery.RecipientDeliveryPlan) error {
 	release := e.retryRelease
-	if batch.Event.MessageID < e.firstRetryMessageID {
+	if plan.Event.MessageID < e.firstRetryMessageID {
 		e.initialStarted.Add(1)
 		release = e.initialRelease
 	} else {

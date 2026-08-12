@@ -10,8 +10,7 @@ import (
 	"time"
 
 	"github.com/WuKongIM/WuKongIM/internal/contracts/authority"
-	"github.com/WuKongIM/WuKongIM/internal/runtime/conversationactive"
-	metadb "github.com/WuKongIM/WuKongIM/pkg/db/meta"
+	"github.com/WuKongIM/WuKongIM/internal/contracts/onlinedelivery"
 	runtimechannelid "github.com/WuKongIM/WuKongIM/pkg/protocol/channelid"
 )
 
@@ -42,273 +41,6 @@ func TestScopedUIDsBypassSubscriberScan(t *testing.T) {
 	got := enqueuer.allUIDs()
 	if !reflect.DeepEqual(got, []string{"u2", "u3"}) {
 		t.Fatalf("recipient uids = %#v, want scoped u2,u3", got)
-	}
-}
-
-func TestRecipientDeliveryDoesNotWaitForActiveBatchAdmission(t *testing.T) {
-	steps := &orderedStepsForDeliveryTest{}
-	active := &recordingActiveAdmitterForRecipientTest{steps: steps}
-	enqueuer := &recordingRecipientEnqueuerForRecipientTest{steps: steps}
-	event := CommittedEnvelope{
-		MessageID:         1,
-		MessageSeq:        42,
-		ChannelID:         "scoped",
-		ChannelType:       2,
-		FromUID:           "sender",
-		ServerTimestampMS: 1234,
-		MessageScopedUIDs: []string{"u2", "u3"},
-	}
-
-	err := dispatchCommittedRecipients(context.Background(), event, commitPorts{
-		activeAdmitter:             active,
-		recipientAuthorityResolver: staticRecipientAuthorityResolverForRecipientTest{nodeID: 7},
-		deliveryEnqueuer:           enqueuer,
-		recipientBatchSize:         16,
-		subscriberPageSize:         2,
-	})
-	if err != nil {
-		t.Fatalf("dispatchCommittedRecipients() error = %v", err)
-	}
-
-	if got := steps.snapshot(); !reflect.DeepEqual(got, []string{"delivery", "active"}) {
-		t.Fatalf("steps = %#v, want delivery before active projection", got)
-	}
-	if len(active.batches) != 1 {
-		t.Fatalf("active batches = %d, want 1", len(active.batches))
-	}
-	batch := active.batches[0]
-	if batch.SenderUID != "sender" || batch.ChannelID != "scoped" || batch.ChannelType != 2 ||
-		batch.MessageSeq != 42 || batch.ActiveAtMS != 1234 {
-		t.Fatalf("active batch metadata = %#v, want committed event metadata", batch)
-	}
-	if got := active.recipientUIDs(); !reflect.DeepEqual(got, []string{"u2", "u3"}) {
-		t.Fatalf("active recipient uids = %#v, want expanded recipient set", got)
-	}
-	for _, recipient := range batch.Recipients {
-		if recipient.IsSender {
-			t.Fatalf("active recipient %#v sets IsSender, want sender handled by SenderUID", recipient)
-		}
-	}
-}
-
-func TestActiveBatchAdmittedWithoutRecipientEnqueuer(t *testing.T) {
-	active := &recordingActiveAdmitterForRecipientTest{}
-	event := CommittedEnvelope{
-		MessageID:         1,
-		MessageSeq:        7,
-		ChannelID:         "g1",
-		ChannelType:       2,
-		FromUID:           "sender",
-		ServerTimestampMS: 99,
-	}
-
-	err := dispatchCommittedRecipients(context.Background(), event, commitPorts{
-		activeAdmitter: active,
-		subscribers: &recordingSubscriberSourceForRecipientTest{
-			pages: []SubscriberPage{{Recipients: []Recipient{{UID: "u2"}, {UID: "u3"}}, Done: true}},
-		},
-		subscriberPageSize: 2,
-	})
-	if err != nil {
-		t.Fatalf("dispatchCommittedRecipients() error = %v", err)
-	}
-
-	if got := active.recipientUIDs(); !reflect.DeepEqual(got, []string{"u2", "u3"}) {
-		t.Fatalf("active recipient uids = %#v, want subscriber page recipients", got)
-	}
-}
-
-func TestRecipientProcessorAdmitsNormalConversationKind(t *testing.T) {
-	active := &recordingActiveAdmitterForRecipientTest{}
-	event := CommittedEnvelope{
-		MessageID:         1,
-		MessageSeq:        7,
-		ChannelID:         "g1",
-		ChannelType:       2,
-		FromUID:           "sender",
-		ServerTimestampMS: 99,
-		MessageScopedUIDs: []string{"u2"},
-	}
-
-	err := dispatchCommittedRecipients(context.Background(), event, commitPorts{
-		activeAdmitter: active,
-	})
-	if err != nil {
-		t.Fatalf("dispatchCommittedRecipients() error = %v", err)
-	}
-	if len(active.batches) != 1 || active.batches[0].Kind != metadb.ConversationKindNormal {
-		t.Fatalf("active batches = %+v, want normal conversation kind", active.batches)
-	}
-}
-
-func TestRecipientProcessorAdmitsCMDConversationKind(t *testing.T) {
-	tests := []struct {
-		name      string
-		channelID string
-		syncOnce  bool
-	}{
-		{name: "sync_once", channelID: "g1", syncOnce: true},
-		{name: "command_channel", channelID: runtimechannelid.ToCommandChannel("g1")},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			active := &recordingActiveAdmitterForRecipientTest{}
-			event := CommittedEnvelope{
-				MessageID:         1,
-				MessageSeq:        7,
-				ChannelID:         tt.channelID,
-				ChannelType:       2,
-				FromUID:           "sender",
-				ServerTimestampMS: 99,
-				SyncOnce:          tt.syncOnce,
-				MessageScopedUIDs: []string{"u2"},
-			}
-
-			err := dispatchCommittedRecipients(context.Background(), event, commitPorts{
-				activeAdmitter: active,
-			})
-			if err != nil {
-				t.Fatalf("dispatchCommittedRecipients() error = %v", err)
-			}
-			if len(active.batches) != 1 || active.batches[0].Kind != metadb.ConversationKindCMD {
-				t.Fatalf("active batches = %+v, want CMD conversation kind", active.batches)
-			}
-		})
-	}
-}
-
-func TestActiveBatchFailureDoesNotStopRecipientEnqueuer(t *testing.T) {
-	activeErr := errors.New("active unavailable")
-	active := &recordingActiveAdmitterForRecipientTest{err: activeErr}
-	enqueuer := &recordingRecipientEnqueuerForRecipientTest{}
-
-	dispatch, err := dispatchCommittedRecipientsForTarget(context.Background(), AuthorityTarget{
-		ChannelID: ChannelID{ID: "g1", Type: 2},
-		Large:     true,
-	}, CommittedEnvelope{
-		MessageID:         1,
-		MessageSeq:        7,
-		ChannelID:         "g1",
-		ChannelType:       2,
-		FromUID:           "sender",
-		ServerTimestampMS: 99,
-		MessageScopedUIDs: []string{"u2"},
-	}, subscriberCache{}, commitPorts{
-		activeAdmitter:             active,
-		recipientAuthorityResolver: staticRecipientAuthorityResolverForRecipientTest{nodeID: 7},
-		deliveryEnqueuer:           enqueuer,
-		recipientBatchSize:         16,
-	})
-	if err != nil {
-		t.Fatalf("dispatchCommittedRecipientsForTarget() delivery error = %v, want nil", err)
-	}
-	if !errors.Is(dispatch.activeErr, activeErr) {
-		t.Fatalf("active projection error = %v, want %v", dispatch.activeErr, activeErr)
-	}
-	detail := postCommitFailureDetailFromError(dispatch.activeErr)
-	if detail.Phase != "conversation_active" || detail.UID != "u2" || detail.RecipientCount != 1 {
-		t.Fatalf("post-commit failure detail = %#v, want conversation_active detail", detail)
-	}
-	if got := enqueuer.callCount(); got != 1 {
-		t.Fatalf("enqueuer calls = %d, want 1 despite active failure", got)
-	}
-}
-
-func TestActiveBatchFailureDoesNotStopLargeSubscriberPages(t *testing.T) {
-	activeErr := errors.New("active unavailable")
-	active := &recordingActiveAdmitterForRecipientTest{err: activeErr}
-	enqueuer := &recordingRecipientEnqueuerForRecipientTest{}
-	source := &recordingSubscriberSourceForRecipientTest{pages: []SubscriberPage{
-		{Recipients: []Recipient{{UID: "u2"}}, Cursor: "next"},
-		{Recipients: []Recipient{{UID: "u3"}}, Done: true},
-	}}
-
-	dispatch, err := dispatchCommittedRecipientsForTarget(context.Background(), AuthorityTarget{
-		ChannelID: ChannelID{ID: "g1", Type: 2},
-		Large:     true,
-	}, CommittedEnvelope{
-		MessageID:   1,
-		MessageSeq:  7,
-		ChannelID:   "g1",
-		ChannelType: 2,
-		FromUID:     "sender",
-	}, subscriberCache{}, commitPorts{
-		activeAdmitter:             active,
-		subscribers:                source,
-		recipientAuthorityResolver: staticRecipientAuthorityResolverForRecipientTest{nodeID: 7},
-		deliveryEnqueuer:           enqueuer,
-		recipientBatchSize:         16,
-		subscriberPageSize:         1,
-	})
-	if err != nil {
-		t.Fatalf("dispatchCommittedRecipientsForTarget() delivery error = %v, want nil", err)
-	}
-	if !errors.Is(dispatch.activeErr, activeErr) {
-		t.Fatalf("active projection error = %v, want %v", dispatch.activeErr, activeErr)
-	}
-	if source.calls != 2 {
-		t.Fatalf("subscriber page calls = %d, want all 2 pages", source.calls)
-	}
-	if got := enqueuer.allUIDs(); !reflect.DeepEqual(got, []string{"u2", "u3"}) {
-		t.Fatalf("enqueued recipients = %#v, want all large-channel pages", got)
-	}
-}
-
-func TestActiveBatchFailureStillCommitsSubscriberSnapshot(t *testing.T) {
-	activeErr := errors.New("active unavailable")
-	target := AuthorityTarget{
-		ChannelID:                 ChannelID{ID: "g1", Type: 2},
-		SubscriberMutationVersion: 9,
-	}
-	dispatch, err := dispatchCommittedRecipientsForTarget(context.Background(), target, CommittedEnvelope{
-		MessageID:   1,
-		MessageSeq:  7,
-		ChannelID:   "g1",
-		ChannelType: 2,
-		FromUID:     "sender",
-	}, subscriberCache{}, commitPorts{
-		activeAdmitter: &recordingActiveAdmitterForRecipientTest{err: activeErr},
-		subscribers: &recordingSubscriberSourceForRecipientTest{pages: []SubscriberPage{{
-			Recipients: []Recipient{{UID: "u2"}},
-			Done:       true,
-		}}},
-	})
-	if err != nil {
-		t.Fatalf("dispatchCommittedRecipientsForTarget() delivery error = %v, want nil", err)
-	}
-	if !errors.Is(dispatch.activeErr, activeErr) {
-		t.Fatalf("active projection error = %v, want %v", dispatch.activeErr, activeErr)
-	}
-	if !dispatch.subscriberCache.matches(target) {
-		t.Fatalf("subscriber cache = %#v, want ready version %d despite active failure", dispatch.subscriberCache, target.SubscriberMutationVersion)
-	}
-}
-
-func TestSubscriberSnapshotDoubleFailurePreservesIndependentActiveError(t *testing.T) {
-	target := AuthorityTarget{
-		ChannelID:                 ChannelID{ID: "g1", Type: 2},
-		SubscriberMutationVersion: 9,
-	}
-	dispatch, err := dispatchCommittedRecipientsForTarget(context.Background(), target, CommittedEnvelope{
-		MessageID:   1,
-		MessageSeq:  7,
-		ChannelID:   "g1",
-		ChannelType: 2,
-		FromUID:     "sender",
-	}, subscriberCache{}, commitPorts{
-		activeAdmitter:             &recordingActiveAdmitterForRecipientTest{err: context.DeadlineExceeded},
-		subscribers:                &recordingSubscriberSourceForRecipientTest{pages: []SubscriberPage{{Recipients: []Recipient{{UID: "u2"}}, Done: true}}},
-		recipientAuthorityResolver: failingRecipientAuthorityResolverForRecipientTest{err: ErrRouteNotReady},
-		deliveryEnqueuer:           &recordingRecipientEnqueuerForRecipientTest{},
-	})
-	if !errors.Is(err, ErrRouteNotReady) {
-		t.Fatalf("delivery error = %v, want %v", err, ErrRouteNotReady)
-	}
-	if !errors.Is(dispatch.activeErr, context.DeadlineExceeded) {
-		t.Fatalf("active projection error = %v, want deadline exceeded", dispatch.activeErr)
-	}
-	if dispatch.subscriberCache.ready {
-		t.Fatal("subscriber cache committed despite delivery failure")
 	}
 }
 
@@ -410,60 +142,6 @@ func TestRecipientBatchesAreGroupedByRecipientAuthorityTarget(t *testing.T) {
 	}
 }
 
-func TestGroupRecipientAuthoritiesBuildsExactDisjointSlices(t *testing.T) {
-	first := recipientAuthorityTargetForTest(1, 10, 100)
-	second := recipientAuthorityTargetForTest(2, 20, 200)
-	set := normalizeRecipientsForAuthorityResolution("sender", []Recipient{
-		{UID: "u1"},
-		{UID: " "},
-		{UID: "u2"},
-		{UID: "u3"},
-	}, true)
-	targets := map[string]RecipientAuthorityTarget{
-		"sender": first,
-		"u1":     first,
-		"u2":     second,
-		"u3":     first,
-	}
-	results := make([]RecipientAuthorityResult, len(set.authorityUIDs))
-	for index, uid := range set.authorityUIDs {
-		results[index].Target = targets[uid]
-	}
-
-	grouping, err := groupRecipientAuthorities(set, results, "sender")
-	if err != nil {
-		t.Fatalf("groupRecipientAuthorities() error = %v", err)
-	}
-	if len(grouping.groups) != 2 {
-		t.Fatalf("authority groups = %d, want 2", len(grouping.groups))
-	}
-
-	firstGroup := grouping.groups[0]
-	secondGroup := grouping.groups[1]
-	if got := recipientUIDs(firstGroup.recipients); !reflect.DeepEqual(got, []string{"u1", "u3"}) {
-		t.Fatalf("first delivery group = %#v, want exact non-empty u1,u3", got)
-	}
-	if got := recipientUIDs(secondGroup.recipients); !reflect.DeepEqual(got, []string{"u2"}) {
-		t.Fatalf("second delivery group = %#v, want exact non-empty u2", got)
-	}
-	if len(firstGroup.recipients) != 2 || cap(firstGroup.recipients) != 2 ||
-		len(secondGroup.recipients) != 1 || cap(secondGroup.recipients) != 1 {
-		t.Fatalf("delivery slice len/cap = first %d/%d second %d/%d, want 2/2 and 1/1",
-			len(firstGroup.recipients), cap(firstGroup.recipients), len(secondGroup.recipients), cap(secondGroup.recipients))
-	}
-	if got := activeRecipientUIDsForTarget(ConversationActiveTargetBatch{Batch: conversationactive.ActiveBatch{Recipients: firstGroup.activeRecipients}}); !reflect.DeepEqual(got, []string{"u1", "u3"}) {
-		t.Fatalf("first active group = %#v, want exact non-empty u1,u3", got)
-	}
-	if got := activeRecipientUIDsForTarget(ConversationActiveTargetBatch{Batch: conversationactive.ActiveBatch{Recipients: secondGroup.activeRecipients}}); !reflect.DeepEqual(got, []string{"u2"}) {
-		t.Fatalf("second active group = %#v, want exact non-empty u2", got)
-	}
-	if len(firstGroup.activeRecipients) != 2 || cap(firstGroup.activeRecipients) != 2 ||
-		len(secondGroup.activeRecipients) != 1 || cap(secondGroup.activeRecipients) != 1 {
-		t.Fatalf("active slice len/cap = first %d/%d second %d/%d, want 2/2 and 1/1",
-			len(firstGroup.activeRecipients), cap(firstGroup.activeRecipients), len(secondGroup.activeRecipients), cap(secondGroup.activeRecipients))
-	}
-}
-
 func TestRecipientDeliveryBatchesAreEnqueuedByRecipientAuthorityTarget(t *testing.T) {
 	enqueuer := &recordingRecipientDeliveryEnqueuerForRecipientTest{}
 	target10 := recipientAuthorityTargetForTest(1, 10, 100)
@@ -504,7 +182,7 @@ func TestRecipientDeliveryBatchesAreEnqueuedByRecipientAuthorityTarget(t *testin
 		t.Fatalf("target 20 recipients = %#v, want u2", got[target20])
 	}
 	if len(enqueuer.batches) != 2 {
-		t.Fatalf("enqueued batches = %d, want 2", len(enqueuer.batches))
+		t.Fatalf("enqueued target batches = %d, want 2", len(enqueuer.batches))
 	}
 	for _, batch := range enqueuer.batches {
 		if batch.Event.MessageID != 1 {
@@ -546,13 +224,13 @@ func TestRecipientDeliveryPageUsesOneBoundedPlanAcrossAuthorityTargets(t *testin
 		t.Fatalf("dispatchRecipientSet() error = %v", err)
 	}
 
-	if enqueuer.legacyCalls != 0 {
-		t.Fatalf("legacy enqueue calls = %d, want 0 when plan admission is available", enqueuer.legacyCalls)
-	}
 	if len(enqueuer.plans) != 1 {
 		t.Fatalf("delivery plans = %d, want one recipient-page plan", len(enqueuer.plans))
 	}
 	plan := enqueuer.plans[0]
+	if plan.Mode != onlinedelivery.ModeDurable {
+		t.Fatalf("delivery mode = %v, want durable", plan.Mode)
+	}
 	if plan.Event.MessageID != 1 || plan.RecipientCount() != 4 {
 		t.Fatalf("delivery plan = %#v, want message 1 and 4 recipients", plan)
 	}
@@ -564,6 +242,32 @@ func TestRecipientDeliveryPageUsesOneBoundedPlanAcrossAuthorityTargets(t *testin
 	}
 	if got := recipientUIDs(plan.Targets[0].Recipients); !reflect.DeepEqual(got, []string{"u1", "u3"}) {
 		t.Fatalf("first target recipients = %#v, want u1,u3", got)
+	}
+}
+
+func TestTransientRecipientDeliveryPlanCarriesExplicitMode(t *testing.T) {
+	enqueuer := &recordingRecipientPlanEnqueuerForRecipientTest{}
+	target := AuthorityTarget{
+		ChannelID: ChannelID{ID: "room", Type: 2},
+		Large:     true,
+	}
+
+	_, err := dispatchRecipientsForTarget(context.Background(), onlinedelivery.ModeTransient, target, CommittedEnvelope{
+		MessageID:         7,
+		MessageScopedUIDs: []string{"u1"},
+	}, subscriberCache{}, commitPorts{
+		recipientAuthorityResolver: staticRecipientAuthorityResolverForRecipientTest{nodeID: 1},
+		deliveryEnqueuer:           enqueuer,
+		recipientBatchSize:         16,
+	})
+	if err != nil {
+		t.Fatalf("dispatchRecipientsForTarget() error = %v", err)
+	}
+	if len(enqueuer.plans) != 1 {
+		t.Fatalf("delivery plans = %d, want 1", len(enqueuer.plans))
+	}
+	if enqueuer.plans[0].Mode != onlinedelivery.ModeTransient {
+		t.Fatalf("delivery mode = %v, want transient", enqueuer.plans[0].Mode)
 	}
 }
 
@@ -621,8 +325,8 @@ type payloadAliasRecipientEnqueuerForRecipientTest struct {
 	sawAlias bool
 }
 
-func (e *payloadAliasRecipientEnqueuerForRecipientTest) EnqueueRecipientBatch(_ context.Context, _ RecipientAuthorityTarget, batch RecipientBatch) error {
-	if len(batch.Event.Payload) > 0 && len(e.payload) > 0 && &batch.Event.Payload[0] == &e.payload[0] {
+func (e *payloadAliasRecipientEnqueuerForRecipientTest) EnqueueRecipientDeliveryPlan(_ context.Context, plan onlinedelivery.RecipientDeliveryPlan) error {
+	if len(plan.Event.Payload) > 0 && len(e.payload) > 0 && &plan.Event.Payload[0] == &e.payload[0] {
 		e.sawAlias = true
 	}
 	return nil
@@ -700,166 +404,6 @@ func TestRecipientAuthorityBatchResolverResolvesUniqueTrimmedUIDsOnce(t *testing
 	}
 }
 
-func TestDispatchRecipientSetSharesAlignedAuthoritySnapshotWithRoutedActive(t *testing.T) {
-	senderTarget := authority.Target{HashSlot: 1, SlotID: 7, LeaderNodeID: 10, LeaderTerm: 101, ConfigEpoch: 1001, RouteRevision: 100, AuthorityEpoch: 1000}
-	firstTarget := authority.Target{HashSlot: 2, SlotID: 7, LeaderNodeID: 10, LeaderTerm: 101, ConfigEpoch: 1001, RouteRevision: 100, AuthorityEpoch: 1000}
-	secondTarget := authority.Target{HashSlot: 12, SlotID: 7, LeaderNodeID: 10, LeaderTerm: 101, ConfigEpoch: 1001, RouteRevision: 100, AuthorityEpoch: 1000}
-	resolver := &alignedRecipientAuthorityResolverForRecipientTest{results: map[string]RecipientAuthorityResult{
-		"sender": {Target: senderTarget},
-		"u1":     {Target: firstTarget},
-		"u2":     {Target: secondTarget},
-	}}
-	delivery := &recordingRecipientPlanEnqueuerForRecipientTest{}
-	active := &recordingRoutedActiveAdmitterForRecipientTest{}
-
-	err := dispatchRecipientSet(context.Background(), CommittedEnvelope{
-		MessageID:         1,
-		MessageSeq:        9,
-		ChannelID:         "room",
-		ChannelType:       2,
-		FromUID:           "sender",
-		ServerTimestampMS: 123,
-	}, []Recipient{{UID: " u1 "}, {UID: "u2"}, {UID: "u1"}}, commitPorts{
-		activeAdmitter:             active,
-		recipientAuthorityResolver: resolver,
-		deliveryEnqueuer:           delivery,
-		recipientBatchSize:         16,
-	})
-	if err != nil {
-		t.Fatalf("dispatchRecipientSet() error = %v", err)
-	}
-	if resolver.singleCalls != 0 || resolver.batchCalls != 1 {
-		t.Fatalf("resolver calls = single:%d batch:%d, want one aligned batch only", resolver.singleCalls, resolver.batchCalls)
-	}
-	if !reflect.DeepEqual(resolver.batchUIDs, []string{"sender", "u1", "u2"}) {
-		t.Fatalf("resolver UIDs = %#v, want sender then unique trimmed recipients", resolver.batchUIDs)
-	}
-	if active.legacyCalls != 0 || active.routedCalls != 1 {
-		t.Fatalf("active calls = legacy:%d routed:%d, want one routed call only", active.legacyCalls, active.routedCalls)
-	}
-	if len(active.groups) != 3 {
-		t.Fatalf("active groups = %d, want sender plus two physical hash-slot groups", len(active.groups))
-	}
-	if active.groups[0].Target != senderTarget || active.groups[0].Batch.SenderUID != "sender" || len(active.groups[0].Batch.Recipients) != 0 {
-		t.Fatalf("sender active group = %#v, want sender-only exact target", active.groups[0])
-	}
-	if active.groups[1].Target != firstTarget || active.groups[2].Target != secondTarget {
-		t.Fatalf("recipient active targets = %#v, want distinct physical hash slots despite one logical Slot", active.groups[1:])
-	}
-	if got := activeRecipientUIDsForTarget(active.groups[1]); !reflect.DeepEqual(got, []string{"u1"}) {
-		t.Fatalf("first active recipients = %#v, want coalesced u1", got)
-	}
-	if got := activeRecipientUIDsForTarget(active.groups[2]); !reflect.DeepEqual(got, []string{"u2"}) {
-		t.Fatalf("second active recipients = %#v, want u2", got)
-	}
-	if len(delivery.plans) != 1 || len(delivery.plans[0].Targets) != 2 {
-		t.Fatalf("delivery plans = %#v, want one plan with two recipient targets", delivery.plans)
-	}
-	if delivery.plans[0].Targets[0].Target != firstTarget || delivery.plans[0].Targets[1].Target != secondTarget {
-		t.Fatalf("delivery targets = %#v, want aligned exact targets", delivery.plans[0].Targets)
-	}
-	if got := recipientUIDs(delivery.plans[0].Targets[0].Recipients); !reflect.DeepEqual(got, []string{"u1", "u1"}) {
-		t.Fatalf("delivery first target recipients = %#v, want duplicate delivery rows preserved", got)
-	}
-	activeRows := 0
-	for _, group := range active.groups {
-		activeRows += len(group.Batch.Recipients)
-		for _, recipient := range group.Batch.Recipients {
-			if recipient.UID == "" {
-				t.Fatalf("active group contains empty UID: %#v", group)
-			}
-		}
-	}
-	if activeRows != 2 {
-		t.Fatalf("active recipient rows = %d, want exactly two unique recipients", activeRows)
-	}
-	deliveryRows := 0
-	for _, target := range delivery.plans[0].Targets {
-		deliveryRows += len(target.Recipients)
-		for _, recipient := range target.Recipients {
-			if recipient.UID == "" {
-				t.Fatalf("delivery target contains empty UID: %#v", target)
-			}
-		}
-	}
-	if deliveryRows != 3 {
-		t.Fatalf("delivery recipient rows = %d, want exactly three normalized rows", deliveryRows)
-	}
-}
-
-func TestDispatchRecipientSetSenderRouteFailureKeepsDeliveryAndFallsBackActive(t *testing.T) {
-	senderErr := errors.New("sender route unavailable")
-	activeErr := errors.New("active fallback unavailable")
-	recipientTarget := recipientAuthorityTargetForTest(9, 20, 200)
-	resolver := &alignedRecipientAuthorityResolverForRecipientTest{results: map[string]RecipientAuthorityResult{
-		"sender": {Err: senderErr},
-		"u1":     {Target: recipientTarget},
-	}}
-	delivery := &recordingRecipientPlanEnqueuerForRecipientTest{}
-	active := &recordingRoutedActiveAdmitterForRecipientTest{err: activeErr}
-
-	dispatch, err := dispatchRecipientSetResult(context.Background(), CommittedEnvelope{
-		MessageID: 1,
-		FromUID:   "sender",
-	}, []Recipient{{UID: "u1"}}, commitPorts{
-		activeAdmitter:             active,
-		recipientAuthorityResolver: resolver,
-		deliveryEnqueuer:           delivery,
-		recipientBatchSize:         16,
-	})
-	if err != nil {
-		t.Fatalf("delivery error = %v, want sender-only route failure isolated", err)
-	}
-	if !errors.Is(dispatch.activeErr, activeErr) {
-		t.Fatalf("active fallback error = %v, want %v", dispatch.activeErr, activeErr)
-	}
-	detail := postCommitFailureDetailFromError(dispatch.activeErr)
-	if detail.UID != "u1" || detail.UIDCount != 1 || detail.RecipientCount != 1 {
-		t.Fatalf("active fallback detail = %#v, want recipient-only diagnostics", detail)
-	}
-	if len(delivery.plans) != 1 || delivery.plans[0].RecipientCount() != 1 || delivery.plans[0].Targets[0].Target != recipientTarget {
-		t.Fatalf("delivery plans = %#v, want successful u1 delivery", delivery.plans)
-	}
-	if active.routedCalls != 0 || active.legacyCalls != 1 {
-		t.Fatalf("active calls = routed:%d legacy:%d, want one compatibility fallback", active.routedCalls, active.legacyCalls)
-	}
-	if resolver.batchCalls != 1 || !reflect.DeepEqual(resolver.batchUIDs, []string{"sender", "u1"}) {
-		t.Fatalf("resolver calls/uids = %d %#v, want one aligned sender+recipient snapshot", resolver.batchCalls, resolver.batchUIDs)
-	}
-}
-
-func TestDispatchRecipientSetRecipientRouteFailureSkipsDeliveryAndFallsBackActive(t *testing.T) {
-	recipientErr := errors.New("recipient route unavailable")
-	resolver := &alignedRecipientAuthorityResolverForRecipientTest{results: map[string]RecipientAuthorityResult{
-		"sender": {Target: recipientAuthorityTargetForTest(1, 10, 100)},
-		"u1":     {Err: recipientErr},
-	}}
-	delivery := &recordingRecipientPlanEnqueuerForRecipientTest{}
-	active := &recordingRoutedActiveAdmitterForRecipientTest{}
-
-	dispatch, err := dispatchRecipientSetResult(context.Background(), CommittedEnvelope{
-		MessageID: 1,
-		FromUID:   "sender",
-	}, []Recipient{{UID: "u1"}}, commitPorts{
-		activeAdmitter:             active,
-		recipientAuthorityResolver: resolver,
-		deliveryEnqueuer:           delivery,
-		recipientBatchSize:         16,
-	})
-	if !errors.Is(err, recipientErr) {
-		t.Fatalf("delivery error = %v, want recipient route error", err)
-	}
-	if dispatch.activeErr != nil {
-		t.Fatalf("active fallback error = %v, want nil", dispatch.activeErr)
-	}
-	if len(delivery.plans) != 0 {
-		t.Fatalf("delivery plans = %#v, want all-or-nothing skip", delivery.plans)
-	}
-	if active.routedCalls != 0 || active.legacyCalls != 1 {
-		t.Fatalf("active calls = routed:%d legacy:%d, want one compatibility fallback", active.routedCalls, active.legacyCalls)
-	}
-}
-
 func TestRecipientAuthorityFallbackResolverReusesDuplicateUIDTarget(t *testing.T) {
 	enqueuer := &recordingRecipientEnqueuerForRecipientTest{}
 	target := recipientAuthorityTargetForTest(1, 10, 100)
@@ -887,42 +431,30 @@ func TestRecipientAuthorityFallbackResolverReusesDuplicateUIDTarget(t *testing.T
 	}
 }
 
-func TestRecipientDispatchesDifferentAuthorityTargetsConcurrently(t *testing.T) {
+func TestRecipientDispatchKeepsDifferentAuthorityTargetsInOneBoundedPlan(t *testing.T) {
 	first := recipientAuthorityTargetForTest(1, 10, 100)
 	second := recipientAuthorityTargetForTest(2, 20, 200)
-	enqueuer := newBlockingRecipientEnqueuerForRecipientTest()
-	defer enqueuer.release()
-	errC := make(chan error, 1)
+	enqueuer := &recordingRecipientPlanEnqueuerForRecipientTest{}
 
-	go func() {
-		errC <- dispatchRecipientSet(context.Background(), CommittedEnvelope{MessageID: 1}, []Recipient{
-			{UID: "u1"},
-			{UID: "u2"},
-		}, commitPorts{
-			recipientAuthorityResolver: mapRecipientAuthorityResolverForRecipientTest{
-				targets: map[string]RecipientAuthorityTarget{"u1": first, "u2": second},
-			},
-			deliveryEnqueuer:             enqueuer,
-			recipientBatchSize:           1,
-			recipientDispatchConcurrency: 2,
-		})
-	}()
-
-	started := enqueuer.waitStartedTargets(t, 2)
-	if len(started) != 2 {
-		t.Fatalf("started targets = %d, want 2", len(started))
+	err := dispatchRecipientSet(context.Background(), CommittedEnvelope{MessageID: 1}, []Recipient{
+		{UID: "u1"},
+		{UID: "u2"},
+	}, commitPorts{
+		recipientAuthorityResolver: mapRecipientAuthorityResolverForRecipientTest{
+			targets: map[string]RecipientAuthorityTarget{"u1": first, "u2": second},
+		},
+		deliveryEnqueuer:   enqueuer,
+		recipientBatchSize: 2,
+	})
+	if err != nil {
+		t.Fatalf("dispatchRecipientSet() error = %v", err)
 	}
-	if !containsRecipientTargetForTest(started, first) || !containsRecipientTargetForTest(started, second) {
-		t.Fatalf("started targets = %#v, want both authority targets", started)
+	if len(enqueuer.plans) != 1 || len(enqueuer.plans[0].Targets) != 2 {
+		t.Fatalf("plans = %#v, want one plan with two exact targets", enqueuer.plans)
 	}
-	enqueuer.release()
-	select {
-	case err := <-errC:
-		if err != nil {
-			t.Fatalf("dispatchRecipientSet() error = %v", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatalf("dispatchRecipientSet() did not finish")
+	targets := []RecipientAuthorityTarget{enqueuer.plans[0].Targets[0].Target, enqueuer.plans[0].Targets[1].Target}
+	if !containsRecipientTargetForTest(targets, first) || !containsRecipientTargetForTest(targets, second) {
+		t.Fatalf("plan targets = %#v, want both authority targets", targets)
 	}
 }
 
@@ -940,9 +472,8 @@ func TestRecipientDispatchKeepsSameAuthorityTargetBatchesSequential(t *testing.T
 			recipientAuthorityResolver: mapRecipientAuthorityResolverForRecipientTest{
 				targets: map[string]RecipientAuthorityTarget{"u1": target, "u2": target},
 			},
-			deliveryEnqueuer:             enqueuer,
-			recipientBatchSize:           1,
-			recipientDispatchConcurrency: 2,
+			deliveryEnqueuer:   enqueuer,
+			recipientBatchSize: 1,
 		})
 	}()
 
@@ -1161,16 +692,26 @@ func (s *recordingSubscriberSourceForRecipientTest) NextSubscriberPage(_ context
 type recordingRecipientEnqueuerForRecipientTest struct {
 	mu      sync.Mutex
 	steps   *orderedStepsForDeliveryTest
-	targets []RecipientAuthorityTarget
-	batches []RecipientBatch
+	batches []recordedRecipientBatchForRecipientTest
 }
 
-func (r *recordingRecipientEnqueuerForRecipientTest) EnqueueRecipientBatch(_ context.Context, target RecipientAuthorityTarget, batch RecipientBatch) error {
+type recordedRecipientBatchForRecipientTest struct {
+	Event      CommittedEnvelope
+	Target     RecipientAuthorityTarget
+	Recipients []Recipient
+}
+
+func (r *recordingRecipientEnqueuerForRecipientTest) EnqueueRecipientDeliveryPlan(_ context.Context, plan onlinedelivery.RecipientDeliveryPlan) error {
 	r.steps.add("delivery")
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.targets = append(r.targets, target)
-	r.batches = append(r.batches, batch.Clone())
+	for _, target := range plan.Targets {
+		r.batches = append(r.batches, recordedRecipientBatchForRecipientTest{
+			Event:      plan.Event.Clone(),
+			Target:     target.Target,
+			Recipients: append([]Recipient(nil), target.Recipients...),
+		})
+	}
 	return nil
 }
 
@@ -1196,10 +737,9 @@ func (r *recordingRecipientEnqueuerForRecipientTest) byTarget() map[RecipientAut
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	out := make(map[RecipientAuthorityTarget][]string)
-	for i, batch := range r.batches {
-		target := r.targets[i]
+	for _, batch := range r.batches {
 		for _, recipient := range batch.Recipients {
-			out[target] = append(out[target], recipient.UID)
+			out[batch.Target] = append(out[batch.Target], recipient.UID)
 		}
 	}
 	return out
@@ -1208,31 +748,29 @@ func (r *recordingRecipientEnqueuerForRecipientTest) byTarget() map[RecipientAut
 type recordingRecipientDeliveryEnqueuerForRecipientTest struct {
 	mu      sync.Mutex
 	steps   *orderedStepsForDeliveryTest
-	targets []RecipientAuthorityTarget
-	batches []RecipientBatch
+	batches []recordedRecipientBatchForRecipientTest
 }
 
 type recordingRecipientPlanEnqueuerForRecipientTest struct {
-	legacyCalls int
-	plans       []RecipientDeliveryPlan
+	plans []onlinedelivery.RecipientDeliveryPlan
 }
 
-func (e *recordingRecipientPlanEnqueuerForRecipientTest) EnqueueRecipientBatch(_ context.Context, _ RecipientAuthorityTarget, _ RecipientBatch) error {
-	e.legacyCalls++
-	return nil
-}
-
-func (e *recordingRecipientPlanEnqueuerForRecipientTest) EnqueueRecipientDeliveryPlan(_ context.Context, plan RecipientDeliveryPlan) error {
+func (e *recordingRecipientPlanEnqueuerForRecipientTest) EnqueueRecipientDeliveryPlan(_ context.Context, plan onlinedelivery.RecipientDeliveryPlan) error {
 	e.plans = append(e.plans, plan.Clone())
 	return nil
 }
 
-func (e *recordingRecipientDeliveryEnqueuerForRecipientTest) EnqueueRecipientBatch(_ context.Context, target RecipientAuthorityTarget, batch RecipientBatch) error {
+func (e *recordingRecipientDeliveryEnqueuerForRecipientTest) EnqueueRecipientDeliveryPlan(_ context.Context, plan onlinedelivery.RecipientDeliveryPlan) error {
 	e.steps.add("delivery")
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.targets = append(e.targets, target)
-	e.batches = append(e.batches, batch.Clone())
+	for _, target := range plan.Targets {
+		e.batches = append(e.batches, recordedRecipientBatchForRecipientTest{
+			Event:      plan.Event.Clone(),
+			Target:     target.Target,
+			Recipients: append([]Recipient(nil), target.Recipients...),
+		})
+	}
 	return nil
 }
 
@@ -1258,10 +796,9 @@ func (e *recordingRecipientDeliveryEnqueuerForRecipientTest) byTarget() map[Reci
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	out := make(map[RecipientAuthorityTarget][]string)
-	for i, batch := range e.batches {
-		target := e.targets[i]
+	for _, batch := range e.batches {
 		for _, recipient := range batch.Recipients {
-			out[target] = append(out[target], recipient.UID)
+			out[batch.Target] = append(out[batch.Target], recipient.UID)
 		}
 	}
 	return out
@@ -1281,9 +818,11 @@ func newBlockingRecipientEnqueuerForRecipientTest() *blockingRecipientEnqueuerFo
 	return r
 }
 
-func (r *blockingRecipientEnqueuerForRecipientTest) EnqueueRecipientBatch(ctx context.Context, target RecipientAuthorityTarget, _ RecipientBatch) error {
+func (r *blockingRecipientEnqueuerForRecipientTest) EnqueueRecipientDeliveryPlan(ctx context.Context, plan onlinedelivery.RecipientDeliveryPlan) error {
 	r.mu.Lock()
-	r.targets = append(r.targets, target)
+	for _, target := range plan.Targets {
+		r.targets = append(r.targets, target.Target)
+	}
 	r.cond.Broadcast()
 	r.mu.Unlock()
 	select {
@@ -1313,6 +852,36 @@ func (r *blockingRecipientEnqueuerForRecipientTest) waitStartedTargets(t *testin
 		}
 		time.Sleep(time.Millisecond)
 	}
+}
+
+func recipientUIDs(recipients []Recipient) []string {
+	uids := make([]string, 0, len(recipients))
+	for _, recipient := range recipients {
+		if recipient.UID != "" {
+			uids = append(uids, recipient.UID)
+		}
+	}
+	return uids
+}
+
+type orderedStepsForDeliveryTest struct {
+	mu    sync.Mutex
+	steps []string
+}
+
+func (s *orderedStepsForDeliveryTest) add(step string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.steps = append(s.steps, step)
+}
+
+func (s *orderedStepsForDeliveryTest) snapshot() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.steps...)
 }
 
 func (r *blockingRecipientEnqueuerForRecipientTest) startedCount() int {
@@ -1346,55 +915,4 @@ func recipientAuthorityTargetForTest(hashSlot uint16, leader uint64, epoch uint6
 		RouteRevision:  uint64(hashSlot + 1000),
 		AuthorityEpoch: epoch,
 	}
-}
-
-type recordingActiveAdmitterForRecipientTest struct {
-	steps   *orderedStepsForDeliveryTest
-	err     error
-	batches []conversationactive.ActiveBatch
-}
-
-type recordingRoutedActiveAdmitterForRecipientTest struct {
-	legacyCalls int
-	routedCalls int
-	groups      []ConversationActiveTargetBatch
-	err         error
-}
-
-func (a *recordingRoutedActiveAdmitterForRecipientTest) AdmitActiveBatch(_ context.Context, _ conversationactive.ActiveBatch) error {
-	a.legacyCalls++
-	return a.err
-}
-
-func (a *recordingRoutedActiveAdmitterForRecipientTest) AdmitRoutedActiveBatches(_ context.Context, groups []ConversationActiveTargetBatch) error {
-	a.routedCalls++
-	a.groups = append([]ConversationActiveTargetBatch(nil), groups...)
-	for index := range a.groups {
-		a.groups[index].Batch.Recipients = append([]conversationactive.ActiveEntry(nil), groups[index].Batch.Recipients...)
-	}
-	return a.err
-}
-
-func activeRecipientUIDsForTarget(group ConversationActiveTargetBatch) []string {
-	uids := make([]string, 0, len(group.Batch.Recipients))
-	for _, recipient := range group.Batch.Recipients {
-		uids = append(uids, recipient.UID)
-	}
-	return uids
-}
-
-func (a *recordingActiveAdmitterForRecipientTest) AdmitActiveBatch(_ context.Context, batch conversationactive.ActiveBatch) error {
-	a.steps.add("active")
-	a.batches = append(a.batches, batch)
-	return a.err
-}
-
-func (a *recordingActiveAdmitterForRecipientTest) recipientUIDs() []string {
-	var out []string
-	for _, batch := range a.batches {
-		for _, recipient := range batch.Recipients {
-			out = append(out, recipient.UID)
-		}
-	}
-	return out
 }

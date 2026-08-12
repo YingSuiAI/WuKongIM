@@ -41,9 +41,7 @@ type Client struct {
 	inflight chan struct{}
 	// pending tracks SEND requests waiting for SENDACK frames from the reader loop.
 	pending *pendingTracker
-	// recvMu protects bounded overwrite semantics for recvCh.
-	recvMu sync.Mutex
-	// recvCh buffers inbound RECV frames for future public receive APIs.
+	// recvCh backpressures inbound RECV frames for future public receive APIs.
 	recvCh chan *frame.RecvPacket
 	// recvNotify closes when the current receive session becomes unavailable.
 	recvNotify chan struct{}
@@ -51,6 +49,15 @@ type Client struct {
 	recvErr    error
 	readerDone chan struct{}
 	writerDone chan struct{}
+}
+
+// InboundQueueSnapshot is a numeric view of the current bounded RECV queue.
+// It never exposes queued packets or mutable queue storage.
+type InboundQueueSnapshot struct {
+	// Depth is the number of queued RECV packets.
+	Depth int
+	// Capacity is the fixed RECV queue capacity.
+	Capacity int
 }
 
 // New creates a WKProto client with normalized configuration defaults.
@@ -291,6 +298,20 @@ func (c *Client) SendAsync(ctx context.Context, msg Message) (*SendFuture, error
 	return futures[0], nil
 }
 
+// TrySendAsync admits one message without waiting for the SEND admission lock,
+// writer queue, or inflight capacity. ErrSendQueueFull reports transient local
+// pressure; no pending SEND remains when admission is rejected.
+func (c *Client) TrySendAsync(msg Message) (*SendFuture, error) {
+	if c == nil {
+		return nil, ErrClosed
+	}
+	item, err := c.prepareSend(msg)
+	if err != nil {
+		return nil, err
+	}
+	return c.tryAdmitPreparedSend(item)
+}
+
 // ReadFrame waits for the next inbound data frame exposed by this client.
 func (c *Client) ReadFrame(ctx context.Context) (frame.Frame, error) {
 	if c == nil {
@@ -324,6 +345,17 @@ func (c *Client) ReadFrame(ctx context.Context) (frame.Frame, error) {
 		}
 		return f, err
 	}
+}
+
+// InboundQueueSnapshot reports current inbound RECV queue occupancy.
+func (c *Client) InboundQueueSnapshot() InboundQueueSnapshot {
+	if c == nil {
+		return InboundQueueSnapshot{}
+	}
+	c.mu.Lock()
+	recvCh := c.recvCh
+	c.mu.Unlock()
+	return InboundQueueSnapshot{Depth: len(recvCh), Capacity: cap(recvCh)}
 }
 
 func (c *Client) readFrameFromSnapshot(ctx context.Context, recvCh <-chan *frame.RecvPacket, recvNotify <-chan struct{}) (frame.Frame, error) {
@@ -626,6 +658,66 @@ func (c *Client) admitPreparedSends(ctx context.Context, prepared []preparedSend
 		c.observeSendQueue("accepted")
 	}
 	return futures, nil
+}
+
+func (c *Client) tryAdmitPreparedSend(item preparedSend) (*SendFuture, error) {
+	if !c.sendMu.TryLock() {
+		c.observeSendQueue("full")
+		return nil, ErrSendQueueFull
+	}
+	defer c.sendMu.Unlock()
+
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return nil, ErrClosed
+	}
+	conn := c.conn
+	pending := c.pending
+	session := c.session
+	if conn == nil || pending == nil {
+		c.mu.Unlock()
+		return nil, ErrNotConnected
+	}
+	c.mu.Unlock()
+
+	if len(c.writeCh) >= cap(c.writeCh) {
+		c.observeSendQueue("full")
+		return nil, ErrSendQueueFull
+	}
+	select {
+	case c.inflight <- struct{}{}:
+	default:
+		c.observeSendQueue("full")
+		return nil, ErrSendQueueFull
+	}
+
+	entry, err := pending.addWithFinish(item.key, c.cfg.AckTimeout, c.releaseInflight)
+	if err != nil {
+		c.releaseInflight()
+		return nil, err
+	}
+	req := writeRequest{
+		kind:    writeKindSend,
+		msg:     item.msg,
+		pkt:     item.pkt,
+		entry:   entry,
+		conn:    conn,
+		pending: pending,
+		session: session,
+	}
+	select {
+	case c.writeCh <- req:
+		c.observeSendQueue("accepted")
+		return &SendFuture{done: entry.done}, nil
+	case <-c.closeCh:
+		pending.fail(entry, ErrClosed)
+		return nil, ErrClosed
+	default:
+		pending.fail(entry, ErrSendQueueFull)
+		c.observeSendQueue("full")
+		return nil, ErrSendQueueFull
+	}
 }
 
 func (c *Client) admitPreparedBatch(ctx context.Context, prepared []preparedSend, waiter *sendBatchWaiter) error {

@@ -10,6 +10,7 @@ require (
 	github.com/alibabacloud-go/darabonba-openapi/v2 v2.2.2
 	github.com/alibabacloud-go/ecs-20140526/v7 v7.9.1
 	github.com/alibabacloud-go/ims-20190815/v4 v4.4.1
+	github.com/alibabacloud-go/quotas-20200510/v2 v2.2.2
 	github.com/alibabacloud-go/ram-20150501/v2 v2.2.1
 	github.com/alibabacloud-go/sts-20150401/v2 v2.1.0
 	github.com/alibabacloud-go/tea v1.5.1
@@ -43,6 +44,7 @@ require (
 	github.com/spf13/pflag v1.0.10
 	github.com/stretchr/testify v1.11.1
 	github.com/valyala/bytebufferpool v1.0.0
+	github.com/yuin/goldmark v1.8.2
 	go.etcd.io/raft/v3 v3.6.0
 	go.uber.org/zap v1.27.0
 	go.yaml.in/yaml/v3 v3.0.4

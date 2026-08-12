@@ -6,6 +6,7 @@ import (
 	"github.com/WuKongIM/WuKongIM/pkg/cluster/routing"
 	metadb "github.com/WuKongIM/WuKongIM/pkg/db/meta"
 	"github.com/WuKongIM/WuKongIM/pkg/slot/multiraft"
+	slotproxy "github.com/WuKongIM/WuKongIM/pkg/slot/proxy"
 )
 
 type slotProxyRPCHandlerFunc func(context.Context, []byte) ([]byte, error)
@@ -178,6 +179,14 @@ func (n *Node) GetChannelMetadataAuthoritative(ctx context.Context, channelID st
 	return n.defaultSlotProxy.GetChannelForPermission(ctx, channelID, channelType)
 }
 
+// GetDeviceMetadataAuthoritative reads one device credential from the current Slot leader.
+func (n *Node) GetDeviceMetadataAuthoritative(ctx context.Context, uid string, deviceFlag int64) (metadb.Device, error) {
+	if n == nil || n.defaultSlotProxy == nil {
+		return metadb.Device{}, ErrNotStarted
+	}
+	return n.defaultSlotProxy.GetDevice(ctx, uid, deviceFlag)
+}
+
 // CreateChannelMetadataStrict applies a create-only mutation at the Slot leader.
 func (n *Node) CreateChannelMetadataStrict(ctx context.Context, channel metadb.Channel) error {
 	if n == nil || n.defaultSlotProxy == nil {
@@ -216,6 +225,19 @@ func (n *Node) HasChannelSubscribersAuthoritative(ctx context.Context, channelID
 		return false, ErrNotStarted
 	}
 	return n.defaultSlotProxy.HasChannelSubscribers(ctx, channelID, channelType)
+}
+
+// ReadPermissionMetadataBatchAuthoritative reads raw send-permission facts in
+// Slot-grouped authoritative batches while preserving request alignment.
+func (n *Node) ReadPermissionMetadataBatchAuthoritative(ctx context.Context, reads []slotproxy.PermissionMetadataRead) []slotproxy.PermissionMetadataReadResult {
+	if n == nil || n.defaultSlotProxy == nil {
+		results := make([]slotproxy.PermissionMetadataReadResult, len(reads))
+		for i := range results {
+			results[i].Err = ErrNotStarted
+		}
+		return results
+	}
+	return n.defaultSlotProxy.ReadPermissionMetadataBatch(ctx, reads)
 }
 
 // AddChannelSubscribersCounted applies a set add and returns its durable change count.

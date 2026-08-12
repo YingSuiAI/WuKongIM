@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "tests": [
+    {
+      "id": "chat-lifecycle-skill-contracts",
+      "skill": "wukongim-chat-lifecycle",
+      "arguments": [
+        "go",
+        "test",
+        "./scripts/skillcontracts",
+        "-run",
+        "^TestChatLifecycleProjectSkillKeepsPaidAuthorityAndOperationsSeparate$",
+        "-count=1"
+      ],
+      "timeout_seconds": 15
+    },
+    {
+      "id": "cloud-analysis-skill-contracts",
+      "skill": "wukongim-cloud-analysis",
+      "arguments": [
+        "go",
+        "test",
+        "./scripts/skillcontracts",
+        "-run",
+        "^TestCloudAnalysisSkill",
+        "-count=1"
+      ],
+      "timeout_seconds": 15
+    },
+    {
+      "id": "operations-skill-contracts",
+      "skill": "wukongim-ops",
+      "arguments": [
+        "go",
+        "test",
+        "./scripts/skillcontracts",
+        "-run",
+        "^TestOperationsSkillKeepsDiagnosisReadOnlyAndEvidenceOrdered$",
+        "-count=1"
+      ],
+      "timeout_seconds": 10
+    }
+  ]
+}

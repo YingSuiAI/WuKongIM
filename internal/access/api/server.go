@@ -47,7 +47,7 @@ type GatewayAddresses struct {
 // ChannelRuntimeBenchController exposes benchmark-only channel runtime controls.
 type ChannelRuntimeBenchController interface {
 	Snapshot(context.Context, model.ChannelRuntimeQuery) (model.ChannelRuntimeSnapshot, error)
-	Probe(context.Context, model.ChannelRuntimeQuery) (model.ChannelRuntimeProbeResult, error)
+	Probe(context.Context, model.ChannelRuntimeProbeQuery) (model.ChannelRuntimeProbeResult, error)
 	Evict(context.Context, model.ChannelRuntimeQuery) (model.ChannelRuntimeEvictResult, error)
 }
 
@@ -91,21 +91,25 @@ type MessageUsecase interface {
 	Send(context.Context, messageusecase.SendCommand) (messageusecase.SendResult, error)
 	AppendMessageEvent(context.Context, messageusecase.MessageEventAppend) (messageusecase.MessageEventAppendResult, error)
 	SyncChannelMessages(context.Context, messageusecase.SyncChannelMessagesQuery) (messageusecase.SyncChannelMessagesResult, error)
+	SyncChannelMessagesBatch(context.Context, messageusecase.SyncChannelMessagesBatchQuery) (messageusecase.SyncChannelMessagesBatchResult, error)
 }
 
 // CMDSyncUsecase coordinates compatible durable command-message sync routes.
 type CMDSyncUsecase interface {
 	Sync(context.Context, cmdsyncusecase.SyncQuery) (cmdsyncusecase.SyncResult, error)
 	SyncAck(context.Context, cmdsyncusecase.SyncAckCommand) error
+	Bind(context.Context, cmdsyncusecase.BindCommand) error
+	Unbind(context.Context, cmdsyncusecase.UnbindCommand) error
 }
 
 // ConversationUsecase coordinates compatible conversation list and sync routes.
 type ConversationUsecase interface {
 	List(context.Context, conversationusecase.ListRequest) (conversationusecase.ListResult, error)
-	Sync(context.Context, conversationusecase.SyncQuery) (conversationusecase.SyncResult, error)
+	Retry(context.Context, conversationusecase.RetryRequest) (conversationusecase.ListResult, error)
 	ClearUnread(context.Context, conversationusecase.ClearUnreadCommand) error
 	SetUnread(context.Context, conversationusecase.SetUnreadCommand) error
 	DeleteConversation(context.Context, conversationusecase.DeleteConversationCommand) error
+	ActivateConversation(context.Context, conversationusecase.ActivateConversationCommand) error
 }
 
 // ConversationListObservation captures one /conversation/list request result.
@@ -114,46 +118,21 @@ type ConversationListObservation struct {
 	Result string
 	// Duration is the end-to-end handler latency.
 	Duration time.Duration
-	// ReturnedItems is the number of conversation rows returned to the client.
+	// ScannedCandidates is the number of membership rows consumed by the page.
+	ScannedCandidates int
+	// ReturnedItems is the number of transient conversation items returned.
 	ReturnedItems int
-	// SparseItems is the number of returned rows using sparse active ordering.
-	SparseItems int
-	// LastMessageLoads is the number of last-message loads attempted for returned rows.
-	LastMessageLoads int
-	// LastMessageErrors is the number of last-message load errors observed by the request.
-	LastMessageErrors int
-	// ActiveIndexStaleSkips is the number of stale active-index rows skipped by the request.
-	ActiveIndexStaleSkips int
-	// More reports whether the active page has another page after this response.
-	More bool
-}
-
-// ConversationSyncObservation captures one /conversation/sync request result.
-type ConversationSyncObservation struct {
-	// Result is a low-cardinality request result label.
-	Result string
-	// Duration is the end-to-end handler latency.
-	Duration time.Duration
-	// OnlyUnread reports whether the request asked for unread conversations only.
-	OnlyUnread bool
-	// WithRecents reports whether the request asked for recent messages.
-	WithRecents bool
-	// ReturnedItems is the number of conversation rows returned to the client.
-	ReturnedItems int
-	// OverlayItems is the number of client-known overlay candidates before sync filtering.
-	OverlayItems int
-	// RecentLoadDuration records how long recent-message loading took when requested.
-	RecentLoadDuration time.Duration
+	// Deletes is the number of tombstone or terminal-channel keys returned.
+	Deletes int
+	// Unresolved is the number of retryable channel keys returned.
+	Unresolved int
+	// Done reports whether this membership-directory pass is complete.
+	Done bool
 }
 
 // ConversationListObserver receives performance observations for conversation list reads.
 type ConversationListObserver interface {
 	ObserveConversationList(ConversationListObservation)
-}
-
-// ConversationSyncObserver receives performance observations for conversation sync reads.
-type ConversationSyncObserver interface {
-	ObserveConversationSync(ConversationSyncObservation)
 }
 
 // ChannelUsecase coordinates compatible channel metadata and member mutations.
@@ -227,8 +206,10 @@ type Options struct {
 	Maintenance func() bool
 	// BenchEnabled exposes /bench/v1/* routes for controlled benchmark runs.
 	BenchEnabled bool
-	// BenchToken optionally requires an exact bearer capability on every /bench/v1/* route.
+	// BenchToken optionally requires one exact bearer capability on every /bench/v1/* and /debug/* route.
 	BenchToken string
+	// ServiceToken requires an exact bearer capability on mutating service routes.
+	ServiceToken string
 	// BenchMaxBatchSize limits top-level records accepted by one bench mutation request.
 	BenchMaxBatchSize int
 	// BenchMaxPayloadBytes limits bench mutation JSON request bodies in bytes.
@@ -255,8 +236,6 @@ type Options struct {
 	Conversations ConversationUsecase
 	// ConversationListObserver records conversation list read performance.
 	ConversationListObserver ConversationListObserver
-	// ConversationSyncObserver records conversation sync read performance.
-	ConversationSyncObserver ConversationSyncObserver
 	// LegacyRouteExternal is the default public gateway address set returned by /route APIs.
 	LegacyRouteExternal LegacyRouteAddresses
 	// LegacyRouteIntranet is the default intranet gateway address set returned by /route APIs.
@@ -269,8 +248,8 @@ type Options struct {
 	DebugAPIEnabled bool
 	// DebugConfig returns a bounded configuration snapshot for /debug/config.
 	DebugConfig func() any
-	// DebugCluster returns a bounded cluster snapshot for /debug/cluster.
-	DebugCluster func() any
+	// DebugCluster returns a bounded live cluster snapshot for /debug/cluster.
+	DebugCluster func(context.Context) (any, error)
 	// Diagnostics reads the node-local diagnostics store for debug query endpoints.
 	Diagnostics DiagnosticsReader
 	// GoroutineSnapshot returns the current goroutine registry snapshot. Nil disables the endpoint.
@@ -281,42 +260,42 @@ type Options struct {
 
 // Server exposes health, readiness, and the minimum bench/v1 target surface for wukongim.
 type Server struct {
-	mu                       sync.RWMutex
-	engine                   *gin.Engine
-	httpServer               *http.Server
-	listener                 net.Listener
-	listenAddr               string
-	addr                     string
-	readyz                   func(context.Context) (bool, any)
-	maintenance              func() bool
-	benchEnabled             bool
-	benchToken               string
-	benchMaxBatchSize        int
-	benchMaxPayloadBytes     int64
-	gateway                  GatewayAddresses
-	benchRuntime             ChannelRuntimeBenchController
-	benchPresence            PresenceBenchController
-	benchData                BenchData
-	top                      TopSnapshotProvider
-	channels                 ChannelUsecase
-	users                    UserUsecase
-	messages                 MessageUsecase
-	cmdSync                  CMDSyncUsecase
-	conversations            ConversationUsecase
-	conversationObserver     ConversationListObserver
-	conversationSyncObserver ConversationSyncObserver
-	legacyRouteExternal      LegacyRouteAddresses
-	legacyRouteIntranet      LegacyRouteAddresses
-	legacyRouteNodes         map[uint64]LegacyRouteNodeAddresses
-	metricsHandler           http.Handler
-	debugAPIEnabled          bool
-	debugConfig              func() any
-	debugCluster             func() any
-	goroutineSnapshot        func() any
-	diagnostics              DiagnosticsReader
-	logger                   wklog.Logger
-	counts                   map[string]int
-	started                  bool
+	mu                   sync.RWMutex
+	engine               *gin.Engine
+	httpServer           *http.Server
+	listener             net.Listener
+	listenAddr           string
+	addr                 string
+	readyz               func(context.Context) (bool, any)
+	maintenance          func() bool
+	benchEnabled         bool
+	benchToken           string
+	serviceToken         string
+	benchMaxBatchSize    int
+	benchMaxPayloadBytes int64
+	gateway              GatewayAddresses
+	benchRuntime         ChannelRuntimeBenchController
+	benchPresence        PresenceBenchController
+	benchData            BenchData
+	top                  TopSnapshotProvider
+	channels             ChannelUsecase
+	users                UserUsecase
+	messages             MessageUsecase
+	cmdSync              CMDSyncUsecase
+	conversations        ConversationUsecase
+	conversationObserver ConversationListObserver
+	legacyRouteExternal  LegacyRouteAddresses
+	legacyRouteIntranet  LegacyRouteAddresses
+	legacyRouteNodes     map[uint64]LegacyRouteNodeAddresses
+	metricsHandler       http.Handler
+	debugAPIEnabled      bool
+	debugConfig          func() any
+	debugCluster         func(context.Context) (any, error)
+	goroutineSnapshot    func() any
+	diagnostics          DiagnosticsReader
+	logger               wklog.Logger
+	counts               map[string]int
+	started              bool
 }
 
 // New creates a minimal internal API server.
@@ -328,44 +307,56 @@ func New(opts Options) *Server {
 	engine.Use(openCORSMiddleware())
 	engine.HandleMethodNotAllowed = true
 	s := &Server{
-		engine:                   engine,
-		listenAddr:               strings.TrimSpace(opts.ListenAddr),
-		readyz:                   opts.Readyz,
-		maintenance:              opts.Maintenance,
-		benchEnabled:             opts.BenchEnabled,
-		benchToken:               strings.TrimSpace(opts.BenchToken),
-		benchMaxBatchSize:        opts.BenchMaxBatchSize,
-		benchMaxPayloadBytes:     opts.BenchMaxPayloadBytes,
-		gateway:                  opts.Gateway,
-		benchRuntime:             opts.BenchRuntime,
-		benchPresence:            opts.BenchPresence,
-		benchData:                opts.BenchData,
-		top:                      opts.Top,
-		channels:                 opts.Channels,
-		users:                    opts.Users,
-		messages:                 opts.Messages,
-		cmdSync:                  opts.CMDSync,
-		conversations:            opts.Conversations,
-		conversationObserver:     opts.ConversationListObserver,
-		conversationSyncObserver: opts.ConversationSyncObserver,
-		legacyRouteExternal:      opts.LegacyRouteExternal,
-		legacyRouteIntranet:      opts.LegacyRouteIntranet,
-		legacyRouteNodes:         cloneLegacyRouteNodes(opts.LegacyRouteNodes),
-		metricsHandler:           opts.MetricsHandler,
-		debugAPIEnabled:          opts.DebugAPIEnabled,
-		debugConfig:              opts.DebugConfig,
-		debugCluster:             opts.DebugCluster,
-		goroutineSnapshot:        opts.GoroutineSnapshot,
-		diagnostics:              opts.Diagnostics,
-		logger:                   opts.Logger,
-		counts:                   map[string]int{},
+		engine:               engine,
+		listenAddr:           strings.TrimSpace(opts.ListenAddr),
+		readyz:               opts.Readyz,
+		maintenance:          opts.Maintenance,
+		benchEnabled:         opts.BenchEnabled,
+		benchToken:           strings.TrimSpace(opts.BenchToken),
+		serviceToken:         strings.TrimSpace(opts.ServiceToken),
+		benchMaxBatchSize:    opts.BenchMaxBatchSize,
+		benchMaxPayloadBytes: opts.BenchMaxPayloadBytes,
+		gateway:              opts.Gateway,
+		benchRuntime:         opts.BenchRuntime,
+		benchPresence:        opts.BenchPresence,
+		benchData:            opts.BenchData,
+		top:                  opts.Top,
+		channels:             opts.Channels,
+		users:                opts.Users,
+		messages:             opts.Messages,
+		cmdSync:              opts.CMDSync,
+		conversations:        opts.Conversations,
+		conversationObserver: opts.ConversationListObserver,
+		legacyRouteExternal:  opts.LegacyRouteExternal,
+		legacyRouteIntranet:  opts.LegacyRouteIntranet,
+		legacyRouteNodes:     cloneLegacyRouteNodes(opts.LegacyRouteNodes),
+		metricsHandler:       opts.MetricsHandler,
+		debugAPIEnabled:      opts.DebugAPIEnabled,
+		debugConfig:          opts.DebugConfig,
+		debugCluster:         opts.DebugCluster,
+		goroutineSnapshot:    opts.GoroutineSnapshot,
+		diagnostics:          opts.Diagnostics,
+		logger:               opts.Logger,
+		counts:               map[string]int{},
 	}
 	if s.logger == nil {
 		s.logger = wklog.NewNop()
 	}
+	s.engine.Use(s.debugBearerMiddleware())
 	s.engine.Use(s.restoreMaintenanceMiddleware())
 	s.registerRoutes()
 	return s
+}
+
+func (s *Server) debugBearerMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		path := c.Request.URL.Path
+		if s == nil || s.benchToken == "" || (path != "/debug" && !strings.HasPrefix(path, "/debug/")) {
+			c.Next()
+			return
+		}
+		s.requireBenchToken(c)
+	}
 }
 
 func (s *Server) restoreMaintenanceMiddleware() gin.HandlerFunc {
@@ -573,6 +564,17 @@ func (s *Server) requireBenchToken(c *gin.Context) {
 	c.Next()
 }
 
+func (s *Server) requireServiceToken(c *gin.Context) {
+	provided, ok := strings.CutPrefix(c.GetHeader("Authorization"), "Bearer ")
+	expectedDigest := sha256.Sum256([]byte(s.serviceToken))
+	providedDigest := sha256.Sum256([]byte(provided))
+	if s.serviceToken == "" || !ok || provided == "" || subtle.ConstantTimeCompare(expectedDigest[:], providedDigest[:]) != 1 {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "service bearer token required"})
+		return
+	}
+	c.Next()
+}
+
 func (s *Server) registerPProfRoutes() {
 	s.engine.GET("/debug/goroutines", s.handleDebugGoroutines)
 	s.engine.GET("/debug/goroutines/summary", s.handleDebugGoroutinesSummary)
@@ -678,7 +680,7 @@ func (s *Server) handleBenchCapabilities(c *gin.Context) {
 			ChannelRuntimeEvict:            s.benchRuntime != nil,
 			ChannelRuntimeFaults:           false,
 			ChannelRuntimeActivate:         false,
-			ChannelTypes:                   []string{"group"},
+			ChannelTypes:                   []string{"person", "group"},
 		},
 		Limits: capabilitiesLimits{
 			MaxBatchSize:    s.benchMaxBatchSize,

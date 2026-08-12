@@ -16,7 +16,7 @@ hooks, channel append ordering, or crash replay.
   -> worker sends one JSON array to `{HTTPAddr}?event=msg.notify`
 
 `msg.offline`
-  -> channelappend recipient processor classifies offline recipients
+  -> canonical Online Delivery classifies offline recipients after presence
   -> batch observer passes bounded UID chunks to the app adapter
   -> webhook runtime admits `OfflineMessage` chunks into a sharded mailbox
   -> worker sends one JSON object to `{HTTPAddr}?event=msg.offline`
@@ -31,7 +31,7 @@ hooks, channel append ordering, or crash replay.
 
 Webhook admission is bounded and best-effort. Queue-full, closed, canceled, and
 retry-exhausted events are observed and dropped. Webhook delivery never changes
-SENDACK success, durable append success, conversation-active admission, or owner
+SENDACK success, durable append success, membership state, or owner
 delivery.
 
 Large offline fanout must use recipient batches. Do not enqueue one webhook item

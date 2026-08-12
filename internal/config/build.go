@@ -542,6 +542,7 @@ func buildConfig(values map[string]string) (app.Config, error) {
 		cfg.Cluster.Storage.CommitShards = shards
 	}
 	cfg.API.ListenAddr = configValue(values, "WK_API_LISTEN_ADDR")
+	cfg.API.ServiceToken = configValue(values, "WK_API_SERVICE_TOKEN")
 	cfg.API.ExternalTCPAddr = configValue(values, "WK_EXTERNAL_TCPADDR")
 	cfg.API.ExternalWSAddr = configValue(values, "WK_EXTERNAL_WSADDR")
 	cfg.API.ExternalWSSAddr = configValue(values, "WK_EXTERNAL_WSSADDR")
@@ -972,116 +973,6 @@ func buildConfig(values map[string]string) (app.Config, error) {
 		}
 		cfg.Presence.RouteTTL = ttl
 	}
-	if raw := configValue(values, "WK_CONVERSATION_MAX_LAST_MESSAGE_CONCURRENCY"); raw != "" {
-		limit, err := parseInt("WK_CONVERSATION_MAX_LAST_MESSAGE_CONCURRENCY", raw)
-		if err != nil {
-			return app.Config{}, err
-		}
-		if limit < 0 {
-			return app.Config{}, fmt.Errorf("parse WK_CONVERSATION_MAX_LAST_MESSAGE_CONCURRENCY: value must be >= 0")
-		}
-		cfg.Conversation.MaxLastMessageConcurrency = limit
-	}
-	if raw := configValue(values, "WK_CONVERSATION_AUTHORITY_CACHE_MAX_ROWS_PER_UID"); raw != "" {
-		limit, err := parseInt("WK_CONVERSATION_AUTHORITY_CACHE_MAX_ROWS_PER_UID", raw)
-		if err != nil {
-			return app.Config{}, err
-		}
-		if limit <= 0 {
-			return app.Config{}, fmt.Errorf("parse WK_CONVERSATION_AUTHORITY_CACHE_MAX_ROWS_PER_UID: value must be > 0")
-		}
-		cfg.Conversation.AuthorityCacheMaxRowsPerUID = limit
-	}
-	if raw := configValue(values, "WK_CONVERSATION_AUTHORITY_CACHE_MAX_ROWS"); raw != "" {
-		limit, err := parseInt("WK_CONVERSATION_AUTHORITY_CACHE_MAX_ROWS", raw)
-		if err != nil {
-			return app.Config{}, err
-		}
-		if limit <= 0 {
-			return app.Config{}, fmt.Errorf("parse WK_CONVERSATION_AUTHORITY_CACHE_MAX_ROWS: value must be > 0")
-		}
-		cfg.Conversation.AuthorityCacheMaxRows = limit
-	}
-	if raw := configValue(values, "WK_CONVERSATION_AUTHORITY_LIST_DB_WINDOW_MAX"); raw != "" {
-		limit, err := parseInt("WK_CONVERSATION_AUTHORITY_LIST_DB_WINDOW_MAX", raw)
-		if err != nil {
-			return app.Config{}, err
-		}
-		if limit <= 0 {
-			return app.Config{}, fmt.Errorf("parse WK_CONVERSATION_AUTHORITY_LIST_DB_WINDOW_MAX: value must be > 0")
-		}
-		cfg.Conversation.AuthorityListDBWindowMax = limit
-	}
-	if raw := configValue(values, "WK_CONVERSATION_AUTHORITY_HANDOFF_TIMEOUT"); raw != "" {
-		timeout, err := parseDuration("WK_CONVERSATION_AUTHORITY_HANDOFF_TIMEOUT", raw)
-		if err != nil {
-			return app.Config{}, err
-		}
-		if timeout <= 0 {
-			return app.Config{}, fmt.Errorf("parse WK_CONVERSATION_AUTHORITY_HANDOFF_TIMEOUT: value must be > 0")
-		}
-		cfg.Conversation.AuthorityHandoffTimeout = timeout
-	}
-	if raw := configValue(values, "WK_CONVERSATION_AUTHORITY_ACTIVE_COOLDOWN"); raw != "" {
-		cooldown, err := parseDuration("WK_CONVERSATION_AUTHORITY_ACTIVE_COOLDOWN", raw)
-		if err != nil {
-			return app.Config{}, err
-		}
-		if cooldown <= 0 {
-			return app.Config{}, fmt.Errorf("parse WK_CONVERSATION_AUTHORITY_ACTIVE_COOLDOWN: value must be > 0")
-		}
-		cfg.Conversation.AuthorityActiveCooldown = cooldown
-	}
-	if raw := configValue(values, "WK_CONVERSATION_AUTHORITY_FLUSH_INTERVAL"); raw != "" {
-		interval, err := parseDuration("WK_CONVERSATION_AUTHORITY_FLUSH_INTERVAL", raw)
-		if err != nil {
-			return app.Config{}, err
-		}
-		if interval <= 0 {
-			return app.Config{}, fmt.Errorf("parse WK_CONVERSATION_AUTHORITY_FLUSH_INTERVAL: value must be > 0")
-		}
-		cfg.Conversation.AuthorityFlushInterval = interval
-	}
-	if raw := configValue(values, "WK_CONVERSATION_AUTHORITY_FLUSH_TIMEOUT"); raw != "" {
-		timeout, err := parseDuration("WK_CONVERSATION_AUTHORITY_FLUSH_TIMEOUT", raw)
-		if err != nil {
-			return app.Config{}, err
-		}
-		if timeout <= 0 {
-			return app.Config{}, fmt.Errorf("parse WK_CONVERSATION_AUTHORITY_FLUSH_TIMEOUT: value must be > 0")
-		}
-		cfg.Conversation.AuthorityFlushTimeout = timeout
-	}
-	if raw := configValue(values, "WK_CONVERSATION_AUTHORITY_FLUSH_BATCH_ROWS"); raw != "" {
-		rows, err := parseInt("WK_CONVERSATION_AUTHORITY_FLUSH_BATCH_ROWS", raw)
-		if err != nil {
-			return app.Config{}, err
-		}
-		if rows <= 0 {
-			return app.Config{}, fmt.Errorf("parse WK_CONVERSATION_AUTHORITY_FLUSH_BATCH_ROWS: value must be > 0")
-		}
-		cfg.Conversation.AuthorityFlushBatchRows = rows
-	}
-	if raw := configValue(values, "WK_CONVERSATION_AUTHORITY_ADMIT_BATCH_ROWS"); raw != "" {
-		rows, err := parseInt("WK_CONVERSATION_AUTHORITY_ADMIT_BATCH_ROWS", raw)
-		if err != nil {
-			return app.Config{}, err
-		}
-		if rows <= 0 {
-			return app.Config{}, fmt.Errorf("parse WK_CONVERSATION_AUTHORITY_ADMIT_BATCH_ROWS: value must be > 0")
-		}
-		cfg.Conversation.AuthorityAdmitBatchRows = rows
-	}
-	if raw := configValue(values, "WK_CONVERSATION_AUTHORITY_ADMIT_CONCURRENCY"); raw != "" {
-		concurrency, err := parseInt("WK_CONVERSATION_AUTHORITY_ADMIT_CONCURRENCY", raw)
-		if err != nil {
-			return app.Config{}, err
-		}
-		if concurrency <= 0 {
-			return app.Config{}, fmt.Errorf("parse WK_CONVERSATION_AUTHORITY_ADMIT_CONCURRENCY: value must be > 0")
-		}
-		cfg.Conversation.AuthorityAdmitConcurrency = concurrency
-	}
 	if raw := configValue(values, "WK_CHANNEL_LARGE_GROUP_SUBSCRIBER_THRESHOLD"); raw != "" {
 		threshold, err := parseInt("WK_CHANNEL_LARGE_GROUP_SUBSCRIBER_THRESHOLD", raw)
 		if err != nil {
@@ -1200,6 +1091,7 @@ func buildConfig(values map[string]string) (app.Config, error) {
 		cfg.Delivery.RecipientWorkerConcurrency = concurrency
 	}
 	cfg.Webhook.HTTPAddr = configValue(values, "WK_WEBHOOK_HTTP_ADDR")
+	cfg.Webhook.SigningSecret = configValue(values, "WK_WEBHOOK_SIGNING_SECRET")
 	if raw := configValue(values, "WK_WEBHOOK_FOCUS_EVENTS"); raw != "" {
 		focusEvents, err := parseStringList("WK_WEBHOOK_FOCUS_EVENTS", raw)
 		if err != nil {

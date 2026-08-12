@@ -150,8 +150,24 @@ type Envelope struct {
 	Message raftpb.Message
 }
 
+// Future exposes a caller-cancelable wait for the terminal result. Runtime
+// dispatch closes the wait channel before invoking the completion observer, so
+// Wait may return before that observer finishes.
 type Future interface {
 	Wait(ctx context.Context) (Result, error)
+}
+
+// FutureCompletionObserver receives the runtime-owned terminal result of an
+// accepted proposal. Implementations must not block the Slot worker.
+type FutureCompletionObserver interface {
+	ObserveFutureCompletion(Result, error)
+}
+
+// CompletionFuture supports one bounded observer that follows the accepted
+// proposal to terminal runtime resolution independently of caller cancellation.
+type CompletionFuture interface {
+	Future
+	ObserveCompletion(FutureCompletionObserver) bool
 }
 
 type Result struct {

@@ -13,17 +13,19 @@ management requests forward to the channel usecase supplied by the composition
 root, `/user*` requests forward to the user usecase, and compatible message
 send and channel-message sync requests forward to the message usecase.
 `/message/sync` and `/message/syncack` requests forward to the CMD sync
-usecase. `/conversation/list` and `/conversation/sync` requests forward to the
-conversation usecase and keep ordering, cursor rules, sync candidate selection,
-and message reads out of the HTTP layer. When the composition root provides a
+usecase. `/conversation/list` and `/conversation/retry` requests forward to the
+conversation usecase and keep directory ordering, cursor rules, hydration, and
+badge calculation out of the HTTP layer. When the composition root provides a
 benchmark data writer,
 `/bench/v1/channels`, `/bench/v1/channels/subscribers`, and
 `/bench/v1/channels/subscribers/remove` forward setup or churn membership
 mutations through that writer; for `cmd/wukongim` delivery benchmarks the
 writer persists real cluster Slot metadata.
 When `bench.api_token` is configured, every `/bench/v1/*` request must carry
-the exact `Authorization: Bearer <token>` capability; health, readiness,
-metrics, debug, and product routes remain outside that middleware.
+the exact `Authorization: Bearer <token>` capability. The same capability
+protects every enabled `/debug` and `/debug/*` route, including pprof; health,
+readiness, metrics, and product routes remain outside that middleware. An empty
+token retains the existing controlled-environment debug compatibility mode.
 
 Controller restore maintenance places a node-local middleware in front of all
 product, route-discovery, and benchmark endpoints. It returns HTTP `503` with
@@ -64,13 +66,17 @@ POST /message/send
 POST /message/event
 POST /message/sync
 POST /message/syncack
+POST /message/cmd/bind
+POST /message/cmd/unbind
 POST /conversation/list
-POST /conversation/sync
+POST /conversation/retry
 POST /conversations/clearUnread
 POST /conversations/setUnread
 POST /conversations/delete
+POST /conversations/activate
 POST /channel
 POST /channel/messagesync
+POST /channel/messagesyncbatch
 POST /channel/info
 POST /channel/delete
 POST /channel/subscriber_add
@@ -116,9 +122,11 @@ views can explain why the alert fired without scraping Prometheus metrics.
 
 All `/debug...` routes are enabled only when the composition root passes
 `DebugAPIEnabled=true`. In `cmd/wukongim`, that switch is
-`WK_DEBUG_API_ENABLE`. Diagnostics debug routes also require a diagnostics reader
-and query the node-local bounded diagnostics store for controlled performance and
-troubleshooting runs.
+`WK_DEBUG_API_ENABLE`. When `bench.api_token` is nonempty, the complete debug
+subtree requires that bearer capability. Diagnostics debug routes also require
+a diagnostics reader and query the node-local bounded diagnostics store for
+controlled performance and troubleshooting runs. A failed live cluster
+snapshot returns a fixed `503` response and never exposes its internal cause.
 
 `GET /demo` and `HEAD /demo` permanently redirect to `/demo/`. The `/demo/*`
 surface serves the production Vite bundle embedded at Go build time; exact
@@ -164,55 +172,38 @@ may return `msg_event_seq=0` until a terminal stream event is proposed.
 `/message/sync` and
 `/message/syncack` forward durable CMD message sync and ack requests to
 `internal/usecase/cmdsync`, preserving legacy validation messages and response
-envelopes while keeping CMD projection reads and read-cursor writes out of the
-HTTP layer. They operate on `ConversationKindCMD` rows from the shared UID-owned
-conversation projection and return only durable command messages, stripping one
-command-channel suffix from client-facing channel IDs when present.
+envelopes while keeping CMD membership reads and acknowledgement writes out of
+the HTTP layer. `/message/cmd/bind` and `/message/cmd/unbind` explicitly create
+or tombstone durable CMD discovery state. Sync reads
+`user_cmd_channel_membership` and returns only durable command-log messages,
+stripping one command-channel suffix from client-facing channel IDs.
 `/channel/messagesync` keeps the legacy response shape, converts canonical
 person-channel IDs back to the peer UID for the logged-in user, and maps message
 event summaries to the legacy `event_meta`, `event_sync_hint`, and stream fields
 when the usecase provides them. Fine-grained `/message/eventsync` is intentionally
 not registered in this phase. If the composition root does not provide the
 corresponding message or CMD sync usecase, these routes fail closed using their
-legacy envelopes.
+legacy envelopes. `/channel/messagesyncbatch` first validates every requested
+ordinary membership, then lets the cluster facade group the aligned committed
+reads by exact Channel Leader.
 
-The conversation list, sync, and mutation routes are registered regardless of bench mode.
-`/conversation/list` accepts `uid`, `limit`, and an optional sorted conversation
-cursor based on `active_at`, `channel_id`, and `channel_type`. It delegates
-ordering, cursor application, active-page reads, and current-page last-message
-loads to `internal/usecase/conversation`, then returns `conversations`,
-`next_cursor`, and `more`. Each conversation item contains the active row
-fields plus `unread`; `last_message` is `null` when the usecase found no visible
-durable message for that row. The access adapter converts canonical
-person-channel IDs back to the peer UID for the requesting user. The underlying
-usecase/infra path reads `ConversationKindNormal` rows and ordinary message
-hydration skips `SyncOnce` or command-channel rows, so CMD activity cannot
-replace the ordinary `last_message` or recent-message list. If the composition
-root does not provide a conversation usecase, the route fails closed with the
-compatible JSON error envelope. Each request emits a
-low-cardinality conversation-list observation containing result, latency,
-returned item count, sparse item count, last-message load count, last-message
-error count, active-index stale skip count, and whether another active page is
-available.
-`/conversation/sync` accepts the legacy request fields `uid`, `version`,
-`last_msg_seqs`, `msg_count`, `only_unread`, `exclude_channel_types`, and
-`limit`. The adapter parses `last_msg_seqs`, normalizes person-channel peer IDs
-to canonical channel IDs before calling the usecase, and returns the legacy
-array response with `recents` when requested. Canonical person-channel IDs in
-conversation rows and recent messages are converted back to the peer UID for
-the requesting user. If the composition root does not provide a conversation
-usecase, the route fails closed with the compatible JSON error envelope. The
-adapter records one low-cardinality sync observation for each request path,
-including invalid JSON, invalid `last_msg_seqs`, missing usecase, usecase
-errors, and successful responses. Observation labels never include UID, channel
-ID, device, message ID, or error text.
+The conversation list, retry, and mutation routes are registered regardless of
+bench mode. `/conversation/list` accepts `uid`, a candidate `limit`, an opaque
+membership cursor, and completed coverage. It returns `conversations`,
+`deletes`, `unresolved`, `next_cursor`, `done`, coverage, tombstone retention,
+and `reset_required`. The cursor encodes the full `(activated_at, channel_id,
+channel_type)` membership-index position; only `done=true` completes a pass.
+The access adapter converts canonical person-channel IDs back to the peer UID.
+`/conversation/retry` point-reads a bounded set of unresolved keys and reruns
+server-side hydration without rewinding directory coverage. Each list request
+emits low-cardinality scanned-candidate, returned-item, delete, unresolved,
+latency, and result evidence.
 `/conversations/clearUnread`, `/conversations/setUnread`, and
-`/conversations/delete` preserve the legacy mutation envelopes. The adapter
-validates only request shape, normalizes personal peer IDs to canonical
-conversation IDs, and delegates read-cursor or delete-barrier writes to the
-conversation usecase. The usecase and infra adapter keep those writes on the
-UID-owned Slot metadata path; the HTTP layer does not write conversation state
-directly.
+`/conversations/delete` preserve their mutation envelopes, while
+`/conversations/activate` records explicit navigation priority. The adapter
+normalizes person peers and delegates monotonic badge floors, hide floors, and
+activation to the usecase. All durable mutations target
+`user_channel_membership`; the HTTP layer writes no business state directly.
 
 ## Phase-1 Semantics
 
@@ -231,11 +222,26 @@ writer from the composition root. Without that writer, capabilities do not
 advertise channel mutation support and mutation requests fail closed with
 `501`. With a writer, they inject real channel metadata and add or remove
 subscriber rows through the composition root. Subscriber reset requests remain
-unsupported.
+unsupported. The promoted target advertises both `person` and `group` Channel
+types because chat-lifecycle traffic creates canonical person relationships as
+well as the prepared fixed group catalog.
 
 `/bench/v1/presence/snapshot` is a read-only diagnostic route. It reports
 owner-local route counts and authority-side virtual route counts for wkbench
 reports, but it does not expose or mutate concrete gateway sessions.
+
+`POST /bench/v1/channel-runtime/probe` accepts exactly one bounded selector:
+the existing generated benchmark range or 1..1,200 unique concrete Channel
+identities. Concrete IDs are validated without normalization and are forwarded
+only to the read-only probe port. Snapshot and eviction keep their generated
+selector contracts; concrete identities are not accepted by the eviction
+route. Restricted bench authentication continues to cover all three routes.
+If the runtime controller fails an explicit probe, the adapter returns and logs
+only the stable `explicit channel runtime probe failed` message; raw controller
+errors can contain requested identities and therefore remain private. Generated
+probe failures retain their existing response behavior. Explicit failures log
+only the shared closed reason code plus existing low-cardinality request-shape
+fields; source errors and concrete identities are not logged.
 
 Compatible channel and user management are adapters only. The channel adapter
 validates JSON fields, defaults `/channel/subscriber_add` with missing
@@ -248,14 +254,13 @@ not by the HTTP adapter directly. The user adapter maps JSON into
 directly. The message adapter decodes legacy HTTP payloads and trace headers
 but leaves send orchestration, request-scoped command-channel derivation, and
 channel message reads to `internal/usecase/message`.
-The CMD sync adapter validates only request shape, UID presence, non-negative
-limits, and non-zero `last_message_seq` for syncack; CMD row selection,
-message ordering, command suffix stripping, and read-cursor writes over
-`ConversationKindCMD` stay in `internal/usecase/cmdsync`.
-The conversation adapter validates only request shape and UID presence; active
-index ordering, active cursor application, sync candidate filtering,
-read/delete cursor mutation, and ordinary `ConversationKindNormal` message
-reads stay in `internal/usecase/conversation`. The adapter observes
+The CMD sync adapter validates request shape; CMD membership selection,
+message ordering, suffix stripping, binding, and monotonic `ack_seq` writes
+stay in `internal/usecase/cmdsync`.
+The conversation adapter validates only request shape and UID presence;
+membership-index ordering, opaque cursor application, hydration, badge
+calculation, and personal-state mutations stay in
+`internal/usecase/conversation`. The adapter observes
 successful and failed list requests without adding UID or channel labels, so
 performance triage can inspect list cost without increasing metrics
 cardinality.

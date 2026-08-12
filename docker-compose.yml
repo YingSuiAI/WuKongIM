@@ -54,10 +54,11 @@ services:
 
   wk-sim:
     profiles: ["dev-sim"]
-    image: wukongim-dev:local
+    image: wukongim-dev-tools:local
     build:
       context: .
       dockerfile: Dockerfile
+      target: dev-tools
     restart: unless-stopped
     depends_on:
       - wk-node1
@@ -95,10 +96,11 @@ services:
 
   wk-analysis:
     profiles: ["analysis"]
-    image: wukongim-dev:local
+    image: wukongim-dev-tools:local
     build:
       context: .
       dockerfile: Dockerfile
+      target: dev-tools
     restart: unless-stopped
     depends_on:
       - wk-node1

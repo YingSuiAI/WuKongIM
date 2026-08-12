@@ -4,11 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -38,10 +41,77 @@ func TestRootCommandHelpListsSubcommands(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("expected help exit code 0, got %d stderr %q", code, stderr.String())
 	}
-	for _, want := range []string{"Usage:", "run", "worker", "validate", "doctor", "dev-sim", "capacity", "metrics"} {
+	for _, want := range []string{"Usage:", "run", "worker", "host-metrics", "validate", "doctor", "dev-sim", "capacity", "metrics"} {
 		if !strings.Contains(stderr.String(), want) {
 			t.Fatalf("expected root help to contain %q, got %q", want, stderr.String())
 		}
+	}
+}
+
+func TestHostMetricsCommandValidatesAndExposesSelectedFilesystem(t *testing.T) {
+	var stderr bytes.Buffer
+	code := runWithStderr([]string{"host-metrics", "--listen", "127.0.0.1:0"}, &stderr)
+	if code != exitConfig || !strings.Contains(stderr.String(), "--path") {
+		t.Fatalf("missing path code/stderr = %d/%q", code, stderr.String())
+	}
+
+	temporary := t.TempDir()
+	processPath := filepath.Join(temporary, "processes.prom")
+	processMetrics := fmt.Sprintf(
+		"wukongim_process_up{unit=\"wukongim.service\"} 0\nwukongim_process_collector_last_success_unixtime_seconds %d\n",
+		time.Now().Unix(),
+	)
+	if err := os.WriteFile(processPath, []byte(processMetrics), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	handler, err := newHostMetricsHandler(hostMetricsConfig{
+		path: temporary, mountpoint: "/var/lib/wukongim-1", device: "/dev/local-data-1", processMetricsPath: processPath,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("metrics status/body = %d/%q", response.Code, response.Body.String())
+	}
+	for _, want := range []string{
+		`node_filesystem_size_bytes{device="/dev/local-data-1",mountpoint="/var/lib/wukongim-1"}`,
+		`node_filesystem_avail_bytes{device="/dev/local-data-1",mountpoint="/var/lib/wukongim-1"}`,
+		`wukongim_process_up{unit="wukongim.service"} 0`,
+	} {
+		if !strings.Contains(response.Body.String(), want) {
+			t.Fatalf("metrics body missing %q: %q", want, response.Body.String())
+		}
+	}
+
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("health status = %d", response.Code)
+	}
+
+	staleAt := time.Now().Add(-processMetricsFreshnessWindow - time.Second)
+	if err := os.Chtimes(processPath, staleAt, staleAt); err != nil {
+		t.Fatal(err)
+	}
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("stale process evidence status = %d, want %d", response.Code, http.StatusServiceUnavailable)
+	}
+	staleMetrics := fmt.Sprintf(
+		"wukongim_process_up{unit=\"wukongim.service\"} 0\nwukongim_process_collector_last_success_unixtime_seconds %d\n",
+		time.Now().Add(-processMetricsFreshnessWindow-time.Second).Unix(),
+	)
+	if err := os.WriteFile(processPath, []byte(staleMetrics), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("stale collector timestamp status = %d, want %d", response.Code, http.StatusServiceUnavailable)
 	}
 }
 
@@ -102,6 +172,87 @@ func TestWorkerCommandInsecureControlIgnoresEnvToken(t *testing.T) {
 	if cfg.server.ControlToken != "" {
 		t.Fatalf("expected insecure control to clear effective token, got %q", cfg.server.ControlToken)
 	}
+}
+
+func TestWorkerCommandChatLifecycleModeRequiresAuthenticatedDedicatedRuntime(t *testing.T) {
+	t.Setenv("WK_BENCH_WORKER_TOKEN", "")
+	var stderr bytes.Buffer
+
+	_, code := parseWorkerConfig([]string{"--mode", "chat-lifecycle", "--listen", "127.0.0.1:0"}, &stderr)
+	if code != exitConfig || !strings.Contains(stderr.String(), "--control-token is required") {
+		t.Fatalf("missing-token code/stderr = %d/%q", code, stderr.String())
+	}
+
+	stderr.Reset()
+	_, code = parseWorkerConfig([]string{"--mode", "chat-lifecycle", "--control-token", "secret", "--insecure-control"}, &stderr)
+	if code != exitConfig || !strings.Contains(stderr.String(), "does not allow --insecure-control") {
+		t.Fatalf("insecure code/stderr = %d/%q", code, stderr.String())
+	}
+
+	stderr.Reset()
+	cfg, code := parseWorkerConfig([]string{"--mode", "chat-lifecycle", "--listen", "127.0.0.1:19091", "--control-token", "secret"}, &stderr)
+	if code != 0 || cfg.mode != workerModeChatLifecycle || cfg.listen != "127.0.0.1:19091" || cfg.server.ControlToken != "secret" {
+		t.Fatalf("chat lifecycle config/code/stderr = %+v/%d/%q", cfg, code, stderr.String())
+	}
+}
+
+func TestWorkerCommandDefaultModePreservesGenericWorkerBehavior(t *testing.T) {
+	var stderr bytes.Buffer
+	cfg, code := parseWorkerConfig([]string{"--control-token", "secret", "--work-dir", "/tmp/wkbench-worker"}, &stderr)
+	if code != 0 {
+		t.Fatalf("parse code = %d; stderr = %q", code, stderr.String())
+	}
+	if cfg.mode != workerModeDefault || cfg.listen != "127.0.0.1:19090" || cfg.server.WorkDir != "/tmp/wkbench-worker" || cfg.server.ControlToken != "secret" {
+		t.Fatalf("default worker config = %+v", cfg)
+	}
+}
+
+func TestWorkerCommandRejectsUnknownChatLifecycleFlagBeforeServing(t *testing.T) {
+	var stderr bytes.Buffer
+	_, code := parseWorkerConfig([]string{"--mode", "chat-lifecycle", "--control-token", "secret", "--chat-lease-timeout", "1s"}, &stderr)
+	if code != exitConfig {
+		t.Fatalf("unknown flag code/stderr = %d/%q", code, stderr.String())
+	}
+}
+
+func TestChatLifecycleWorkerUnexpectedGenerationExitStopsServerAndReturnsError(t *testing.T) {
+	t.Parallel()
+
+	runtime := &fakeChatLifecycleWorkerRuntime{
+		serveStarted: make(chan struct{}),
+		shutdown:     make(chan struct{}),
+	}
+	unexpected := make(chan struct{})
+	result := make(chan error, 1)
+	go func() { result <- waitChatLifecycleWorker(runtime, unexpected) }()
+
+	<-runtime.serveStarted
+	close(unexpected)
+	if err := <-result; !errors.Is(err, errChatLifecycleWorkerUnexpected) {
+		t.Fatalf("wait error = %v", err)
+	}
+	select {
+	case <-runtime.shutdown:
+	default:
+		t.Fatal("dedicated HTTP runtime was not shut down")
+	}
+}
+
+type fakeChatLifecycleWorkerRuntime struct {
+	serveStarted chan struct{}
+	shutdown     chan struct{}
+	shutdownOnce sync.Once
+}
+
+func (r *fakeChatLifecycleWorkerRuntime) Serve() error {
+	close(r.serveStarted)
+	<-r.shutdown
+	return http.ErrServerClosed
+}
+
+func (r *fakeChatLifecycleWorkerRuntime) Shutdown(context.Context) error {
+	r.shutdownOnce.Do(func() { close(r.shutdown) })
+	return nil
 }
 
 func TestRunCapacityRequiresSubcommand(t *testing.T) {

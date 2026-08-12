@@ -47,6 +47,35 @@ func TestAppendPreservesOrderWithinOneChannel(t *testing.T) {
 	requireAppendSuccess(t, waitFutureForTest(t, second.future), 0, 11, 2)
 }
 
+func TestDefaultAppendSerializesSameChannelBatchesForDurableSequenceOrder(t *testing.T) {
+	appender := newBlockingAppenderForAppendTest()
+	group := newStartedTestGroup(t, Options{
+		LocalNodeID:    1,
+		MessageID:      newSequenceIDsForPrepare(20),
+		Appender:       appender,
+		EffectPoolSize: 4,
+	})
+	target := localTargetForAppendTest("room")
+
+	firstC := submitNoWaitForAppendTest(group, target, appendSendItemForTest("u1", "room", "first"))
+	firstStart := appender.waitStarted(t)
+
+	secondC := submitNoWaitForAppendTest(group, target, appendSendItemForTest("u1", "room", "second"))
+	time.Sleep(20 * time.Millisecond)
+	if got := appender.Calls(); got != 1 {
+		t.Fatalf("default append calls while first same-channel append is in flight = %d, want 1", got)
+	}
+
+	firstStart.Release()
+	first := receiveSubmitResult(t, firstC)
+	requireAppendSuccess(t, waitFutureForTest(t, first.future), 0, 20, 1)
+
+	secondStart := appender.waitStarted(t)
+	secondStart.Release()
+	second := receiveSubmitResult(t, secondC)
+	requireAppendSuccess(t, waitFutureForTest(t, second.future), 0, 21, 2)
+}
+
 func TestAppendInflightBatchesPerChannelAboveOneAllowsSecondSameChannelAppend(t *testing.T) {
 	appender := newBlockingAppenderForAppendTest()
 	group := newStartedTestGroup(t, Options{
@@ -368,7 +397,6 @@ func TestAppendBatchAppendFailedRecoversCommittedIdempotencyHit(t *testing.T) {
 	appender.err = fmt.Errorf("%w: channel: corrupt state: db: conflict: idempotency key already stored at seq 7", ErrAppendFailed)
 	idempotency := &sequencedIdempotencyForAppendTest{
 		results: []idempotencyResultForAppendTest{
-			{},
 			{result: SendResult{MessageID: 42, MessageSeq: 7, Reason: ReasonSuccess}, ok: true},
 		},
 	}
@@ -392,10 +420,181 @@ func TestAppendBatchAppendFailedRecoversCommittedIdempotencyHit(t *testing.T) {
 	if got := appender.Calls(); got != 1 {
 		t.Fatalf("append calls = %d, want one failed append before idempotency recovery", got)
 	}
-	if gotQueries := idempotency.queriesSnapshot(); len(gotQueries) != 2 {
-		t.Fatalf("idempotency queries = %d, want prepare miss plus post-append recovery hit", len(gotQueries))
-	} else if gotQueries[1] != (IdempotencyQuery{FromUID: "u1", ClientMsgNo: "u1-payload", ChannelID: "room", ChannelType: 2, PayloadHash: idempotencyPayloadHash([]byte("payload"))}) {
-		t.Fatalf("recovery query = %#v, want canonical sender/client/channel", gotQueries[1])
+	if gotQueries := idempotency.queriesSnapshot(); len(gotQueries) != 1 {
+		t.Fatalf("idempotency queries = %d, want only post-append recovery hit", len(gotQueries))
+	} else if gotQueries[0] != (IdempotencyQuery{FromUID: "u1", ClientMsgNo: "u1-payload", ChannelID: "room", ChannelType: 2, PayloadHash: idempotencyPayloadHash([]byte("payload"))}) {
+		t.Fatalf("recovery query = %#v, want canonical sender/client/channel", gotQueries[0])
+	}
+}
+
+func TestAppendBatchRetriesFreshItemAfterCommittedIdempotencyConflict(t *testing.T) {
+	conflict := fmt.Errorf("%w: channel: corrupt state: db: conflict: idempotency key already stored at seq 7", ErrAppendFailed)
+	appender := newRecordingAppenderForAppendTest()
+	appender.errs = []error{conflict, nil}
+	persistAfter := &recordingPersistAfterEnqueuerForCommitTest{}
+	idempotency := &sequencedIdempotencyForAppendTest{
+		results: []idempotencyResultForAppendTest{
+			{result: SendResult{MessageID: 42, MessageSeq: 7, Reason: ReasonSuccess}, ok: true},
+			{ok: false},
+		},
+	}
+	group := newStartedTestGroup(t, Options{
+		LocalNodeID:          1,
+		MessageID:            newSequenceIDsForPrepare(300),
+		Appender:             appender,
+		Idempotency:          idempotency,
+		PersistAfterEnqueuer: persistAfter,
+	})
+	target := localTargetForAppendTest("room")
+
+	future, err := group.SubmitLocal(context.Background(), target, []SendBatchItem{
+		appendSendItemForTest("u1", "room", "committed-retry"),
+		appendSendItemForTest("u2", "room", "fresh"),
+	})
+	if err != nil {
+		t.Fatalf("SubmitLocal() error = %v", err)
+	}
+
+	results := waitFutureForTest(t, future)
+	requireAppendSuccess(t, results, 0, 42, 7)
+	requireAppendSuccess(t, results, 1, 301, 1)
+	requests := appender.Requests()
+	if len(requests) != 2 {
+		t.Fatalf("append requests = %d, want failed batch plus one fresh-item retry", len(requests))
+	}
+	if requests[0].Attempt != 1 || len(requests[0].Messages) != 2 {
+		t.Fatalf("first append request = attempt %d with %d messages, want attempt 1 with 2", requests[0].Attempt, len(requests[0].Messages))
+	}
+	if requests[1].Attempt != 2 || len(requests[1].Messages) != 1 {
+		t.Fatalf("retry append request = attempt %d with %d messages, want attempt 2 with 1", requests[1].Attempt, len(requests[1].Messages))
+	}
+	if got := string(requests[1].Messages[0].Payload); got != "fresh" {
+		t.Fatalf("retry payload = %q, want only fresh item", got)
+	}
+	waitCommitBacklogForTest(t, group, target.ChannelID, 0)
+	if got := persistAfter.callCount(); got != 1 {
+		t.Fatalf("PersistAfter calls = %d, want only the fresh retry's durable side effect", got)
+	}
+}
+
+func TestAppendBatchDoesNotRetryWhenNoCommittedSiblingIsRecovered(t *testing.T) {
+	appendErr := fmt.Errorf("%w: storage unavailable", ErrAppendFailed)
+	appender := newRecordingAppenderForAppendTest()
+	appender.errs = []error{appendErr, nil}
+	idempotency := &sequencedIdempotencyForAppendTest{
+		results: []idempotencyResultForAppendTest{{ok: false}, {ok: false}},
+	}
+	group := newStartedTestGroup(t, Options{
+		LocalNodeID: 1,
+		MessageID:   newSequenceIDsForPrepare(320),
+		Appender:    appender,
+		Idempotency: idempotency,
+	})
+
+	future, err := group.SubmitLocal(context.Background(), localTargetForAppendTest("room"), []SendBatchItem{
+		appendSendItemForTest("u1", "room", "one"),
+		appendSendItemForTest("u2", "room", "two"),
+	})
+	if err != nil {
+		t.Fatalf("SubmitLocal() error = %v", err)
+	}
+	for index, result := range waitFutureForTest(t, future) {
+		if !errors.Is(result.Err, appendErr) {
+			t.Fatalf("results[%d] error = %v, want original append error", index, result.Err)
+		}
+	}
+	if got := appender.Calls(); got != 1 {
+		t.Fatalf("append calls = %d, want no retry without a committed recovery hit", got)
+	}
+}
+
+func TestAppendBatchFreshItemRetryIsBoundedToOneAttempt(t *testing.T) {
+	conflict := fmt.Errorf("%w: idempotency conflict", ErrAppendFailed)
+	appender := newRecordingAppenderForAppendTest()
+	appender.errs = []error{conflict, conflict, nil}
+	idempotency := &sequencedIdempotencyForAppendTest{
+		results: []idempotencyResultForAppendTest{
+			{result: SendResult{MessageID: 42, MessageSeq: 7, Reason: ReasonSuccess}, ok: true},
+			{ok: false},
+			{ok: false},
+		},
+	}
+	group := newStartedTestGroup(t, Options{
+		LocalNodeID: 1,
+		MessageID:   newSequenceIDsForPrepare(340),
+		Appender:    appender,
+		Idempotency: idempotency,
+	})
+
+	future, err := group.SubmitLocal(context.Background(), localTargetForAppendTest("room"), []SendBatchItem{
+		appendSendItemForTest("u1", "room", "committed-retry"),
+		appendSendItemForTest("u2", "room", "fresh"),
+	})
+	if err != nil {
+		t.Fatalf("SubmitLocal() error = %v", err)
+	}
+	results := waitFutureForTest(t, future)
+	requireAppendSuccess(t, results, 0, 42, 7)
+	if !errors.Is(results[1].Err, conflict) {
+		t.Fatalf("fresh item error = %v, want retry append error", results[1].Err)
+	}
+	if got := appender.Calls(); got != 2 {
+		t.Fatalf("append calls = %d, want initial attempt plus one bounded retry", got)
+	}
+}
+
+func TestGroupCoalescesOverlappingIdempotentSendsBeforeAppend(t *testing.T) {
+	appender := &duplicateRejectingAppenderForAppendTest{}
+	persistAfter := &recordingPersistAfterEnqueuerForCommitTest{}
+	group := newStartedTestGroup(t, Options{
+		LocalNodeID:           1,
+		MessageID:             newSequenceIDsForPrepare(300),
+		Appender:              appender,
+		PersistAfterEnqueuer:  persistAfter,
+		InboxCoalesceWindow:   20 * time.Millisecond,
+		InboxCoalesceMaxItems: 8,
+	})
+	target := localTargetForAppendTest("room")
+	item := appendSendItemForTest("u1", "room", "payload")
+
+	first, err := group.SubmitLocal(context.Background(), target, []SendBatchItem{item})
+	if err != nil {
+		t.Fatalf("first SubmitLocal() error = %v", err)
+	}
+	second, err := group.SubmitLocal(context.Background(), target, []SendBatchItem{item})
+	if err != nil {
+		t.Fatalf("second SubmitLocal() error = %v", err)
+	}
+
+	firstResults := waitFutureForTest(t, first)
+	secondResults := waitFutureForTest(t, second)
+	requireAppendSuccess(t, firstResults, 0, firstResults[0].Result.MessageID, firstResults[0].Result.MessageSeq)
+	requireAppendSuccess(t, secondResults, 0, firstResults[0].Result.MessageID, firstResults[0].Result.MessageSeq)
+	waitCommitBacklogForTest(t, group, target.ChannelID, 0)
+	if got := persistAfter.callCount(); got != 1 {
+		t.Fatalf("PersistAfter calls = %d, want one durable side effect for coalesced retries", got)
+	}
+}
+
+func TestNewIdempotentAppendBatchDoesNotAllocateForLargeUniqueBatch(t *testing.T) {
+	const batchSize = 128
+	items := make([]preparedSend, batchSize)
+	for index := range items {
+		items[index].Command = SendCommand{
+			FromUID:     "u1",
+			ClientMsgNo: fmt.Sprintf("client-%d", index),
+			Payload:     []byte("payload"),
+		}
+	}
+
+	allocs := testing.AllocsPerRun(100, func() {
+		batch := newIdempotentAppendBatch(items)
+		if len(batch.items) != batchSize || batch.ownerByItem != nil {
+			t.Fatalf("batch = %d items with owner map %v, want unchanged unique batch", len(batch.items), batch.ownerByItem != nil)
+		}
+	})
+	if allocs != 0 {
+		t.Fatalf("newIdempotentAppendBatch allocations = %.1f, want 0", allocs)
 	}
 }
 
@@ -627,6 +826,41 @@ type recordingAppenderForAppendTest struct {
 	itemErrs    []error
 	resultLimit int
 	nextSeq     uint64
+}
+
+type duplicateRejectingAppenderForAppendTest struct {
+	mu      sync.Mutex
+	nextSeq uint64
+}
+
+func (a *duplicateRejectingAppenderForAppendTest) AppendBatch(_ context.Context, req AppendBatchRequest) (AppendBatchResult, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	type idempotencyKey struct {
+		fromUID     string
+		clientMsgNo string
+	}
+	seen := make(map[idempotencyKey]struct{}, len(req.Messages))
+	for _, message := range req.Messages {
+		if message.FromUID == "" || message.ClientMsgNo == "" {
+			continue
+		}
+		key := idempotencyKey{fromUID: message.FromUID, clientMsgNo: message.ClientMsgNo}
+		if _, ok := seen[key]; ok {
+			return AppendBatchResult{}, fmt.Errorf("%w: duplicate idempotency key", ErrAppendFailed)
+		}
+		seen[key] = struct{}{}
+	}
+	items := make([]AppendBatchItemResult, len(req.Messages))
+	for index, message := range req.Messages {
+		a.nextSeq++
+		items[index] = AppendBatchItemResult{
+			MessageID:  message.MessageID,
+			MessageSeq: a.nextSeq,
+			Message:    message,
+		}
+	}
+	return AppendBatchResult{Items: items}, nil
 }
 
 func newRecordingAppenderForAppendTest() *recordingAppenderForAppendTest {
@@ -965,9 +1199,9 @@ func committedForAppendTest(t *testing.T, group *Group, channelID ChannelID) []C
 	}
 	writer.mu.Lock()
 	defer writer.mu.Unlock()
-	committed := append([]CommittedEnvelope(nil), writer.state.committed...)
-	for i := range committed {
-		committed[i] = committed[i].Clone()
+	committed := make([]CommittedEnvelope, len(writer.state.committed))
+	for i, item := range writer.state.committed {
+		committed[i] = item.envelope.Clone()
 	}
 	return committed
 }

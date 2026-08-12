@@ -66,6 +66,11 @@
           "refId": "B"
         },
         {
+          "expr": "sum(wukongim_channelv2_worker_queue_capacity{node_name=~\"$node_name\"}) by (pool)",
+          "legendFormat": "worker queue capacity {{pool}}",
+          "refId": "H"
+        },
+        {
           "expr": "sum(wukongim_channelv2_worker_inflight{node_name=~\"$node_name\"}) by (pool)",
           "legendFormat": "worker inflight {{pool}}",
           "refId": "C"
@@ -171,6 +176,11 @@
           "expr": "sum(rate(wukongim_channelv2_meta_cache_total{node_name=~\"$node_name\"}[$__rate_interval])) by (result)",
           "legendFormat": "meta cache {{result}}",
           "refId": "I"
+        },
+        {
+          "expr": "sum(rate(wukongim_channelv2_meta_created_total[$__rate_interval])) by (slot_id, result)",
+          "legendFormat": "meta created slot={{slot_id}} {{result}}",
+          "refId": "J"
         }
       ],
       "title": "Channel Runtime Replication Counters",
@@ -446,16 +456,6 @@
           "refId": "B"
         },
         {
-          "expr": "sum(rate(wukongim_delivery_fanout_task_total{node_name=~\"$node_name\"}[$__rate_interval])) by (target_node, result)",
-          "legendFormat": "fanout {{target_node}} {{result}}",
-          "refId": "C"
-        },
-        {
-          "expr": "histogram_quantile(0.95, sum(rate(wukongim_delivery_fanout_task_duration_seconds_bucket{node_name=~\"$node_name\"}[$__rate_interval])) by (le, target_node, result))",
-          "legendFormat": "fanout {{target_node}} {{result}} p95",
-          "refId": "D"
-        },
-        {
           "expr": "sum(rate(wukongim_delivery_retry_total{node_name=~\"$node_name\"}[$__rate_interval])) by (event, result)",
           "legendFormat": "retry {{event}} {{result}}",
           "refId": "E"
@@ -466,7 +466,7 @@
           "refId": "F"
         }
       ],
-      "title": "Delivery Queues And Fanout",
+      "title": "Delivery Queues And Errors",
       "type": "timeseries"
     },
     {

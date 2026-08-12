@@ -1,14 +1,19 @@
 # internal/runtime/channelappend Flow
 
+Channelappend exposes one canonical Online Delivery plan-enqueue port. Its
+recipient planner preserves exact-target grouping and batching while explicitly
+labeling durable versus transient work before handing the bounded plan to
+`internal/runtime/delivery`.
+
 ## Responsibility
 
 `internal/runtime/channelappend` owns local channel append-authority admission.
 It is entered only after routing has resolved that the local node is the current
 channel append authority. The package validates SEND commands, allocates
 message IDs, admits durable append work, completes item-aligned futures, and
-runs best-effort post-commit recipient/conversation effects. It also handles
+runs best-effort post-commit recipient delivery and configured side effects. It also handles
 legacy command-style `NoPersist` sends as transient realtime delivery without
-writing the channel log or conversation active state.
+writing a Channel log or membership state.
 
 ## Router Flow
 
@@ -68,12 +73,34 @@ concurrency bound for independent canonical channels. This prevents first-use
 channel runtime metadata proposals from serially multiplying Slot round trips.
 Resolved targets are folded in original channel order before submission.
 After resolution, different canonical-channel groups use the separate fixed
-submission concurrency bound. The caller participates as one worker in both
-phases, so the router creates at most `bound-1` helper goroutines per phase. A
-single canonical channel still forms one ordered group, and completed group
-results are folded in original group and item order before retry selection.
-This removes cross-channel head-of-line waiting without adding an unbounded
-goroutine or a second cross-request queue.
+submission concurrency bound. Its default is 96 so the bounded Cloud Medium
+gateway candidate usually fits in one wave, while a batch with more than 96
+independent groups retains a small second wave so downstream RPC and store
+workers keep recovery headroom. A separate node-local 512-group admission
+bound is shared by every concurrent `SendBatch`. It retains at least five
+batch-local waves during a checkpoint-recovery burst while preventing active
+gateway sessions from multiplying the per-batch wave into unbounded append and
+transport-RPC work. Each admitted group owns one slot until its local Future or remote
+forward completes; waiting honors the group's terminal context. Both bounds
+remain fixed rather than scaling with batch size. The caller
+participates as one worker in both phases, so the router creates at most
+`bound-1` helper goroutines per phase. A single canonical channel still forms
+one ordered group, and completed group results are folded in original group and
+item order before retry selection.
+This removes serialized cross-channel head-of-line waiting while bounding both
+per-request goroutines and aggregate cross-request submissions.
+
+Router observations use low-cardinality paths. `local`, `remote`, and
+`pre_route` measure canonical-channel operations; `batch` measures the complete
+`SendBatch`. The public router-group inflight/capacity gauges expose the shared
+node-local admission pressure and must return to zero after a drain.
+The `batch` observation includes authority resolution, retries, and the
+slowest group. Comparing the whole-batch histogram with the group histograms attributes
+batch-level head-of-line time without adding Channel or UID labels.
+Prometheus additionally attributes the complete batch duration to each input
+item in `wukongim_channelappend_router_item_duration_seconds{path="batch"}`.
+That item-weighted histogram is the valid comparison with per-message gateway
+handler and SENDACK P99; the operation histogram remains one sample per batch.
 
 Router submit contexts are neutral batch transport contexts. Per-item contexts
 and deadlines are checked before route lookup, before submission, and while
@@ -128,10 +155,10 @@ wait. A timed-out Stop does not cancel or clear work, and a later Stop continues
 waiting for the same drain. A stopped group is not restarted.
 
 The advance, append, and post-commit ants pools register actual created worker
-and maintenance goroutines under `channelappend/worker_pool`. The scheduler,
-retry loop, delivery workers, short fan-out helpers, pool release, and
-background stop drain use fixed `pkg/goroutine` task IDs, without changing the
-single-writer or shutdown ordering described below.
+and maintenance goroutines under `channelappend/worker_pool`. The advance
+scheduler, post-commit retry loop, short router/writer advances, pool release,
+metrics publisher, and background stop drain use fixed `pkg/goroutine` task
+IDs, without changing the single-writer or shutdown ordering described below.
 Pool panic policy is applied through that owner, and pool ownership remains
 registered after release until every executing worker has returned.
 
@@ -176,7 +203,11 @@ those accepted batches outside `channelWriter.mu`, and re-locks only to admit
 the prepared outcomes into `channelState`. Rejected and idempotent items
 complete their item-aligned future slots immediately with their
 reason/error/result. Valid prepared items receive one message id and one server
-timestamp. Before a prepared item can enter the pending queue, its canonical
+timestamp. Preparation privately records whether that ID came from the
+node-scoped allocator. An append batch carries the server-allocation proof only
+when every included item has it; caller-supplied IDs therefore retain strict
+storage duplicate checks, including in mixed batches. Before a prepared item
+can enter the pending queue, its canonical
 prepared channel must still match the submitted `AuthorityTarget`;
 request-scoped derivation or person-channel normalization that changes the
 channel away from the target returns `ErrStaleRoute` for that item and creates
@@ -189,7 +220,10 @@ state's pending plus in-flight item count is below
 `ErrChannelBusy` before they reach the append port. When any post-commit port is
 configured, every append-bound prepared item must also reserve one slot from
 the group-wide `PostCommitHandoffCapacity` before append. The reservation spans
-pending append, append execution, and durable post-commit work. An item that
+pending append, append execution, and durable post-commit work. Reservation
+ownership is recorded against the exact Future item index, and terminal release
+is idempotent for that owner; a duplicate completion can therefore neither
+consume another writer's reservation nor drive the aggregate depth negative. An item that
 cannot reserve a slot completes with `ErrChannelBusy` and is never passed to
 `Appender`; append failure or terminal post-commit completion returns the slot.
 The default is the
@@ -198,6 +232,17 @@ larger of `ChannelBacklogHighWatermark` and
 Both worker-pool sizes are capped at the maximum positive int32 capacity used by
 ants/v2, preventing oversized configuration values from wrapping into an
 unbounded or permanently full pool.
+An optional `Authorizer` runs on this final local-authority prepare path before
+message-id allocation. Ordinary unfenced sends defer durable idempotency
+validation to the serialized storage append, avoiding a duplicate index miss
+for every new message. A target already observed as write-fenced performs the
+pre-append idempotency lookup so an earlier committed retry can still bypass
+the new-write fence. If an unfenced append instead discovers a durable
+idempotency conflict or races into a fence, the existing append-failure
+recovery lookup returns the prior payload-hash-matched result. This is a reusable node-local
+authority admission seam; product composition keeps terminal channel business
+checks in the message usecase, so this runtime does not read Slot business
+metadata or interpret command-source lifecycle.
 Prepared command-style `NoPersist` items also receive one message id and server
 timestamp, but they do not enter the durable pending queue. The writer schedules
 them as realtime effects and completes their future only after the recipient
@@ -205,8 +250,20 @@ delivery queue accepts the transient envelope or returns an error. If no
 recipient delivery enqueuer is configured, the transient send fails instead of
 reporting a success that cannot be delivered.
 
-The writer builds channel-aligned append batches from prepared pending items
-and keeps up to `AppendInflightBatchesPerChannel` append batches in flight per channel.
+The writer builds channel-aligned append batches from prepared pending items.
+Before calling storage, one batch coalesces items with the same canonical
+`(FromUID, ClientMsgNo)` and identical payload bytes. Exactly one owner reaches
+`Appender`; every coalesced waiter receives that owner's aligned success or
+failure result, while only the owner may enter durable post-commit work. This
+closes the overlap where an original SEND and its stable-identity retry arrive
+before either is committed: storage never receives an in-batch duplicate key,
+and no extra durable lookup is added to the ordinary new-message path. Empty
+idempotency fields and same-key items with different payload bytes remain
+distinct and retain storage's existing validation behavior.
+The order-safe default keeps one append batch in flight per channel. A caller
+may configure a larger `AppendInflightBatchesPerChannel` only when its Appender
+preserves same-channel request order before assigning durable sequences;
+merely serializing concurrent calls in goroutine arrival order is insufficient.
 Blocking `Appender.AppendBatch` calls run on the foreground append pool and wake the
 same writer when they complete. Completion events are drained by append sequence
 before mutating `channelState`, so SENDACK and post-commit handoff remain in
@@ -214,54 +271,56 @@ submission order even when same-channel append calls finish out of order. A
 later completion waiting on an earlier sequence gap remains pending but does
 not reactivate the writer, because only the missing completion callback can
 make that ordered drain runnable. The appender port must preserve durable
-per-channel append order for concurrent same-channel requests or serialize the
-requests internally. Append requests
+per-channel append order for concurrent same-channel requests. Append requests
 borrow immutable send-path payloads and carry the resolved authority epoch and
 leader epoch as append fences; concrete storage adapters clone payloads when
-they cross into durable ownership.
+they cross into durable ownership. The server-allocation proof may skip only
+the durable message-ID lookup. Durable sender/client-message idempotency
+validation remains mandatory.
 
-Batch-level append errors are returned to all active items from that single
-append attempt without retry. When an unexpected append failure races with a
-previous durable commit for the same sender/client/channel key, the writer may
-perform one payload-hash-checked idempotency lookup and complete that item from
-the existing committed result. Recovered idempotency hits do not enqueue
-post-commit side effects because they are not new commits from this append
-attempt. Short append results complete missing items with
-`ErrAppendResultMissing`; per-item append errors map to SENDACK reasons;
+Batch-level append errors normally remain terminal without retry. When an
+unexpected append failure races with a previous durable commit for the same
+sender/client/channel key, the writer performs one payload-hash-checked
+idempotency lookup per item. If none of those lookups recovers a committed
+send, the original batch error remains terminal. If at least one item is
+recovered, the failure is proven to contain a committed retry: recovered items
+complete from their stored results and only active lookup misses enter one
+bounded second append attempt. A failed second attempt may perform one final
+recovery lookup but never triggers a third append. Recovered idempotency hits
+do not enqueue post-commit side effects because they are not new commits from
+either append attempt; successful fresh-item retries do. Short append results
+complete missing items with `ErrAppendResultMissing`; per-item append errors map to SENDACK reasons;
 successful append results complete `SENDACK` futures immediately with
 `ReasonSuccess`, message id, and channel sequence. Newly successful append items also
 enqueue `CommittedEnvelope` values in the same `channelState` as the handoff
 point for best-effort post-commit recipient work. Post-commit side effects are
 not checkpointed and not replayed after authority restart.
-The append payload carries the `SyncOnce` command marker through the durable
-channel appender port so CMD sync readers and ordinary conversation readers can
-separate command messages from normal channel messages without guessing from
-channel names or client message numbers.
-
-Realtime `NoPersist` effects reuse the same recipient authority grouping and
-delivery enqueue machinery as post-commit work, but they explicitly skip
-`conversationactive.ActiveBatch` admission. Request-scoped realtime sends keep
-using `MessageScopedUIDs`, so they bypass subscriber scans just like durable
-request-scoped commits.
+Persistent CMD and `SyncOnce` sends are normalized to the separate command
+Channel before append, so command records never consume ordinary sequence space.
+Realtime `NoPersist` effects reuse recipient authority grouping and delivery
+enqueue machinery but write no Channel or directory state. Request-scoped sends
+keep using `MessageScopedUIDs` and bypass subscriber scans.
 
 Post-commit work is scheduled from the writer state after durable append
 succeeds and is independent from `SENDACK` completion. A committed envelope
 remains pending only until one recipient delivery enqueue attempt completes.
+Every dispatched commit records its sequence and attempt in `channelState`.
+Completion must match both values before it can advance the committed cursor or
+release reservation ownership; a stale completion is ignored and observed as
+`stale_completion`.
 The committed envelope owns one payload copy when it enters the async
 post-commit backlog; later state and recipient dispatch steps pass that
-immutable envelope by reference through the delivery worker and owner-push
-planning. Concrete owner push adapters copy or serialize at their boundary.
+immutable envelope by reference into the canonical Online Delivery plan. The
+delivery runtime preserves that ownership through owner-push planning, and
+concrete owner push adapters copy or serialize at their boundary.
 Success prunes the payload-bearing envelope from the backlog. Recipient route or
 delivery enqueue failure is logged through `PostCommitFailureObserver`, counted
 through effect metrics, and then the envelope reaches its terminal attempt
 without retry so one bad recipient side effect cannot block later messages on
 the same channel.
-Conversation-active projection failures are recorded independently and do not
-turn a successful delivery enqueue into a failed item completion. Failure
-observations carry a precise post-commit phase plus
-sampled recipient, target, and dispatch context so route-resolution failures
-can be distinguished from conversation active admission and delivery enqueue
-failures in logs. Each channel keeps only one committed envelope in flight at a
+Failure observations carry a precise post-commit phase plus sampled recipient,
+target, and dispatch context so route-resolution and delivery-enqueue failures
+remain distinguishable in logs. Each channel keeps only one committed envelope in flight at a
 time, and concurrency inside that envelope is limited to recipient authority
 targets. The global pre-append reservation is the post-commit backlog bound, so
 every newly acknowledged durable envelope already owns capacity for its FIFO
@@ -296,15 +355,14 @@ envelope is cloned into the configured side-effect sinks from the same
 authority-local post-commit point. The enqueuer may represent plugin hooks,
 webhook delivery, or both. It receives only committed envelopes after durable
 append succeeds, remains best-effort, and does not affect SENDACK, append
-success, recipient delivery, or conversation active projection. Transient
+success, recipient delivery, or membership state. Transient
 NoPersist realtime sends skip PersistAfter because they do not create durable
 committed envelopes.
 
 When an offline recipient observer is configured, recipient delivery resolves
 presence first, accumulates the unique recipient UIDs with no online route for
 one durable ordinary envelope, and reports them through the batch observer when
-available. It falls back to the legacy per-UID observer only when the batch path
-is not configured. This observer runs before sender echo suppression so a
+configured. This observer runs before sender echo suppression so a
 sender's other online sessions do not hide unrelated offline recipients. It is
 limited to durable ordinary commits: zero-sequence realtime envelopes, SyncOnce
 command messages, and request-scoped `MessageScopedUIDs` batches are skipped.
@@ -314,7 +372,7 @@ plus the ordered UID slice; an asynchronous adapter takes ownership once for the
 whole batch instead of cloning the payload for every UID. Callers should chunk
 large batches at the observer boundary if needed.
 The observer is a best-effort side-effect boundary and must not influence
-SENDACK, append success, conversation active admission, or owner push delivery.
+SENDACK, append success, membership state, or owner push delivery.
 
 Scoped `MessageScopedUIDs` dispatch directly without scanning subscribers.
 Person channels derive exactly the two canonical participants from the
@@ -335,60 +393,33 @@ page's recipients are admitted or dispatched, avoiding partial side effects for
 the invalid page before the envelope is dropped.
 
 After each recipient set is formed, channelappend resolves one item-aligned
-authority snapshot for the sender plus every unique trimmed recipient. Delivery
-rows retain integer indexes into that snapshot, while the conversation-active
-first attempt reuses the same exact-target groups; neither path rebuilds a
-`map[string]Target` or performs a second route lookup. Group identity includes
-the complete physical hash-slot fence, so the 256 hash slots remain distinct
-even when they map onto only 10 logical Slot Raft Groups. Channelappend then
-enqueues bounded recipient delivery plans and admits one independent
-`conversationactive.ActiveBatch` projection.
-The normal bounded page uses an allocation-free inline UID index to coalesce the
-sender and duplicate recipients while preserving duplicate delivery rows. It
-borrows an already-normalized recipient slice and copies only when empty or
-whitespace-normalized UIDs require compaction. Exact-target grouping uses a
-fixed 256-entry physical-hash-slot index with exact-target comparison; custom
-slot counts or transition collisions fall back to a bounded exact scan rather
-than weakening leader-term, config-epoch, or route-revision fences.
-The batch carries an explicit `metadb.ConversationKind`: normal for ordinary
-channel commits, CMD for one-shot sync commits or command-channel ids. It also
-carries `SenderUID` from the committed event, channel identity, message
-sequence, activity timestamp, and the expanded recipient UIDs. Receiver entries
-leave `IsSender` unset; the active worker advances the sender read sequence
-from `SenderUID` semantics. Active admission still runs when online
-delivery enqueueing is disabled or no `RecipientDeliveryEnqueuer` is
-configured. If active admission fails, the post-commit failure phase is
-`conversation_active`, while accepted delivery, later large-channel pages, and
-a successfully loaded non-large subscriber snapshot continue independently. A
-sender-only aligned route failure does not suppress valid recipient delivery;
-active projection falls back to the legacy admission surface so it can obtain a
-fresh compatible route. A recipient item failure keeps delivery all-or-nothing
-for that set and uses the same active compatibility fallback.
+authority snapshot for every unique recipient and builds only the bounded online
+delivery plan. Group identity retains the physical hash-slot and logical Slot
+leader fences. No sender or recipient membership mutation, conversation
+projection, or second directory route lookup occurs on SEND. Cluster membership
+proposal rows are counted at the actual mutation boundary, so a pure SEND
+workload must leave that counter unchanged.
 
 Recipient delivery is an enqueue contract. When delivery enqueueing is
 configured, recipients are grouped by the full fenced recipient authority
 target, including Slot leader term and Slot config epoch. UID authority
 resolution is performed once per aligned sender-and-recipient snapshot and uses
 the optional batch resolver when available; invalid or missing recipient targets
-map to route-not-ready before enqueueing. The production plan-capable enqueuer packs those exact-target
-groups into commands whose total recipient count is bounded by the existing
-recipient batch size. This preserves the complete target fence across the queue
-boundary while allowing one subscriber page to be admitted as one plan when it
-fits that bound. Each target carries a capacity-limited view into the
-grouping-owned normalized recipient storage, so asynchronous admission does not
-repeat the recipient copy and cannot overwrite a sibling target window. A
-legacy batch-only enqueuer remains supported; only that
-compatibility path dispatches different targets concurrently up to
-`RecipientAuthorityDispatchConcurrency`, while batches for the same target stay
-sequential.
+map to route-not-ready before enqueueing. The canonical plan enqueuer packs
+those exact-target groups into commands whose total recipient count is bounded
+by the existing recipient batch size. This preserves the complete target fence
+across the queue boundary while allowing one subscriber page to be admitted as
+one plan when it fits that bound. Each target carries a capacity-limited view
+into the grouping-owned normalized recipient storage, so asynchronous admission
+does not repeat the recipient copy and cannot overwrite a sibling target
+window.
 
-The dedicated delivery worker drains accepted plans. A target-aware presence
+The canonical Online Delivery runtime drains accepted plans. A target-aware presence
 resolver receives all target groups from one plan together and returns aligned
 per-group results, so one failed group is observed without suppressing the
-other groups. A legacy presence resolver remains supported by resolving the
-groups individually. A panic while processing one resolved group is converted
-to that group's terminal error and does not prevent later sibling groups from
-running. Successfully resolved groups first contribute their deduplicated
+other groups. A panic while processing one resolved group is converted to that
+group's terminal error and does not prevent later sibling groups from running.
+Successfully resolved groups first contribute their deduplicated
 offline UIDs to one plan-level observer event, so plugin and webhook work scales
 with bounded delivery plans rather than 256 physical authority targets. They
 then skip only the sender's exact accepted session before routes are coalesced
@@ -401,33 +432,6 @@ Retryable results narrow retries to only their returned routes; terminal
 push failures map back only to the exact target groups that contributed those
 routes, while unrelated owners and targets continue. Owner-local concrete
 session writes remain outside `channelState`.
-
-`RecipientDeliveryWorker` owns the bounded async queue for those delivery
-plans. The buffered queue is the admission backpressure primitive; there is
-no second slot semaphore. Admission is open only between `Start` and `Stop`;
-closed admission returns `ErrRecipientDeliveryWorkerClosed`, and a full queue
-waits for capacity until the caller context expires. `Stop` closes admission
-first and cancels the worker lifecycle context. Enqueue calls that crossed the
-open-state gate are counted until their queue send returns; workers may exit
-only after that sender barrier closes, then terminally drain every accepted
-plan with the canceled lifecycle context. Each plan also has a bounded
-processing deadline, so a transport RPC that never responds cannot occupy one
-worker indefinitely. The caller's Stop context bounds only how long Stop waits
-for this asynchronous shutdown protocol to finish.
-Processing failures are terminal best-effort delivery failures: they are
-observed through the same post-commit failure surface with the recipient
-authority target attached, and they are not returned to channelappend after the
-plan has been accepted. The worker also emits low-cardinality queue, admission,
-process, and execution-pressure observations: queue depth/capacity, configured
-worker capacity/current in-flight commands, enqueue result/wait time,
-processing result/duration, and attempted recipients per plan. Recipient totals
-describe planned processing work rather than proven successful online delivery.
-Queue and worker gauge
-samples are serialized and read from current state so concurrent worker starts,
-finishes, and queue changes cannot leave a stale terminal gauge; every accepted
-command increments in-flight for the complete `runCommand` execution and the
-final command returns it to zero. These observations do not include UID,
-channel, or target labels.
 
 ## Pressure Observability
 
@@ -470,10 +474,12 @@ active work. Benchmark scripts use these samples for the per-node peak
 `used/cap` pool summary.
 
 Before a post-commit effect enters the asynchronous pool, it copies the
-committed-envelope slice into effect-owned storage. The envelopes themselves
-remain immutable values, while the independent slice ownership lets the writer
-retain and retry its queued backing store without racing an already-running
-effect.
+committed-envelope and reservation records into effect-owned storage. The
+envelopes themselves remain immutable values, while the independent slice
+ownership lets the writer retain and retry its queued backing store without
+racing an already-running effect. Completion aliases this immutable effect
+slice only until exact owner release under the writer lock; the slice may then
+be reused by the next dispatch without a separate allocation.
 
 `Stop` first closes admission and waits for shard admission ownership, append
 state, handoff reservations, committed backlog, and retry FIFO ownership to

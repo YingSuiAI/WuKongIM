@@ -26,6 +26,9 @@ New(Config)
 `Client` represents one authenticated WKProto TCP session. Reconnect is allowed by calling `Connect` again; the new connection gets a fresh pending tracker and reader loop, and the old connection is closed after the new session is published.
 
 Synchronous CONNECT reads and writes use `OperationTimeout` and clear socket deadlines before the background reader takes over. `Close` is terminal for a `Client`; use a new `Client` or `Pool` entry after a terminal close.
+`ReadFrame` and `Recv` are streaming waits: they have no implicit
+`OperationTimeout` and return only for a frame, session transition, close, or
+their caller context. Short control operations retain the configured timeout.
 
 ## SEND Flow
 
@@ -45,7 +48,11 @@ Send / SendAsync / SendBatch
 
 `SendBatch` returns results in input order. The writer batcher only coalesces socket writes; the wire format remains normal WKProto SEND frames. `AckTimeout` belongs to the client pending tracker and should be set high enough for callers whose own contexts own benchmark-level sendack deadlines.
 
-`SendAsync` is the low-level API used by adapters that need to expose SENDACKs through an older frame-oriented interface. It admits the SEND and returns a `SendFuture`; callers can wait with their own context.
+`SendAsync` is the low-level API used by adapters that need to expose SENDACKs through an older frame-oriented interface. It admits the SEND and returns a `SendFuture`; callers can wait with their own context. `TrySendAsync` provides the same future only when the admission lock, writer queue, and inflight bound are immediately available. It returns `ErrSendQueueFull` without leaving a pending SEND when local capacity is busy, allowing deterministic runtimes to retry without blocking their owner loop.
+The pending tracker keys each wire attempt by both `ClientSeq` and
+`ClientMsgNo`. Retries may reuse the idempotent `ClientMsgNo`, but each
+overlapping attempt must provide a distinct nonzero `ClientSeq`; late and
+out-of-order ACKs then resolve only their exact attempt.
 
 ## RECV Flow
 
@@ -53,13 +60,22 @@ Send / SendAsync / SendBatch
 reader loop
   -> decode buffered bytes into frames
   -> SENDACK resolves pending send
-  -> RECV decrypts payload when session crypto is active
-  -> optional AutoRecvAck writes RECVACK
-  -> enqueue decrypted RECV in bounded queue
-  -> Recv / ReadFrame consumes queue
+  -> RECV checks DiscardInboundRecv
+       -> yes: optionally AutoRecvAck and continue reading
+       -> no: decrypt payload when session crypto is active
+              -> enqueue decrypted RECV in bounded queue
+              -> optionally AutoRecvAck
+              -> Recv / ReadFrame consumes queue
 ```
 
-The inbound RECV queue is bounded. When full, the oldest queued RECV is dropped and the newest RECV is retained, matching benchmark tooling needs where current delivery state is more useful than unbounded backlog.
+The inbound RECV queue is bounded and lossless. When it is full, the reader
+backpressures the socket until a consumer frees capacity. Client close or
+session replacement releases a blocked publisher, so bounded delivery cannot
+strand an old reader loop. `InboundQueueSnapshot` exposes only the current
+queue depth and capacity for bounded saturation observation.
+Send-only tools that do not consume delivered payloads may set
+`DiscardInboundRecv`; RECV frames then bypass payload decryption and the queue,
+so they cannot block SENDACK progress or retain fanout payloads in memory.
 
 ## Control Flow
 
@@ -82,6 +98,11 @@ NewPool(PoolConfig)
 
 ## Adapter Notes
 
-`internal/bench/wkproto` wraps `pkg/client` to preserve the historical `ReadFrame` API. It converts `SendFuture` results back into local `SendackPacket` frames and forwards decrypted RECV packets. Its bounded adapter queue keeps SENDACK/error results ahead of RECV bursts so successful sends are not hidden by receive backlog.
+`internal/bench/wkproto` wraps `pkg/client` to preserve the historical
+`ReadFrame` API. It converts `SendFuture` results back into local
+`SendackPacket` frames and forwards decrypted RECV packets. Separate bounded
+RECV, SENDACK, and error queues isolate acknowledgement progress without
+discarding receive evidence. Error and SENDACK results share a fixed priority
+burst quota so neither errors nor an already queued RECV can starve.
 
 `test/e2e/suite` uses the same package for CONNECT, crypto, SENDACK matching, and RECV decryption while keeping black-box helper methods outside the client package.

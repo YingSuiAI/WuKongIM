@@ -182,7 +182,7 @@ func TestServicePassesAppendAdaptiveFlushTuningToRuntime(t *testing.T) {
 	require.Equal(t, uint64(1), result.MessageSeq)
 }
 
-func TestSlotMetaSourceEnsuresExistingRuntimeMeta(t *testing.T) {
+func TestSlotMetaSourceExistingMetaDoesNotCreate(t *testing.T) {
 	id := ch.ChannelID{ID: "ensure-existing", Type: 1}
 	reader := &runtimeMetaReaderFake{meta: metadb.ChannelRuntimeMeta{
 		ChannelID:    id.ID,
@@ -201,12 +201,12 @@ func TestSlotMetaSourceEnsuresExistingRuntimeMeta(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnsureChannelMeta() error = %v", err)
 	}
-	if meta.Epoch != 2 || meta.LeaderEpoch != 3 || meta.Leader != 2 || reader.upserts != 0 {
-		t.Fatalf("meta=%#v upserts=%d, want existing without create", meta, reader.upserts)
+	if meta.Epoch != 2 || meta.LeaderEpoch != 3 || meta.Leader != 2 || reader.creates != 0 {
+		t.Fatalf("meta=%#v creates=%d, want existing without create", meta, reader.creates)
 	}
 }
 
-func TestSlotMetaSourceCreatesMissingRuntimeMeta(t *testing.T) {
+func TestSlotMetaSourceMissingMetaCreatesOnce(t *testing.T) {
 	id := ch.ChannelID{ID: "ensure-create", Type: 1}
 	reader := &runtimeMetaReaderFake{err: metadb.ErrNotFound}
 	source := NewSlotMetaSource(reader, SlotMetaSourceOptions{DefaultReplicas: []ch.NodeID{2, 1}, DefaultMinISR: 1})
@@ -215,14 +215,39 @@ func TestSlotMetaSourceCreatesMissingRuntimeMeta(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnsureChannelMeta() error = %v", err)
 	}
-	if reader.upserts != 1 {
-		t.Fatalf("upserts = %d, want one create", reader.upserts)
+	if reader.creates != 1 || reader.upserts != 0 {
+		t.Fatalf("creates=%d upserts=%d, want one create-only call", reader.creates, reader.upserts)
 	}
 	if meta.ID != id || meta.Epoch != 1 || meta.LeaderEpoch != 1 || meta.Leader != 2 || meta.Status != ch.StatusActive {
 		t.Fatalf("created meta = %#v, want initial active meta", meta)
 	}
 	if got, want := meta.Replicas, []ch.NodeID{1, 2}; !equalNodeIDs(got, want) {
 		t.Fatalf("Replicas = %v, want %v", got, want)
+	}
+}
+
+func TestSlotMetaSourceConcurrentCreateLoserReturnsAuthoritativeMeta(t *testing.T) {
+	id := ch.ChannelID{ID: "ensure-create-loser", Type: 1}
+	authoritative := metadb.ChannelRuntimeMeta{
+		ChannelID: id.ID, ChannelType: int64(id.Type), ChannelEpoch: 4, LeaderEpoch: 3,
+		Leader: 1, Replicas: []uint64{1, 3}, ISR: []uint64{1, 3}, MinISR: 1,
+		Status: uint8(ch.StatusActive),
+	}
+	store := &concurrentCreateRuntimeMetaStore{authoritative: authoritative}
+	source := NewSlotMetaSource(store, SlotMetaSourceOptions{
+		DefaultReplicas: []ch.NodeID{2, 1},
+		DefaultMinISR:   1,
+	})
+
+	meta, err := source.EnsureChannelMeta(context.Background(), id)
+	if err != nil {
+		t.Fatalf("EnsureChannelMeta() error = %v", err)
+	}
+	if store.creates != 1 || store.reads != 2 {
+		t.Fatalf("creates=%d reads=%d, want one create and authoritative reread", store.creates, store.reads)
+	}
+	if meta.Leader != 1 || meta.Epoch != 4 || meta.LeaderEpoch != 3 {
+		t.Fatalf("meta=%#v, want concurrently created authoritative row", meta)
 	}
 }
 
@@ -246,21 +271,18 @@ func TestSlotMetaSourceObservesEnsureMetaStageBreakdown(t *testing.T) {
 	requireAppendStage(t, observer.events, "meta_final_read", "ok")
 }
 
-func TestSlotMetaSourceReturnsCreatedMetaWhenLocalReadLagsAfterWrite(t *testing.T) {
+func TestSlotMetaSourceCreateObservesAuthoritativeRereadMiss(t *testing.T) {
 	id := ch.ChannelID{ID: "ensure-create-lagging-read", Type: 1}
 	store := &laggingRuntimeMetaStore{}
 	observer := &appendStageObserver{}
 	source := NewSlotMetaSource(store, SlotMetaSourceOptions{DefaultReplicas: []ch.NodeID{2, 1}, DefaultMinISR: 1, Observer: observer})
 
-	meta, err := source.EnsureChannelMeta(context.Background(), id)
-	if err != nil {
-		t.Fatalf("EnsureChannelMeta() error = %v", err)
+	_, err := source.EnsureChannelMeta(context.Background(), id)
+	if !errors.Is(err, metadb.ErrNotFound) {
+		t.Fatalf("EnsureChannelMeta() error = %v, want authoritative reread miss", err)
 	}
-	if store.upserts != 1 {
-		t.Fatalf("upserts = %d, want one create", store.upserts)
-	}
-	if meta.ID != id || meta.Leader != 2 || meta.Epoch != 1 || meta.LeaderEpoch != 1 {
-		t.Fatalf("created meta = %#v, want deterministic initial meta", meta)
+	if store.creates != 1 || store.upserts != 0 {
+		t.Fatalf("creates=%d upserts=%d, want one create-only call", store.creates, store.upserts)
 	}
 	requireAppendStage(t, observer.events, "meta_final_read", "miss")
 }
@@ -280,8 +302,8 @@ func TestSlotMetaSourceCreatesMissingRuntimeMetaFromPlacement(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnsureChannelMeta() error = %v", err)
 	}
-	if reader.upserts != 1 {
-		t.Fatalf("upserts = %d, want one create", reader.upserts)
+	if reader.creates != 1 || reader.upserts != 0 {
+		t.Fatalf("creates=%d upserts=%d, want one create-only call", reader.creates, reader.upserts)
 	}
 	if meta.Leader != 3 || meta.MinISR != 2 {
 		t.Fatalf("created meta leader/minISR = %#v, want placement", meta)
@@ -646,7 +668,7 @@ func TestCurrentClientFallsBackToLegacyV5PeerAndCachesCompatibility(t *testing.T
 	require.Equal(t, []uint8{
 		codecVersion, legacyCodecVersionV5,
 		legacyCodecVersionV5,
-		codecVersion,
+		codecVersion, legacyCodecVersionV6,
 	}, versions)
 }
 
@@ -675,7 +697,7 @@ func TestCurrentClientNeedMetaBatchDoesNotFallbackToLegacyV5Peer(t *testing.T) {
 	}})
 	require.Error(t, err)
 	require.True(t, isLegacyCodecVersionRejection(err))
-	require.Equal(t, []uint8{codecVersion}, versions, "authority batches must never retry with a codec that omits v6 metadata")
+	require.Equal(t, []uint8{codecVersion, legacyCodecVersionV6}, versions, "authority batches may fall back only to a codec that preserves v6 metadata")
 }
 
 func TestCurrentClientNeedMetaRejectsLegacySuccessResponse(t *testing.T) {
@@ -1122,6 +1144,8 @@ func TestOlderV6SuccessCannotDeleteNewerLegacyRejection(t *testing.T) {
 			} else {
 				return nil, transport.RemoteError{Code: "remote_error", Message: errInvalidCodecFrame.Error()}
 			}
+		} else if payload[0] == legacyCodecVersionV6 {
+			return nil, transport.RemoteError{Code: "remote_error", Message: errInvalidCodecFrame.Error()}
 		} else {
 			v5Calls.Add(1)
 		}
@@ -1409,7 +1433,7 @@ func TestCodecEncodesAllFramesWithBinaryPayload(t *testing.T) {
 		{
 			name: "append batch request",
 			encode: func() ([]byte, error) {
-				return encodeAppendBatchRequest(ch.AppendBatchRequest{ChannelID: ch.ChannelID{ID: "room", Type: 1}, Messages: []ch.Message{sampleMessage}, TraceID: "trace-request", ChannelKey: "channel/key-request", Attempt: 3, CommitMode: ch.CommitModeLocal, ExpectedChannelEpoch: 1, ExpectedLeaderEpoch: 2, OmitResultPayload: true})
+				return encodeAppendBatchRequest(ch.AppendBatchRequest{ChannelID: ch.ChannelID{ID: "room", Type: 1}, Messages: []ch.Message{sampleMessage}, TraceID: "trace-request", ChannelKey: "channel/key-request", Attempt: 3, CommitMode: ch.CommitModeLocal, ExpectedChannelEpoch: 1, ExpectedLeaderEpoch: 2, OmitResultPayload: true, ServerAllocatedMessageIDs: true})
 			},
 			decode: func(data []byte) {
 				got, err := decodeAppendBatchRequest(data)
@@ -1419,6 +1443,7 @@ func TestCodecEncodesAllFramesWithBinaryPayload(t *testing.T) {
 				require.Equal(t, "channel/key-request", got.ChannelKey)
 				require.Equal(t, 3, got.Attempt)
 				require.True(t, got.OmitResultPayload)
+				require.True(t, got.ServerAllocatedMessageIDs)
 			},
 		},
 		{
@@ -1480,12 +1505,69 @@ func TestCodecEncodesAllFramesWithBinaryPayload(t *testing.T) {
 	}
 }
 
+func TestLegacyAppendBatchCodecDoesNotClaimServerAllocatedMessageIDs(t *testing.T) {
+	data, err := encodeAppendBatchRequestVersion(ch.AppendBatchRequest{
+		ChannelID:                 ch.ChannelID{ID: "room", Type: 1},
+		Messages:                  []ch.Message{{MessageID: 10, Payload: []byte("payload")}},
+		ServerAllocatedMessageIDs: true,
+	}, legacyCodecVersionV6)
+	require.NoError(t, err)
+
+	got, err := decodeAppendBatchRequest(data)
+	require.NoError(t, err)
+	require.False(t, got.ServerAllocatedMessageIDs)
+}
+
 func TestCodecLastVisibleResponsePreservesApplicationError(t *testing.T) {
 	data, err := encodeRPCResult(kindLastVisibleResponse, LastVisibleResponse{}, ch.ErrStaleMeta)
 	require.NoError(t, err)
 
 	_, err = decodeLastVisibleResponse(data)
 	require.ErrorIs(t, err, ch.ErrStaleMeta)
+}
+
+func TestCodecV6PreservesOriginalLastVisibleLayout(t *testing.T) {
+	wantRequest := LastVisibleRequest{
+		ChannelID: ch.ChannelID{ID: "room", Type: 2}, VisibleAfterSeq: 7,
+		ExpectedLeader: 3, ExpectedChannelEpoch: 4, ExpectedLeaderEpoch: 5,
+		HeadUID: "u1", ExpectedMinISR: 2,
+	}
+	v6Request, err := encodeLastVisibleRequestVersion(wantRequest, legacyCodecVersionV6)
+	require.NoError(t, err)
+	gotRequest, err := decodeLastVisibleRequest(v6Request)
+	require.NoError(t, err)
+	require.Equal(t, wantRequest.ChannelID, gotRequest.ChannelID)
+	require.Equal(t, wantRequest.VisibleAfterSeq, gotRequest.VisibleAfterSeq)
+	require.Equal(t, wantRequest.ExpectedLeader, gotRequest.ExpectedLeader)
+	require.Equal(t, wantRequest.ExpectedChannelEpoch, gotRequest.ExpectedChannelEpoch)
+	require.Equal(t, wantRequest.ExpectedLeaderEpoch, gotRequest.ExpectedLeaderEpoch)
+	require.Empty(t, gotRequest.HeadUID)
+	require.Zero(t, gotRequest.ExpectedMinISR)
+
+	wantResponse := LastVisibleResponse{
+		Found: true, Message: ch.Message{MessageID: 9, MessageSeq: 8, ChannelID: "room", ChannelType: 2},
+		LastCommittedSeq: 10, RetentionThroughSeq: 2, CurrentUserLastSendSeq: 6,
+	}
+	v6Response, err := encodeRPCResultVersion(legacyCodecVersionV6, kindLastVisibleResponse, wantResponse, nil)
+	require.NoError(t, err)
+	gotResponse, err := decodeLastVisibleResponse(v6Response)
+	require.NoError(t, err)
+	require.True(t, gotResponse.Found)
+	require.Equal(t, wantResponse.Message, gotResponse.Message)
+	require.Zero(t, gotResponse.LastCommittedSeq)
+	require.Zero(t, gotResponse.RetentionThroughSeq)
+	require.Zero(t, gotResponse.CurrentUserLastSendSeq)
+
+	v7Request, err := encodeLastVisibleRequestVersion(wantRequest, codecVersion)
+	require.NoError(t, err)
+	gotRequest, err = decodeLastVisibleRequest(v7Request)
+	require.NoError(t, err)
+	require.Equal(t, wantRequest, gotRequest)
+	v7Response, err := encodeRPCResultVersion(codecVersion, kindLastVisibleResponse, wantResponse, nil)
+	require.NoError(t, err)
+	gotResponse, err = decodeLastVisibleResponse(v7Response)
+	require.NoError(t, err)
+	require.Equal(t, wantResponse, gotResponse)
 }
 
 func TestCodecCurrentEncoderEmitsV5Frames(t *testing.T) {
@@ -2680,8 +2762,8 @@ func TestServiceResolveAppendAuthorityCreatesMissingRuntimeMeta(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveAppendAuthority() error = %v", err)
 	}
-	if reader.upserts != 1 {
-		t.Fatalf("upserts = %d, want missing metadata to be created", reader.upserts)
+	if reader.creates != 1 || reader.upserts != 0 {
+		t.Fatalf("creates=%d upserts=%d, want missing metadata to use create-only path", reader.creates, reader.upserts)
 	}
 	if got.ID != id || got.Key != ch.ChannelKeyForID(id) || got.Leader != 2 || got.Epoch != 1 || got.LeaderEpoch != 1 {
 		t.Fatalf("created authority meta = %#v, want deterministic initial authority", got)
@@ -2752,6 +2834,188 @@ func TestServiceReadChannelLastVisibleUsesLocalLeaderStore(t *testing.T) {
 	require.False(t, ok)
 	require.Equal(t, int64(2), tracking.acquired.Load())
 	require.Equal(t, int64(2), tracking.closed.Load())
+}
+
+func TestServiceReadConversationHeadUsesCommittedLeaderState(t *testing.T) {
+	id := ch.ChannelID{ID: "conversation-head-local", Type: 1}
+	factory := channelstore.NewMemoryFactory()
+	store, err := factory.ChannelStore(ch.ChannelKeyForID(id), id)
+	require.NoError(t, err)
+	_, err = store.AppendLeader(context.Background(), channelstore.AppendLeaderRequest{Records: []ch.Record{
+		{ID: 10, FromUID: "u0", Payload: []byte("retained")},
+		{ID: 11, FromUID: "u1", Payload: []byte("self")},
+		{ID: 12, FromUID: "u2", Payload: []byte("tail")},
+	}})
+	require.NoError(t, err)
+	source := NewStaticMetaSource([]ch.Meta{{
+		ID: id, Epoch: 1, LeaderEpoch: 1, Leader: 1,
+		Replicas: []ch.NodeID{1}, ISR: []ch.NodeID{1}, MinISR: 1,
+		RetentionThroughSeq: 1, Status: ch.StatusActive,
+	}})
+	svc, err := NewService(Config{Runtime: &fakeRuntime{}, LocalNode: 1, MetaSource: source, Store: factory})
+	require.NoError(t, err)
+
+	head, err := svc.ReadConversationHead(context.Background(), id, "u1")
+	require.NoError(t, err)
+	require.Equal(t, uint64(3), head.LastCommittedSeq)
+	require.Equal(t, uint64(1), head.RetentionThroughSeq)
+	require.Equal(t, uint64(2), head.CurrentUserLastSendSeq)
+	require.True(t, head.Found)
+	require.Equal(t, uint64(3), head.Message.MessageSeq)
+	require.Equal(t, []byte("tail"), head.Message.Payload)
+}
+
+func TestServiceReadConversationHeadsUsesOneLiveRuntimeProbeBeforeLeaderCheckpoint(t *testing.T) {
+	first := ch.ChannelID{ID: "conversation-head-live-first", Type: 2}
+	second := ch.ChannelID{ID: "conversation-head-live-second", Type: 2}
+	factory := channelstore.NewMemoryFactory()
+	for index, id := range []ch.ChannelID{first, second} {
+		store, err := factory.ChannelStore(ch.ChannelKeyForID(id), id)
+		require.NoError(t, err)
+		_, err = store.AppendLeader(context.Background(), channelstore.AppendLeaderRequest{Records: []ch.Record{
+			{ID: uint64(index*10 + 1), FromUID: "u1", Payload: []byte("first")},
+			{ID: uint64(index*10 + 2), FromUID: "u2", Payload: []byte("tail")},
+		}})
+		require.NoError(t, err)
+		require.NoError(t, store.Close())
+	}
+	source := NewStaticMetaSource([]ch.Meta{
+		{ID: first, Epoch: 3, LeaderEpoch: 5, Leader: 1, Replicas: []ch.NodeID{1, 2, 3}, ISR: []ch.NodeID{1, 2, 3}, MinISR: 2, Status: ch.StatusActive},
+		{ID: second, Epoch: 7, LeaderEpoch: 9, Leader: 1, Replicas: []ch.NodeID{1, 2, 3}, ISR: []ch.NodeID{1, 2, 3}, MinISR: 2, Status: ch.StatusActive},
+	})
+	runtime := &conversationHeadProbeRuntime{
+		fakeRuntime: &fakeRuntime{},
+		probe: ch.RuntimeProbeResult{Channels: []ch.RuntimeProbeChannel{
+			{ChannelID: first, ChannelEpoch: 3, LeaderEpoch: 5, Role: ch.RoleLeader, Status: ch.StatusActive, LEO: 2, HW: 2},
+			{ChannelID: second, ChannelEpoch: 7, LeaderEpoch: 9, Role: ch.RoleLeader, Status: ch.StatusActive, LEO: 2, HW: 2},
+		}},
+	}
+	svc, err := NewService(Config{Runtime: runtime, LocalNode: 1, MetaSource: source, Store: factory})
+	require.NoError(t, err)
+
+	heads, err := svc.ReadConversationHeads(context.Background(), []ch.ChannelID{first, second}, "u1")
+	require.NoError(t, err)
+	require.Len(t, heads, 2)
+	require.Equal(t, 1, runtime.probeCalls)
+	for _, result := range heads {
+		require.NoError(t, result.Err)
+		require.Equal(t, uint64(2), result.Head.LastCommittedSeq)
+		require.True(t, result.Head.Found)
+		require.Equal(t, uint64(2), result.Head.Message.MessageSeq)
+		require.Equal(t, []byte("tail"), result.Head.Message.Payload)
+	}
+}
+
+func TestServiceReadConversationHeadsGroupsRemoteReadsByLeaderAndKeepsAlignment(t *testing.T) {
+	remoteA := ch.ChannelID{ID: "conversation-head-remote-a", Type: 2}
+	local := ch.ChannelID{ID: "conversation-head-local", Type: 2}
+	remoteB := ch.ChannelID{ID: "conversation-head-remote-b", Type: 2}
+	factory := channelstore.NewMemoryFactory()
+	store, err := factory.ChannelStore(ch.ChannelKeyForID(local), local)
+	require.NoError(t, err)
+	_, err = store.AppendLeader(context.Background(), channelstore.AppendLeaderRequest{Records: []ch.Record{{ID: 30, FromUID: "u3", Payload: []byte("local")}}})
+	require.NoError(t, err)
+	require.NoError(t, store.Close())
+	source := NewStaticMetaSource([]ch.Meta{
+		{ID: remoteA, Epoch: 1, LeaderEpoch: 2, Leader: 2, Replicas: []ch.NodeID{2}, ISR: []ch.NodeID{2}, MinISR: 1, Status: ch.StatusActive},
+		{ID: local, Epoch: 1, LeaderEpoch: 1, Leader: 1, Replicas: []ch.NodeID{1}, ISR: []ch.NodeID{1}, MinISR: 1, Status: ch.StatusActive},
+		{ID: remoteB, Epoch: 3, LeaderEpoch: 4, Leader: 2, Replicas: []ch.NodeID{2}, ISR: []ch.NodeID{2}, MinISR: 1, Status: ch.StatusActive},
+	})
+	forward := &recordingConversationHeadsForward{response: ConversationHeadsResponse{Items: []ConversationHeadResult{
+		{Head: ConversationHead{LastCommittedSeq: 10, Found: true, Message: ch.Message{MessageSeq: 10, Payload: []byte("remote-a")}}},
+		{Err: ch.ErrNotReady},
+	}}}
+	svc, err := NewService(Config{Runtime: &fakeRuntime{}, LocalNode: 1, MetaSource: source, Store: factory, Forward: forward})
+	require.NoError(t, err)
+
+	results, err := svc.ReadConversationHeads(context.Background(), []ch.ChannelID{remoteA, local, remoteB}, "u1")
+	require.NoError(t, err)
+	require.Len(t, results, 3)
+	require.Equal(t, uint64(10), results[0].Head.LastCommittedSeq)
+	require.Equal(t, []byte("remote-a"), results[0].Head.Message.Payload)
+	require.NoError(t, results[1].Err)
+	require.Equal(t, uint64(1), results[1].Head.LastCommittedSeq)
+	require.Equal(t, []byte("local"), results[1].Head.Message.Payload)
+	require.ErrorIs(t, results[2].Err, ch.ErrNotReady)
+	require.Equal(t, 1, forward.calls)
+	require.Equal(t, ch.NodeID(2), forward.node)
+	require.Equal(t, []ch.ChannelID{remoteA, remoteB}, []ch.ChannelID{
+		forward.request.Items[0].ChannelID,
+		forward.request.Items[1].ChannelID,
+	})
+}
+
+func TestServiceReadCommittedBatchGroupsRemoteReadsByLeaderAndKeepsAlignment(t *testing.T) {
+	remoteA := ch.ChannelID{ID: "committed-read-remote-a", Type: 2}
+	local := ch.ChannelID{ID: "committed-read-local", Type: 2}
+	remoteB := ch.ChannelID{ID: "committed-read-remote-b", Type: 2}
+	factory := channelstore.NewMemoryFactory()
+	store, err := factory.ChannelStore(ch.ChannelKeyForID(local), local)
+	require.NoError(t, err)
+	_, err = store.AppendLeader(context.Background(), channelstore.AppendLeaderRequest{Records: []ch.Record{{ID: 30, Payload: []byte("local")}}})
+	require.NoError(t, err)
+	require.NoError(t, store.Close())
+	source := NewStaticMetaSource([]ch.Meta{
+		{ID: remoteA, Epoch: 1, LeaderEpoch: 2, Leader: 2, Replicas: []ch.NodeID{2}, ISR: []ch.NodeID{2}, MinISR: 1, Status: ch.StatusActive},
+		{ID: local, Epoch: 1, LeaderEpoch: 1, Leader: 1, Replicas: []ch.NodeID{1}, ISR: []ch.NodeID{1}, MinISR: 1, Status: ch.StatusActive},
+		{ID: remoteB, Epoch: 3, LeaderEpoch: 4, Leader: 2, Replicas: []ch.NodeID{2}, ISR: []ch.NodeID{2}, MinISR: 1, Status: ch.StatusActive},
+	})
+	forward := &recordingConversationHeadsForward{committedResponse: CommittedReadsResponse{Items: []CommittedReadResult{
+		{Read: channelstore.ReadCommittedResult{Messages: []ch.Message{{MessageSeq: 10, Payload: []byte("remote-a")}}}},
+		{Err: ch.ErrNotReady},
+	}}}
+	svc, err := NewService(Config{Runtime: &fakeRuntime{}, LocalNode: 1, MetaSource: source, Store: factory, Forward: forward})
+	require.NoError(t, err)
+
+	reads := []CommittedRead{
+		{ChannelID: remoteA, Request: channelstore.ReadCommittedRequest{FromSeq: 1, MaxSeq: 20, Limit: 2, MaxBytes: 1024}},
+		{ChannelID: local, Request: channelstore.ReadCommittedRequest{FromSeq: 1, MaxSeq: 20, Limit: 2, MaxBytes: 1024}},
+		{ChannelID: remoteB, Request: channelstore.ReadCommittedRequest{FromSeq: 1, MaxSeq: 20, Limit: 2, MaxBytes: 1024}},
+	}
+	results, err := svc.ReadCommittedBatch(context.Background(), reads)
+	require.NoError(t, err)
+	require.Len(t, results, 3)
+	require.Equal(t, []byte("remote-a"), results[0].Read.Messages[0].Payload)
+	require.NoError(t, results[1].Err)
+	require.Equal(t, []byte("local"), results[1].Read.Messages[0].Payload)
+	require.ErrorIs(t, results[2].Err, ch.ErrNotReady)
+	require.Equal(t, 1, forward.committedCalls)
+	require.Equal(t, ch.NodeID(2), forward.committedNode)
+	require.Equal(t, []ch.ChannelID{remoteA, remoteB}, []ch.ChannelID{
+		forward.committedRequest.Items[0].ChannelID,
+		forward.committedRequest.Items[1].ChannelID,
+	})
+}
+
+func TestServiceReadCommittedBatchDoesNotReplayCommittedTailPastForwardCursor(t *testing.T) {
+	id := ch.ChannelID{ID: "committed-read-forward-past-tail", Type: 2}
+	factory := channelstore.NewMemoryFactory()
+	store, err := factory.ChannelStore(ch.ChannelKeyForID(id), id)
+	require.NoError(t, err)
+	_, err = store.AppendLeader(context.Background(), channelstore.AppendLeaderRequest{Records: []ch.Record{{ID: 30, Payload: []byte("tail")}}})
+	require.NoError(t, err)
+	require.NoError(t, store.Close())
+	source := NewStaticMetaSource([]ch.Meta{{
+		ID: id, Epoch: 1, LeaderEpoch: 1, Leader: 1,
+		Replicas: []ch.NodeID{1}, ISR: []ch.NodeID{1}, MinISR: 1, Status: ch.StatusActive,
+	}})
+	svc, err := NewService(Config{Runtime: &fakeRuntime{}, LocalNode: 1, MetaSource: source, Store: factory})
+	require.NoError(t, err)
+
+	results, err := svc.ReadCommittedBatch(context.Background(), []CommittedRead{{
+		ChannelID: id,
+		Request: channelstore.ReadCommittedRequest{
+			FromSeq: 2,
+			MaxSeq:  10,
+			Limit:   10,
+		},
+	}})
+
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	require.NoError(t, results[0].Err)
+	require.Empty(t, results[0].Read.Messages)
+	require.Equal(t, uint64(2), results[0].Read.NextSeq)
 }
 
 func TestServiceReadLocalLastVisibleClosesStoreOnReadErrorAndCancellation(t *testing.T) {
@@ -3013,6 +3277,18 @@ type fakeRuntime struct {
 	appendRequireApply bool
 }
 
+type conversationHeadProbeRuntime struct {
+	*fakeRuntime
+	probe      ch.RuntimeProbeResult
+	probeErr   error
+	probeCalls int
+}
+
+func (r *conversationHeadProbeRuntime) RuntimeProbe(_ context.Context, _ ch.RuntimeSelector) (ch.RuntimeProbeResult, error) {
+	r.probeCalls++
+	return r.probe, r.probeErr
+}
+
 func (f *fakeRuntime) ApplyMeta(meta ch.Meta) error {
 	f.applyCalls++
 	f.lastApplied = meta
@@ -3100,6 +3376,14 @@ func (c *deadlineForwardClient) ForwardLastVisible(context.Context, ch.NodeID, L
 	return LastVisibleResponse{}, context.DeadlineExceeded
 }
 
+func (c *deadlineForwardClient) ForwardConversationHeads(context.Context, ch.NodeID, ConversationHeadsRequest) (ConversationHeadsResponse, error) {
+	return ConversationHeadsResponse{}, context.DeadlineExceeded
+}
+
+func (c *deadlineForwardClient) ForwardCommittedReads(context.Context, ch.NodeID, CommittedReadsRequest) (CommittedReadsResponse, error) {
+	return CommittedReadsResponse{}, context.DeadlineExceeded
+}
+
 type recordingLastVisibleForward struct {
 	message             ch.Message
 	ok                  bool
@@ -3107,6 +3391,43 @@ type recordingLastVisibleForward struct {
 	lastNode            ch.NodeID
 	lastID              ch.ChannelID
 	lastVisibleAfterSeq uint64
+}
+
+type recordingConversationHeadsForward struct {
+	calls             int
+	node              ch.NodeID
+	request           ConversationHeadsRequest
+	response          ConversationHeadsResponse
+	committedCalls    int
+	committedNode     ch.NodeID
+	committedRequest  CommittedReadsRequest
+	committedResponse CommittedReadsResponse
+}
+
+func (f *recordingConversationHeadsForward) ForwardAppend(context.Context, ch.NodeID, ch.AppendRequest) (ch.AppendResult, error) {
+	return ch.AppendResult{}, nil
+}
+
+func (f *recordingConversationHeadsForward) ForwardAppendBatch(context.Context, ch.NodeID, ch.AppendBatchRequest) (ch.AppendBatchResult, error) {
+	return ch.AppendBatchResult{}, nil
+}
+
+func (f *recordingConversationHeadsForward) ForwardLastVisible(context.Context, ch.NodeID, LastVisibleRequest) (LastVisibleResponse, error) {
+	return LastVisibleResponse{}, nil
+}
+
+func (f *recordingConversationHeadsForward) ForwardConversationHeads(_ context.Context, node ch.NodeID, request ConversationHeadsRequest) (ConversationHeadsResponse, error) {
+	f.calls++
+	f.node = node
+	f.request = request
+	return f.response, nil
+}
+
+func (f *recordingConversationHeadsForward) ForwardCommittedReads(_ context.Context, node ch.NodeID, request CommittedReadsRequest) (CommittedReadsResponse, error) {
+	f.committedCalls++
+	f.committedNode = node
+	f.committedRequest = request
+	return f.committedResponse, nil
 }
 
 func (f *recordingLastVisibleForward) ForwardAppend(context.Context, ch.NodeID, ch.AppendRequest) (ch.AppendResult, error) {
@@ -3122,6 +3443,14 @@ func (f *recordingLastVisibleForward) ForwardLastVisible(_ context.Context, node
 	f.lastID = req.ChannelID
 	f.lastVisibleAfterSeq = req.VisibleAfterSeq
 	return LastVisibleResponse{Message: f.message, Found: f.ok}, f.err
+}
+
+func (f *recordingLastVisibleForward) ForwardConversationHeads(context.Context, ch.NodeID, ConversationHeadsRequest) (ConversationHeadsResponse, error) {
+	return ConversationHeadsResponse{}, f.err
+}
+
+func (f *recordingLastVisibleForward) ForwardCommittedReads(context.Context, ch.NodeID, CommittedReadsRequest) (CommittedReadsResponse, error) {
+	return CommittedReadsResponse{}, f.err
 }
 
 type rpcErrorServer struct {
@@ -3441,6 +3770,7 @@ type runtimeMetaReaderFake struct {
 	meta    metadb.ChannelRuntimeMeta
 	err     error
 	upserts int
+	creates int
 }
 
 func (f runtimeMetaReaderFake) GetChannelRuntimeMeta(context.Context, string, int64) (metadb.ChannelRuntimeMeta, error) {
@@ -3457,8 +3787,16 @@ func (f *runtimeMetaReaderFake) UpsertChannelRuntimeMeta(_ context.Context, meta
 	return nil
 }
 
+func (f *runtimeMetaReaderFake) CreateChannelRuntimeMeta(_ context.Context, meta metadb.ChannelRuntimeMeta) (RuntimeMetaCreateResult, error) {
+	f.creates++
+	f.err = nil
+	f.meta = metadb.NormalizeChannelRuntimeMeta(meta)
+	return RuntimeMetaCreateResult{Created: true}, nil
+}
+
 type laggingRuntimeMetaStore struct {
 	upserts int
+	creates int
 }
 
 func (f *laggingRuntimeMetaStore) GetChannelRuntimeMeta(context.Context, string, int64) (metadb.ChannelRuntimeMeta, error) {
@@ -3468,6 +3806,30 @@ func (f *laggingRuntimeMetaStore) GetChannelRuntimeMeta(context.Context, string,
 func (f *laggingRuntimeMetaStore) UpsertChannelRuntimeMeta(context.Context, metadb.ChannelRuntimeMeta) error {
 	f.upserts++
 	return nil
+}
+
+func (f *laggingRuntimeMetaStore) CreateChannelRuntimeMeta(context.Context, metadb.ChannelRuntimeMeta) (RuntimeMetaCreateResult, error) {
+	f.creates++
+	return RuntimeMetaCreateResult{Created: true}, nil
+}
+
+type concurrentCreateRuntimeMetaStore struct {
+	authoritative metadb.ChannelRuntimeMeta
+	reads         int
+	creates       int
+}
+
+func (f *concurrentCreateRuntimeMetaStore) GetChannelRuntimeMeta(context.Context, string, int64) (metadb.ChannelRuntimeMeta, error) {
+	f.reads++
+	if f.reads == 1 {
+		return metadb.ChannelRuntimeMeta{}, metadb.ErrNotFound
+	}
+	return f.authoritative, nil
+}
+
+func (f *concurrentCreateRuntimeMetaStore) CreateChannelRuntimeMeta(context.Context, metadb.ChannelRuntimeMeta) (RuntimeMetaCreateResult, error) {
+	f.creates++
+	return RuntimeMetaCreateResult{Created: false}, nil
 }
 
 type fakeEnsuringMetaSource struct {

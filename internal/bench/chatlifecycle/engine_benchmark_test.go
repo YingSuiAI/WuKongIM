@@ -1,0 +1,93 @@
+package chatlifecycle
+
+import (
+	"context"
+	"strconv"
+	"testing"
+	"time"
+)
+
+func BenchmarkEngineWorkerGenerationBootstrapTick10000(b *testing.B) {
+	const sessionCount = 10_000
+	fixture := newEngineTestFixture(b, engineTestLimits{OnlineUsers: sessionCount})
+	if err := fixture.engine.Start(context.Background()); err != nil {
+		b.Fatalf("Start: %v", err)
+	}
+	client := &engineFakeClient{}
+	deadline := fixture.clock.Now().Add(time.Hour)
+	fixture.pool.mu.Lock()
+	for index := 0; index < sessionCount; index++ {
+		uid := "benchmark-worker-user-" + strconv.Itoa(index)
+		fixture.pool.online[uid] = &onlineSession{
+			snapshot: SessionSnapshot{UID: uid, UserIndex: uint64(index), Deadline: deadline, TrafficReady: true},
+			client:   client,
+		}
+	}
+	fixture.pool.mu.Unlock()
+	b.Cleanup(func() {
+		fixture.pool.mu.Lock()
+		fixture.pool.online = make(map[string]*onlineSession)
+		fixture.pool.mu.Unlock()
+		_ = fixture.engine.Stop()
+	})
+	generation := &engineWorkerGeneration{
+		engine: fixture.engine, onlineTarget: sessionCount, trafficDemand: []uint64{^uint64(0)},
+	}
+	now := fixture.clock.Now()
+
+	b.ReportAllocs()
+	b.ReportMetric(sessionCount, "sessions/tick")
+	b.ResetTimer()
+	for iteration := 0; iteration < b.N; iteration++ {
+		generation.trafficReady.Store(false)
+		if err := generation.step(context.Background(), now); err != nil {
+			b.Fatalf("step: %v", err)
+		}
+	}
+}
+
+func BenchmarkEngineAdvanceAutoAck2000(b *testing.B) {
+	const workPerIteration = 2_000
+	fixture := newEngineTestFixture(b, engineTestLimits{
+		CommandCapacity: 4_096, WorkCapacity: 8_192,
+		InflightCapacity: 4_096, MaxWorkPerAdvance: 4_096,
+	})
+	fixture.factory.autoAck = true
+	if err := fixture.engine.Start(context.Background()); err != nil {
+		b.Fatalf("Start: %v", err)
+	}
+	b.Cleanup(func() { _ = fixture.engine.Stop() })
+	uid := fixture.identity.UID(23)
+	if _, err := fixture.engine.Login(context.Background(), SessionLogin{
+		UID: uid, UserIndex: 23, LoginOrdinal: 3,
+	}); err != nil {
+		b.Fatalf("Login: %v", err)
+	}
+
+	b.ReportAllocs()
+	b.ReportMetric(workPerIteration, "work/op")
+	for iteration := 0; iteration < b.N; iteration++ {
+		b.StopTimer()
+		for offset := 0; offset < workPerIteration; offset++ {
+			ordinal := uint64(iteration*workPerIteration + offset + 1)
+			if err := fixture.engine.SubmitGranted(fixture.intent(b, uid, "benchmark-group", ordinal, TrafficGroup), fixture.clock.Now()); err != nil {
+				b.Fatalf("SubmitGranted(%d): %v", ordinal, err)
+			}
+		}
+		b.StartTimer()
+		processed, err := fixture.engine.Advance(fixture.clock.Now())
+		if err != nil || processed != workPerIteration {
+			b.Fatalf("Advance = %d, %v", processed, err)
+		}
+		waitForEngineCompletions(b, fixture.engine, "benchmark auto-ACK")
+		b.StopTimer()
+		fixture.factory.mu.Lock()
+		fixture.factory.routesV = nil
+		fixture.factory.mu.Unlock()
+		for _, client := range fixture.factory.clients() {
+			client.mu.Lock()
+			client.sent = nil
+			client.mu.Unlock()
+		}
+	}
+}

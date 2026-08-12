@@ -14,12 +14,13 @@ CHANNEL_REACTOR_COUNT="${WK_WKCLI_SIM_THREE_SMOKE_CHANNEL_REACTOR_COUNT:-32}"
 CHANNEL_STORE_APPEND_WORKERS="${WK_WKCLI_SIM_THREE_SMOKE_CHANNEL_STORE_APPEND_WORKERS:-500}"
 CHANNEL_STORE_APPLY_WORKERS="${WK_WKCLI_SIM_THREE_SMOKE_CHANNEL_STORE_APPLY_WORKERS:-500}"
 CHANNEL_RPC_WORKERS="${WK_WKCLI_SIM_THREE_SMOKE_CHANNEL_RPC_WORKERS:-500}"
+GATEWAY_ASYNC_SEND_WORKERS="${WK_WKCLI_SIM_THREE_SMOKE_GATEWAY_ASYNC_SEND_WORKERS:-${WK_GATEWAY_RUNTIME_ASYNC_SEND_WORKERS:-4096}}"
+DELIVERY_RECIPIENT_WORKERS="${WK_WKCLI_SIM_THREE_SMOKE_DELIVERY_RECIPIENT_WORKERS:-${WK_DELIVERY_RECIPIENT_WORKER_CONCURRENCY:-800}}"
 GATEWAY_SEND_TIMEOUT="${WK_WKCLI_SIM_THREE_SMOKE_GATEWAY_SEND_TIMEOUT:-14s}"
+SIM_CONNECT_RATE="${WK_WKCLI_SIM_THREE_SMOKE_CONNECT_RATE:-500}"
 SIM_CONCURRENCY="${WK_WKCLI_SIM_THREE_SMOKE_CONCURRENCY:-64}"
 SIM_ACK_TIMEOUT="${WK_WKCLI_SIM_THREE_SMOKE_ACK_TIMEOUT:-15s}"
-MAX_FLUSH_ERROR_SELECTED_ROWS="${WK_WKCLI_SIM_THREE_SMOKE_MAX_FLUSH_ERROR_SELECTED_ROWS:-0}"
-MAX_HANDOFF_ERROR_TOTAL="${WK_WKCLI_SIM_THREE_SMOKE_MAX_HANDOFF_ERROR_TOTAL:-0}"
-MAX_HANDOFF_TIMEOUT_TOTAL="${WK_WKCLI_SIM_THREE_SMOKE_MAX_HANDOFF_TIMEOUT_TOTAL:-0}"
+MAX_CONVERSATION_DIRECTORY_ERROR_TOTAL="${WK_WKCLI_SIM_THREE_SMOKE_MAX_CONVERSATION_DIRECTORY_ERROR_TOTAL:-0}"
 MAX_GOROUTINES="${WK_WKCLI_SIM_THREE_SMOKE_MAX_GOROUTINES:-2000}"
 MAX_HEAP_ALLOC_BYTES="${WK_WKCLI_SIM_THREE_SMOKE_MAX_HEAP_ALLOC_BYTES:-4294967296}"
 AUTO_JOIN_NODE="${WK_WKCLI_SIM_THREE_SMOKE_AUTO_JOIN_NODE:-false}"
@@ -93,9 +94,10 @@ from every node, then stops the cluster.
 
 The started cluster enables WK_DEBUG_API_ENABLE by default so pprof/debug
 evidence is available during failures. Set WK_DEBUG_API_ENABLE=false to opt out.
-It also uses the validated three-node Channel capacity profile (32 reactors,
-500 append/apply/RPC workers), a 14s gateway SEND deadline, and a 15s client
-SENDACK deadline. Override these with WK_WKCLI_SIM_THREE_SMOKE_* variables.
+It also uses the validated three-node capacity profile (32 Channel reactors,
+500 append/apply/RPC workers, 4096 gateway async SEND workers, 800 delivery
+recipient workers), a 14s gateway SEND deadline, and a 15s client SENDACK
+deadline. Override these with WK_WKCLI_SIM_THREE_SMOKE_* variables.
 
 Options:
   --out-dir DIR             Evidence directory. Default: data/wkcli-sim-three-node-smoke.
@@ -110,6 +112,8 @@ Options:
   --groups N                Simulated group channels. Default: 6.
   --members N               Members per group. Default: 10.
   --rate RATE               Per-group send rate. Default: 10/s.
+  --connect-rate N          Maximum simulated client connects per second. Default: 500.
+  --concurrency N           Maximum concurrent SEND operations. Default: 64.
   --duration DURATION       Sim max runtime. Default: 10s.
   --payload-size SIZE       Sim payload size. Default: 128B.
   --ready-timeout SECS      Cluster ready wait timeout. Default: 90.
@@ -405,6 +409,8 @@ cluster_profile_env() {
     "WK_CLUSTER_CHANNEL_STORE_APPEND_WORKERS=$CHANNEL_STORE_APPEND_WORKERS" \
     "WK_CLUSTER_CHANNEL_STORE_APPLY_WORKERS=$CHANNEL_STORE_APPLY_WORKERS" \
     "WK_CLUSTER_CHANNEL_RPC_WORKERS=$CHANNEL_RPC_WORKERS" \
+    "WK_GATEWAY_RUNTIME_ASYNC_SEND_WORKERS=$GATEWAY_ASYNC_SEND_WORKERS" \
+    "WK_DELIVERY_RECIPIENT_WORKER_CONCURRENCY=$DELIVERY_RECIPIENT_WORKERS" \
     "WK_GATEWAY_SEND_TIMEOUT=$(effective_gateway_send_timeout)"
 }
 
@@ -464,7 +470,7 @@ print_sim_cmd() {
   done
   printf ' --users %s --groups %s --group-members %s --rate %s --max-runtime %s --payload-size %s --status-listen %s --status-interval %s' \
     "$USERS" "$GROUP_COUNT" "$GROUP_MEMBERS" "$RATE" "$DURATION" "$PAYLOAD_SIZE" "$STATUS_LISTEN" "$STATUS_INTERVAL"
-  printf ' --concurrency %s --ack-timeout %s' "$SIM_CONCURRENCY" "$(effective_sim_ack_timeout)"
+  printf ' --connect-rate %s --concurrency %s --ack-timeout %s' "$SIM_CONNECT_RATE" "$SIM_CONCURRENCY" "$(effective_sim_ack_timeout)"
   printf ' --json\n'
 }
 
@@ -515,7 +521,10 @@ print_plan() {
   printf 'channel_store_append_workers=%s\n' "$CHANNEL_STORE_APPEND_WORKERS"
   printf 'channel_store_apply_workers=%s\n' "$CHANNEL_STORE_APPLY_WORKERS"
   printf 'channel_rpc_workers=%s\n' "$CHANNEL_RPC_WORKERS"
+  printf 'gateway_async_send_workers=%s\n' "$GATEWAY_ASYNC_SEND_WORKERS"
+  printf 'delivery_recipient_workers=%s\n' "$DELIVERY_RECIPIENT_WORKERS"
   printf 'gateway_send_timeout=%s\n' "$(effective_gateway_send_timeout)"
+  printf 'sim_connect_rate=%s\n' "$SIM_CONNECT_RATE"
   printf 'sim_concurrency=%s\n' "$SIM_CONCURRENCY"
   printf 'sim_ack_timeout=%s\n' "$(effective_sim_ack_timeout)"
   printf 'cluster_log=%s\n' "$(cluster_log)"
@@ -523,9 +532,7 @@ print_plan() {
   printf 'sim_output=%s\n' "$(sim_output)"
   printf 'snapshot_output_dir=%s\n' "$(snapshot_dir)"
   printf 'metrics_output_dir=%s\n' "$(metrics_dir)"
-  printf 'max_flush_error_selected_rows=%s\n' "$MAX_FLUSH_ERROR_SELECTED_ROWS"
-  printf 'max_handoff_error_total=%s\n' "$MAX_HANDOFF_ERROR_TOTAL"
-  printf 'max_handoff_timeout_total=%s\n' "$MAX_HANDOFF_TIMEOUT_TOTAL"
+  printf 'max_conversation_directory_error_total=%s\n' "$MAX_CONVERSATION_DIRECTORY_ERROR_TOTAL"
   printf 'max_goroutines=%s\n' "$MAX_GOROUTINES"
   printf 'max_heap_alloc_bytes=%s\n' "$MAX_HEAP_ALLOC_BYTES"
   printf 'auto_join_node=%s\n' "$AUTO_JOIN_NODE"
@@ -706,6 +713,16 @@ while [[ $# -gt 0 ]]; do
     --rate)
       [[ $# -ge 2 ]] || die '--rate requires a value'
       RATE="$2"
+      shift 2
+      ;;
+    --connect-rate)
+      [[ $# -ge 2 ]] || die '--connect-rate requires a value'
+      SIM_CONNECT_RATE="$2"
+      shift 2
+      ;;
+    --concurrency)
+      [[ $# -ge 2 ]] || die '--concurrency requires a value'
+      SIM_CONCURRENCY="$2"
       shift 2
       ;;
     --duration)
@@ -943,7 +960,10 @@ require_positive_uint 'WK_WKCLI_SIM_THREE_SMOKE_CHANNEL_REACTOR_COUNT' "$CHANNEL
 require_positive_uint 'WK_WKCLI_SIM_THREE_SMOKE_CHANNEL_STORE_APPEND_WORKERS' "$CHANNEL_STORE_APPEND_WORKERS"
 require_positive_uint 'WK_WKCLI_SIM_THREE_SMOKE_CHANNEL_STORE_APPLY_WORKERS' "$CHANNEL_STORE_APPLY_WORKERS"
 require_positive_uint 'WK_WKCLI_SIM_THREE_SMOKE_CHANNEL_RPC_WORKERS' "$CHANNEL_RPC_WORKERS"
-require_positive_uint 'WK_WKCLI_SIM_THREE_SMOKE_CONCURRENCY' "$SIM_CONCURRENCY"
+require_positive_uint 'WK_WKCLI_SIM_THREE_SMOKE_GATEWAY_ASYNC_SEND_WORKERS' "$GATEWAY_ASYNC_SEND_WORKERS"
+require_positive_uint 'WK_WKCLI_SIM_THREE_SMOKE_DELIVERY_RECIPIENT_WORKERS' "$DELIVERY_RECIPIENT_WORKERS"
+require_positive_uint '--connect-rate' "$SIM_CONNECT_RATE"
+require_positive_uint '--concurrency' "$SIM_CONCURRENCY"
 require_nonempty 'WK_WKCLI_SIM_THREE_SMOKE_GATEWAY_SEND_TIMEOUT' "$GATEWAY_SEND_TIMEOUT"
 require_nonempty 'WK_WKCLI_SIM_THREE_SMOKE_ACK_TIMEOUT' "$SIM_ACK_TIMEOUT"
 require_bool 'WK_WKCLI_SIM_THREE_SMOKE_AUTO_JOIN_NODE' "$AUTO_JOIN_NODE"
@@ -954,9 +974,7 @@ require_uint '--auto-join-after' "$AUTO_JOIN_AFTER"
 require_positive_uint '--auto-join-node-id' "$AUTO_JOIN_NODE_ID"
 require_uint '--fault-after' "$FAULT_AFTER"
 require_uint '--fault-max-send-errors' "$FAULT_MAX_SEND_ERRORS"
-require_uint 'WK_WKCLI_SIM_THREE_SMOKE_MAX_FLUSH_ERROR_SELECTED_ROWS' "$MAX_FLUSH_ERROR_SELECTED_ROWS"
-require_uint 'WK_WKCLI_SIM_THREE_SMOKE_MAX_HANDOFF_ERROR_TOTAL' "$MAX_HANDOFF_ERROR_TOTAL"
-require_uint 'WK_WKCLI_SIM_THREE_SMOKE_MAX_HANDOFF_TIMEOUT_TOTAL' "$MAX_HANDOFF_TIMEOUT_TOTAL"
+require_uint 'WK_WKCLI_SIM_THREE_SMOKE_MAX_CONVERSATION_DIRECTORY_ERROR_TOTAL' "$MAX_CONVERSATION_DIRECTORY_ERROR_TOTAL"
 require_uint 'WK_WKCLI_SIM_THREE_SMOKE_MAX_GOROUTINES' "$MAX_GOROUTINES"
 require_uint 'WK_WKCLI_SIM_THREE_SMOKE_MAX_HEAP_ALLOC_BYTES' "$MAX_HEAP_ALLOC_BYTES"
 [[ -z "$FAULT_CHANNEL_MIGRATION_SCAN_LIMIT" ]] || require_positive_uint '--fault-channel-migration-scan-limit' "$FAULT_CHANNEL_MIGRATION_SCAN_LIMIT"
@@ -1567,10 +1585,11 @@ run_sim() {
   cmd+=(--max-runtime "$DURATION")
   cmd+=(--status-listen "$STATUS_LISTEN")
   cmd+=(--status-interval "$STATUS_INTERVAL")
+  cmd+=(--connect-rate "$SIM_CONNECT_RATE")
   cmd+=(--concurrency "$SIM_CONCURRENCY")
   cmd+=(--ack-timeout "$(effective_sim_ack_timeout)")
   cmd+=(--json)
-  log "running wkcli sim: users=${USERS} groups=${GROUP_COUNT} members=${GROUP_MEMBERS} gateways=${#GATEWAY_VALUES[@]}"
+  log "running wkcli sim: users=${USERS} groups=${GROUP_COUNT} members=${GROUP_MEMBERS} connect_rate=${SIM_CONNECT_RATE}/s concurrency=${SIM_CONCURRENCY} gateways=${#GATEWAY_VALUES[@]}"
   local status=0
   rm -f "$(sim_done_file)"
   (
@@ -1791,19 +1810,13 @@ verify_metrics_health() {
     local after
     before="$(metric_file before "$node")"
     after="$(metric_file after "$node")"
-    local selected_error
-    local handoff_error
-    local handoff_timeout
+    local conversation_directory_error
     local goroutines
     local heap_alloc
-    selected_error="$(metric_delta "$before" "$after" 'wukongim_conversation_active_flush_rows_sum' 'kind="selected"' 'result="error"')"
-    handoff_error="$(metric_delta "$before" "$after" 'wukongim_conversation_authority_handoff_total' 'result="error"')"
-    handoff_timeout="$(metric_delta "$before" "$after" 'wukongim_conversation_authority_handoff_total' 'result="timeout"')"
+    conversation_directory_error="$(metric_delta "$before" "$after" 'wukongim_conversation_directory_list_total' 'result="error"')"
     goroutines="$(metric_sum "$after" 'go_goroutines')"
     heap_alloc="$(metric_sum "$after" 'go_memstats_heap_alloc_bytes')"
-    verify_metric_limit "node${node} conversation_active selected_error_rows" "$selected_error" "$MAX_FLUSH_ERROR_SELECTED_ROWS"
-    verify_metric_limit "node${node} conversation_authority handoff_error" "$handoff_error" "$MAX_HANDOFF_ERROR_TOTAL"
-    verify_metric_limit "node${node} conversation_authority handoff_timeout" "$handoff_timeout" "$MAX_HANDOFF_TIMEOUT_TOTAL"
+    verify_metric_limit "node${node} conversation_directory errors" "$conversation_directory_error" "$MAX_CONVERSATION_DIRECTORY_ERROR_TOTAL"
     verify_metric_limit "node${node} go_goroutines" "$goroutines" "$MAX_GOROUTINES"
     verify_metric_limit "node${node} heap_alloc_bytes" "$heap_alloc" "$MAX_HEAP_ALLOC_BYTES"
     idx=$((idx + 1))
@@ -1829,15 +1842,16 @@ write_summary() {
     printf '%s\n' "- channel_store_append_workers: ${CHANNEL_STORE_APPEND_WORKERS}"
     printf '%s\n' "- channel_store_apply_workers: ${CHANNEL_STORE_APPLY_WORKERS}"
     printf '%s\n' "- channel_rpc_workers: ${CHANNEL_RPC_WORKERS}"
+    printf '%s\n' "- gateway_async_send_workers: ${GATEWAY_ASYNC_SEND_WORKERS}"
+    printf '%s\n' "- delivery_recipient_workers: ${DELIVERY_RECIPIENT_WORKERS}"
     printf '%s\n' "- gateway_send_timeout: $(effective_gateway_send_timeout)"
+    printf '%s\n' "- sim_connect_rate: ${SIM_CONNECT_RATE}"
     printf '%s\n' "- sim_concurrency: ${SIM_CONCURRENCY}"
     printf '%s\n' "- sim_ack_timeout: $(effective_sim_ack_timeout)"
     printf '%s\n' '- sim_output: sim.jsonl'
     printf '%s\n' '- snapshots: bench-snapshots/'
     printf '%s\n' '- metrics: metrics/'
-    printf '%s\n' "- max_flush_error_selected_rows: ${MAX_FLUSH_ERROR_SELECTED_ROWS}"
-    printf '%s\n' "- max_handoff_error_total: ${MAX_HANDOFF_ERROR_TOTAL}"
-    printf '%s\n' "- max_handoff_timeout_total: ${MAX_HANDOFF_TIMEOUT_TOTAL}"
+    printf '%s\n' "- max_conversation_directory_error_total: ${MAX_CONVERSATION_DIRECTORY_ERROR_TOTAL}"
     printf '%s\n' "- max_goroutines: ${MAX_GOROUTINES}"
     printf '%s\n' "- max_heap_alloc_bytes: ${MAX_HEAP_ALLOC_BYTES}"
     printf '%s\n' "- auto_join_node: ${AUTO_JOIN_NODE}"

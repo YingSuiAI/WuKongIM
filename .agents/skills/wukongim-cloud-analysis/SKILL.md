@@ -1,6 +1,6 @@
 ---
 name: wukongim-cloud-analysis
-description: Diagnose one exact live WuKongIM cloud Simulation Run through the repository Analysis MCP. Use when the user or a local Analysis Session asks Codex to inspect a run's cluster state, Prometheus signals, application logs, diagnostics, Controller task audits, profiles, or redacted config; determine whether a finding is product, infrastructure, scenario, healthy, or insufficient evidence; or verify whether the run was already released. Do not use for provisioning, cleanup, repository mutation, or historical analysis after release.
+description: Diagnose one exact live WuKongIM cloud Simulation Run or chat-lifecycle Cloud Lease through the repository Analysis MCP. Use when the user or a local Analysis Session asks Codex to inspect a run's cluster state, Prometheus signals, application logs, diagnostics, Controller task audits, profiles, or redacted config; determine whether a finding is product, infrastructure, scenario, healthy, or insufficient evidence; or verify whether the run was already released. Do not use for provisioning, cleanup, repository mutation, or historical analysis after release.
 ---
 
 # WuKongIM Cloud Analysis
@@ -9,10 +9,17 @@ Analyze one run as a live incident, with provider inventory as the first gate an
 
 ## 1. Prove the run before analysis
 
-Require the exact Run Identity. The Analysis Session Workflow must first prove the retained Run Locator against current provider inventory before handing the local process an encrypted session. Then call `run_inspect` before reading repository code or calling another Analysis MCP tool; the run host itself intentionally has no cloud credential.
+Require the exact Run Identity. For the legacy Cloud Simulation path, the
+Analysis Session Workflow must prove the retained Run Locator against current
+provider inventory. For a chat-lifecycle Cloud Lease, it must instead
+authenticate the exact stage handoff, bind its typed Lease Selector to current
+provider inventory, and use the retained non-secret Analysis endpoint identity.
+Only then may it hand the local process an encrypted session. Call
+`run_inspect` before reading repository code or calling another Analysis MCP
+tool; the run host itself intentionally has no cloud credential.
 
 - If state is `released` and inventory count is zero, state: `Simulation Run <run_id> 已由云厂商确认自动销毁，当前没有可分析的实时数据；分析已终止。` Stop immediately. Make no other MCP calls and do not infer a cause from old workflow output.
-- If the locator or run identity is unknown or mismatched, report `unknown_run` and stop. Ask the caller to verify the Run Identity.
+- If the applicable locator/handoff or run identity is unknown or mismatched, report `unknown_run` and stop. Ask the caller to verify the exact Run or Lease Identity.
 - If resources exist but an observability source is unreachable, continue only with reachable sources and classify the result as `insufficient_evidence`; never relabel it `released`.
 - Treat ambiguous inventory identity as a closed failure and stop.
 
@@ -136,67 +143,29 @@ turn, so retry depth can be zero while contended remains one. Correlate handoff
 pressure with append/storage signals, retry contention, and recipient worker
 saturation before attributing SENDACK failures.
 
-When conversation-active pressure is present, use the allowlisted conservation
-queries before reading broad logs. Establish cache size, dirty backlog, oldest
-dirty age, and attempt cadence with `conversation_active_cache_rows`,
-`conversation_active_dirty_rows`, `conversation_active_dirty_queue_rows`,
-`conversation_active_dirty_age_buckets`,
-`conversation_active_oldest_dirty_age`, and
-`conversation_active_flush_attempt_rate`. Across at least two consecutive
-complete samples, require dirty queue rows to equal dirty rows and dirty-age
-buckets to remain less than or equal to dirty rows. Treat sustained
-`dirty_rows > 0` with zero age buckets or unavailable oldest age as missing or
-inconsistent age-index evidence rather than healthy. Do not classify one
-mixed scrape of independently exported gauges as an index defect. Read
-`conversation_active_flush_rows_cumulative` at the first and last complete
-samples of the exact measured window and compute per-node counter deltas. For a
-successful flush, require both `selected = persisted + skipped` and
-`selected = cleared + requeued + superseded`. Here `requeued` is retained dirty
-work and `superseded{reason="stale_snapshot"}` is explicitly not backlog. The
-legacy `flushed` histogram means
-persisted, not cleared. The bounded successful-conservation series are
-preinitialized at process start; if either endpoint is absent from a complete
-Observation, keep the value unknown and report missing evidence instead of
-converting it to zero. Apply the equations only to `result="ok"`. For
-`error` or `timeout`, `persisted=0` means the whole-store call was not
-acknowledged; the durable row count is unknown because earlier Slot proposals
-may have committed, while `requeued` proves only that all selected dirty
-markers were retained for idempotent retry. Then correlate these deltas in this
-order:
+When conversation recovery is slow, use the membership-directory and
+Leader-hydration queries before reading broad logs. Establish directory request
+rate and latency with `conversation_directory_list_rate` and
+`conversation_directory_list_p99`. Compare
+`conversation_directory_scanned_candidates_p95` with
+`conversation_directory_returned_items_p95`,
+`conversation_directory_deletes_p95`, and
+`conversation_directory_unresolved_p95`. The page limit bounds scanned
+membership candidates, so returned rows may be lower and an empty page is not
+complete unless the `done` label is true.
 
-1. compare `conversation_active_dirty_mutation_rate` with persisted and cleared
-   row rates; sustained `became_dirty > cleared` proves the cache cannot drain;
-2. a high `requeued{reason="version_conflict"}` share together with
-   `dirty_updated` identifies hot rows advancing during durable I/O;
-3. use `conversation_active_flush_stage_p99` to separate serialized
-   `lane_wait`, snapshot `select`, durable-state `filter`, store `persist`, and
-   version-fenced `clear` latency; within clear, compare `clear_lock_wait` with
-   `clear_apply` before attributing a slow clear to row work;
-4. use `conversation_active_cache_lock_p99` results `ok` and `cache_pressure`
-   with phases `wait`, `hold`, and `observation` to prove admission-side lock
-   contention or snapshot overhead without excluding rejected attempts;
-5. use `conversation_active_pressure_events`,
-   `conversation_active_pressure_state`, and
-   `conversation_active_pressure_wakeup_p99` to distinguish worker wakeup delay,
-   coalescing, retry without progress, and a drain paused by timeout/error;
-   compute pressure-event counter deltas from the same exact measured-window
-   endpoint samples instead of using warmup or pre-run cumulative values;
-6. when `persist` dominates, first compare `slot_proposal_rate`,
-   `slot_proposal_apply_p99`, `slot_apply_gap`,
-   `slot_background_proposal_admission_rate`, and
-   `slot_runtime_queue_pressure`; correlate the same interval with actual
-   versus Preferred Slot leaders from `cluster_snapshot` and per-node CPU.
-   `storage_commit_queue_depth`, `storage_commit_request_p99`, and
-   `storage_commit_batch_stage_p99` describe message/channel-log group-commit
-   co-pressure on the node; they are not direct observations of the
-   conversation meta-DB write. Do not label a conversation persist delay as a
-   disk defect from those storage series alone. A slow conversation `persist`
-   stage without matching Slot proposal/apply evidence remains unresolved
-   rather than being labeled a disk, Raft, or leader-skew defect. Treat a low
-   or absent proposal-apply P99 together with background admission failures as
-   possible incomplete proposals, not proof of healthy Raft completion.
+Then use `conversation_hydration_batch_rate`,
+`conversation_hydration_batch_p99`, `conversation_hydration_items_p95`,
+`conversation_hydration_remote_batch_calls_p95`, and
+`conversation_hydration_local_reads_p95`. Remote batch calls should scale
+with participating Channel Leader nodes rather than hydrated channel count.
+Local reads should remain bounded by hydration items. A high unresolved count
+with elevated remote batch latency points to a Channel routing or Leader-read
+problem; high scanned candidates with low returned items and low unresolved is
+usually expected filtering of inactive empty or hidden channels.
 
-Do not infer cleared progress from a successful store call, and do not add UID,
+Compare at least two consecutive complete samples before classifying a sustained
+condition. Missing series remain unknown rather than zero. Do not add UID,
 channel, hash-slot, or Slot IDs as Prometheus labels while drilling down.
 
 When actual physical Slot leaders differ from Controller `PreferredLeader`

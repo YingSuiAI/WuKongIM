@@ -1,0 +1,318 @@
+package chatlifecycle
+
+import (
+	"errors"
+	"math"
+	"testing"
+	"time"
+)
+
+func TestGroupCatalogFormalShapeAndReconstructableMembership(t *testing.T) {
+	catalog := newTestGroupCatalog(t, FormalConfig())
+	counts := map[GroupCategory]int{}
+	memberTotal := uint64(0)
+	for index := uint64(0); index < uint64(catalog.Count()); index++ {
+		group, err := catalog.Group(index)
+		if err != nil {
+			t.Fatalf("Group(%d) error = %v", index, err)
+		}
+		counts[group.Category]++
+		memberTotal += uint64(group.MemberCount)
+		parsed, ok := catalog.IndexFromGroupID(group.ID)
+		if !ok || parsed != index {
+			t.Fatalf("IndexFromGroupID(%q) = %d, %v; want %d, true", group.ID, parsed, ok, index)
+		}
+		assertGroupMemberRange(t, group)
+		var previous uint64
+		for member := 0; member < group.MemberCount; member++ {
+			uid, err := group.MemberUID(member)
+			if err != nil {
+				t.Fatalf("group %d MemberUID(%d) error = %v", index, member, err)
+			}
+			memberIndex, ok := catalog.identity.IndexFromUID(uid)
+			if !ok {
+				t.Fatalf("group %d member %d UID %q is not reconstructable", index, member, uid)
+			}
+			if member > 0 && memberIndex != previous+uint64(catalog.Count()) {
+				t.Fatalf("group %d member indexes %d then %d do not use fixed catalog stride", index, previous, memberIndex)
+			}
+			previous = memberIndex
+		}
+	}
+	if counts[GroupSmall] != 1_600 || counts[GroupMedium] != 300 || counts[GroupLarge] != 99 || counts[GroupVeryLarge] != 1 {
+		t.Fatalf("category counts = %v, want 1600/300/99/1", counts)
+	}
+	if memberTotal == 0 {
+		t.Fatal("member scan unexpectedly empty")
+	}
+	if _, err := catalog.Group(2_000); !errors.Is(err, errGroupIndex) {
+		t.Fatalf("Group(2000) error = %v, want %v", err, errGroupIndex)
+	}
+}
+
+func TestGroupIDRejectsNonCanonicalBase36Aliases(t *testing.T) {
+	catalog := newTestGroupCatalog(t, FormalConfig())
+	group, err := catalog.Group(35)
+	if err != nil {
+		t.Fatalf("Group(35) error = %v", err)
+	}
+	if index, ok := catalog.IndexFromGroupID(group.ID); !ok || index != 35 {
+		t.Fatalf("canonical round trip = %d, %v; want 35, true", index, ok)
+	}
+	prefix := group.ID[:len(group.ID)-1]
+	for _, alias := range []string{prefix + "0z", prefix + "Z"} {
+		if index, ok := catalog.IndexFromGroupID(alias); ok {
+			t.Fatalf("IndexFromGroupID(%q) = %d, true; want canonical rejection", alias, index)
+		}
+	}
+}
+
+func TestGroupPrimaryTargetsExactSharesAndCanaryIsSeparate(t *testing.T) {
+	catalog := newTestGroupCatalog(t, FormalConfig())
+	counts := map[GroupCategory]int{}
+	for ordinal := uint64(0); ordinal < 10_000; ordinal++ {
+		target, err := catalog.PrimaryTarget(ordinal)
+		if err != nil {
+			t.Fatalf("PrimaryTarget(%d) error = %v", ordinal, err)
+		}
+		counts[target.Category]++
+		if target.Category == GroupVeryLarge {
+			t.Fatalf("PrimaryTarget(%d) selected the separate canary group", ordinal)
+		}
+	}
+	if counts[GroupSmall] != 8_000 || counts[GroupMedium] != 1_500 || counts[GroupLarge] != 500 {
+		t.Fatalf("primary counts = %v, want 8000/1500/500", counts)
+	}
+	canary, err := catalog.VeryLargeCanary(7)
+	if err != nil {
+		t.Fatalf("VeryLargeCanary() error = %v", err)
+	}
+	if canary.Group.Category != GroupVeryLarge || canary.Every != time.Minute || canary.Ordinal != 7 {
+		t.Fatalf("canary = %+v, want separate one/min very-large target", canary)
+	}
+}
+
+func TestGroupCatalogEveryClassHasFixedMemberInsideInitialOnlineRoster(t *testing.T) {
+	t.Parallel()
+	cfg := FormalConfig()
+	catalog := newTestGroupCatalog(t, cfg)
+	for _, index := range []uint64{0, 1_600, 1_900, 1_999} {
+		group, err := catalog.Group(index)
+		if err != nil {
+			t.Fatalf("Group(%d): %v", index, err)
+		}
+		memberIndex, err := group.MemberIndex(0)
+		if err != nil {
+			t.Fatalf("Group(%d) MemberIndex(0): %v", index, err)
+		}
+		if memberIndex >= uint64(cfg.Workload.OnlineUsers) || !group.ContainsIndex(memberIndex) {
+			t.Fatalf("group %d class %d initial member = %d, online=%d", index, group.Category, memberIndex, cfg.Workload.OnlineUsers)
+		}
+	}
+}
+
+func TestGroupCatalogSelectsPairedFixedMembersFromAgedHistoricalRange(t *testing.T) {
+	catalog := newTestGroupCatalog(t, FormalConfig())
+	const (
+		minimum = uint64(5)
+		maximum = uint64(499_994)
+	)
+	for _, category := range []GroupCategory{GroupSmall, GroupMedium, GroupLarge, GroupVeryLarge} {
+		first, ok, err := catalog.ReturningMember(category, 0, minimum, maximum)
+		if err != nil || !ok {
+			t.Fatalf("ReturningMember(%d, first) = %+v, %v, %v", category, first, ok, err)
+		}
+		second, ok, err := catalog.ReturningMember(category, 1, minimum, maximum)
+		if err != nil || !ok {
+			t.Fatalf("ReturningMember(%d, second) = %+v, %v, %v", category, second, ok, err)
+		}
+		if first.Group.Index != second.Group.Index || first.UserIndex == second.UserIndex || first.MemberOrdinal == 0 || second.MemberOrdinal == 0 {
+			t.Fatalf("category %d pair = %+v / %+v, want two non-zero members of one fixed group", category, first, second)
+		}
+		groupOwner, err := catalog.GroupOwner(first.Group.Index)
+		if err != nil {
+			t.Fatalf("category %d GroupOwner: %v", category, err)
+		}
+		firstOwner, _ := catalog.identity.Owner(first.UserIndex)
+		secondOwner, _ := catalog.identity.Owner(second.UserIndex)
+		if firstOwner != groupOwner || secondOwner != groupOwner {
+			t.Fatalf("category %d pair owners = %d/%d, want group owner %d: %+v / %+v", category, firstOwner, secondOwner, groupOwner, first, second)
+		}
+		for _, member := range []GroupReturningMember{first, second} {
+			if member.UserIndex < minimum || member.UserIndex > maximum || !member.Group.ContainsIndex(member.UserIndex) {
+				t.Fatalf("category %d aged member = %+v, range=%d..%d", category, member, minimum, maximum)
+			}
+		}
+		third, ok, err := catalog.ReturningMember(category, 2, minimum, maximum)
+		wantRotatedGroup := category != GroupVeryLarge
+		if err != nil || !ok || (third.Group.Index != first.Group.Index) != wantRotatedGroup || third.UserIndex == first.UserIndex || third.UserIndex == second.UserIndex {
+			t.Fatalf("category %d did not rotate after a complete pair: first=%+v third=%+v ok=%v err=%v", category, first, third, ok, err)
+		}
+	}
+}
+
+func TestGroupCatalogFormalOwnerRosterPairsCoverAllGroups(t *testing.T) {
+	catalog := newTestGroupCatalog(t, FormalConfig())
+	seen := make(map[uint64]struct{}, catalog.Count())
+	for groupIndex := uint64(0); groupIndex < uint64(catalog.Count()); groupIndex++ {
+		group, err := catalog.Group(groupIndex)
+		if err != nil {
+			t.Fatalf("Group(%d): %v", groupIndex, err)
+		}
+		owner, err := catalog.GroupOwner(groupIndex)
+		if err != nil {
+			t.Fatalf("GroupOwner(%d): %v", groupIndex, err)
+		}
+		for _, memberOrdinal := range []int{0, 3} {
+			memberIndex, memberErr := group.MemberIndex(memberOrdinal)
+			if memberErr != nil {
+				t.Fatalf("Group(%d) MemberIndex(%d): %v", groupIndex, memberOrdinal, memberErr)
+			}
+			memberOwner, _ := catalog.identity.Owner(memberIndex)
+			if memberOwner != owner {
+				t.Fatalf("group %d member %d owner = %d, want %d", groupIndex, memberOrdinal, memberOwner, owner)
+			}
+		}
+	}
+
+	for category := GroupSmall; category <= GroupVeryLarge; category++ {
+		start, count, ok := catalog.categoryRange(category)
+		if !ok {
+			continue
+		}
+		for workerID := uint64(0); workerID < catalog.identity.Workers(); workerID++ {
+			owned := make([]uint64, 0, count)
+			for groupIndex := start; groupIndex < start+uint64(count); groupIndex++ {
+				owner, _ := catalog.GroupOwner(groupIndex)
+				if owner == workerID {
+					owned = append(owned, groupIndex)
+				}
+			}
+			for rank, wantGroup := range owned {
+				first, firstOK, firstErr := catalog.ReturningMemberForWorker(category, uint64(rank*2), 0, math.MaxUint64, workerID)
+				second, secondOK, secondErr := catalog.ReturningMemberForWorker(category, uint64(rank*2+1), 0, math.MaxUint64, workerID)
+				if firstErr != nil || secondErr != nil || !firstOK || !secondOK {
+					t.Fatalf("category %d worker %d pair %d = %+v/%v/%v %+v/%v/%v", category, workerID, rank, first, firstOK, firstErr, second, secondOK, secondErr)
+				}
+				if first.Group.Index != wantGroup || second.Group.Index != wantGroup || first.UserIndex == second.UserIndex {
+					t.Fatalf("category %d worker %d pair %d groups = %d/%d users=%d/%d, want group %d distinct", category, workerID, rank, first.Group.Index, second.Group.Index, first.UserIndex, second.UserIndex, wantGroup)
+				}
+				for _, member := range []GroupReturningMember{first, second} {
+					memberOwner, _ := catalog.identity.Owner(member.UserIndex)
+					if memberOwner != workerID {
+						t.Fatalf("group %d returning member %d owner = %d, want %d", wantGroup, member.UserIndex, memberOwner, workerID)
+					}
+				}
+				seen[wantGroup] = struct{}{}
+			}
+		}
+	}
+	if len(seen) != catalog.Count() {
+		t.Fatalf("owned returning pair coverage = %d, want all %d groups", len(seen), catalog.Count())
+	}
+}
+
+func TestGroupCatalogLocalProfileHandlesMissingLargeClass(t *testing.T) {
+	cfg := LocalConfig()
+	catalog := newTestGroupCatalog(t, cfg)
+	if catalog.Count() != 20 {
+		t.Fatalf("Count() = %d, want 20", catalog.Count())
+	}
+	counts := map[GroupCategory]int{}
+	for ordinal := uint64(0); ordinal < 95; ordinal++ {
+		target, err := catalog.PrimaryTarget(ordinal)
+		if err != nil {
+			t.Fatalf("PrimaryTarget(%d) error = %v", ordinal, err)
+		}
+		counts[target.Category]++
+	}
+	if counts[GroupSmall] != 80 || counts[GroupMedium] != 15 || counts[GroupLarge] != 0 || counts[GroupVeryLarge] != 0 {
+		t.Fatalf("normalized local primary counts = %v, want 80/15/0/0", counts)
+	}
+	canary, err := catalog.VeryLargeCanary(0)
+	if err != nil {
+		t.Fatalf("VeryLargeCanary() error = %v", err)
+	}
+	if canary.Group.MemberCount != 1_000 {
+		t.Fatalf("local canary members = %d, want 1000", canary.Group.MemberCount)
+	}
+}
+
+func TestGroupHotSetDoesNotAddHistoricalGrowth(t *testing.T) {
+	catalog := newTestGroupCatalog(t, FormalConfig())
+	summary, err := catalog.HotSet(8_000)
+	if err != nil {
+		t.Fatalf("HotSet() error = %v", err)
+	}
+	if summary.PersonChannels != 8_000 || summary.GroupChannels != 2_000 || summary.TotalChannels != 10_000 || summary.HistoricalGroupGrowth != 0 {
+		t.Fatalf("hot set = %+v, want 8000+2000=10000 and zero group history growth", summary)
+	}
+}
+
+func TestGroupCatalogRejectsInvalidOrOverflowingInputs(t *testing.T) {
+	cfg := FormalConfig()
+	identity, err := NewIdentitySpace(cfg.RunID, cfg.Seed, uint64(cfg.Workload.Workers))
+	if err != nil {
+		t.Fatalf("NewIdentitySpace() error = %v", err)
+	}
+	if _, err := NewGroupCatalog(nil, cfg.Workload.Groups); !errors.Is(err, errGroupIdentityRequired) {
+		t.Fatalf("NewGroupCatalog(nil) error = %v, want %v", err, errGroupIdentityRequired)
+	}
+	bad := cfg.Workload.Groups
+	bad.Small = 2_001
+	if _, err := NewGroupCatalog(identity, bad); !errors.Is(err, errGroupCatalog) {
+		t.Fatalf("NewGroupCatalog(large catalog) error = %v, want %v", err, errGroupCatalog)
+	}
+	bad = GroupCatalogConfig{VeryLarge: 1, VeryLargeMembers: 100_000, FixedMembership: true, VeryLargeSendEvery: time.Minute}
+	if _, err := NewGroupCatalog(identity, bad); !errors.Is(err, errGroupPrimaryClasses) {
+		t.Fatalf("NewGroupCatalog(canary only) error = %v, want %v", err, errGroupPrimaryClasses)
+	}
+	bad = cfg.Workload.Groups
+	bad.VeryLargeMembers = 1
+	if _, err := NewGroupCatalog(identity, bad); !errors.Is(err, errGroupCatalog) {
+		t.Fatalf("NewGroupCatalog(one-member canary) error = %v, want %v", err, errGroupCatalog)
+	}
+	catalog, err := NewGroupCatalog(identity, cfg.Workload.Groups)
+	if err != nil {
+		t.Fatalf("NewGroupCatalog() error = %v", err)
+	}
+	if _, err := catalog.HotSet(0); !errors.Is(err, errGroupHotSet) {
+		t.Fatalf("HotSet(0) error = %v, want %v", err, errGroupHotSet)
+	}
+	if _, err := checkedGroupMemberIndex(math.MaxUint64, 1); !errors.Is(err, errGroupMemberOverflow) {
+		t.Fatalf("checkedGroupMemberIndex(overflow) error = %v, want %v", err, errGroupMemberOverflow)
+	}
+}
+
+func assertGroupMemberRange(t *testing.T, group Group) {
+	t.Helper()
+	var minimum, maximum int
+	switch group.Category {
+	case GroupSmall:
+		minimum, maximum = 5, 20
+	case GroupMedium:
+		minimum, maximum = 100, 500
+	case GroupLarge:
+		minimum, maximum = 1_000, 10_000
+	case GroupVeryLarge:
+		minimum, maximum = 100_000, 100_000
+	default:
+		t.Fatalf("unknown group category %d", group.Category)
+	}
+	if group.MemberCount < minimum || group.MemberCount > maximum {
+		t.Fatalf("group %d category %d members = %d, want %d..%d", group.Index, group.Category, group.MemberCount, minimum, maximum)
+	}
+}
+
+func newTestGroupCatalog(t *testing.T, cfg Config) GroupCatalog {
+	t.Helper()
+	identity, err := NewIdentitySpace(cfg.RunID, cfg.Seed, uint64(cfg.Workload.Workers))
+	if err != nil {
+		t.Fatalf("NewIdentitySpace() error = %v", err)
+	}
+	catalog, err := NewGroupCatalog(identity, cfg.Workload.Groups)
+	if err != nil {
+		t.Fatalf("NewGroupCatalog() error = %v", err)
+	}
+	return catalog
+}

@@ -1,6 +1,7 @@
 package channelappend
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"time"
@@ -11,6 +12,12 @@ import (
 const appendMetricPathChannelPlane = "channelplane"
 
 const appendInitialAttempt = 1
+const appendIdempotencyRecoveryAttempt = appendInitialAttempt + 1
+
+const (
+	appendIdempotencyStackItemLimit = 128
+	appendIdempotencyStackTableSize = 256
+)
 
 const (
 	sendTraceErrorCodeRouteNotReady       = "route_not_ready"
@@ -53,6 +60,19 @@ type appendItemCompletion struct {
 	traceErr  error
 }
 
+// idempotentAppendBatch owns one storage append item per canonical logical
+// send while retaining every accepted caller for aligned completion.
+type idempotentAppendBatch struct {
+	// items contains the unique storage appends. It aliases the input unless a
+	// duplicate is found, after which original and ownerByItem retain alignment.
+	items []preparedSend
+	// original retains every accepted caller only when coalescing is active.
+	original []preparedSend
+	// ownerByItem maps each original caller to its unique completion. A nil map
+	// is the zero-allocation fast path and means items already has final alignment.
+	ownerByItem []int
+}
+
 func (e appendEffect) run(runtimeCtx context.Context, ports appendPorts) appendCompletedEvent {
 	effectStartedAt := time.Now()
 	effectResult := channelAppendResultOK
@@ -78,7 +98,8 @@ func (e appendEffect) run(runtimeCtx context.Context, ports appendPorts) appendC
 		return completion
 	}
 
-	req := appendRequest(e.target, active, appendInitialAttempt)
+	batch := newIdempotentAppendBatch(active)
+	req := appendRequest(e.target, batch.items, appendInitialAttempt)
 	ctx, cancel := appendBatchContext(runtimeCtx)
 	startedAt := time.Now()
 	res, err := ports.appender.AppendBatch(ctx, req)
@@ -86,13 +107,146 @@ func (e appendEffect) run(runtimeCtx context.Context, ports appendPorts) appendC
 	cancel()
 	completion.duration = appendDur
 	if err != nil {
-		completion.items = append(completion.items, appendBatchErrorCompletionsOrRecoveries(runtimeCtx, active, err, ports)...)
+		unique, retryDur := appendBatchErrorCompletionsOrRecoveriesAndRetry(runtimeCtx, e.target, batch.items, err, ports)
+		completion.duration += retryDur
+		completion.items = append(completion.items, batch.expandCompletions(unique)...)
 		effectResult = appendCompletionsResultClass(completion.items)
 		return completion
 	}
-	completion.items = append(completion.items, appendResultCompletions(active, res)...)
+	completion.items = append(completion.items, batch.expandCompletions(appendResultCompletions(batch.items, res))...)
 	effectResult = appendCompletionsResultClass(completion.items)
 	return completion
+}
+
+func newIdempotentAppendBatch(items []preparedSend) idempotentAppendBatch {
+	batch := idempotentAppendBatch{items: items}
+	if len(items) < 2 {
+		return batch
+	}
+	if len(items) <= appendIdempotencyStackItemLimit && !hasCoalescibleIdempotentItems(items) {
+		return batch
+	}
+	type idempotencyKey struct {
+		fromUID     string
+		clientMsgNo string
+		payloadHash uint64
+	}
+	seen := make(map[idempotencyKey]int, len(items))
+	for index, item := range items {
+		cmd := item.Command
+		if cmd.FromUID == "" || cmd.ClientMsgNo == "" {
+			if batch.ownerByItem != nil {
+				batch.ownerByItem[index] = len(batch.items)
+				batch.items = append(batch.items, item)
+			}
+			continue
+		}
+		key := idempotencyKey{
+			fromUID:     cmd.FromUID,
+			clientMsgNo: cmd.ClientMsgNo,
+			payloadHash: idempotencyPayloadHash(cmd.Payload),
+		}
+		owner, exists := seen[key]
+		if exists && sameLogicalSend(batch.items[owner].Command, cmd) {
+			if batch.ownerByItem == nil {
+				batch.original = items
+				batch.items = append(make([]preparedSend, 0, len(items)), items[:index]...)
+				batch.ownerByItem = make([]int, len(items))
+				for prior := 0; prior < index; prior++ {
+					batch.ownerByItem[prior] = prior
+				}
+			}
+			batch.ownerByItem[index] = owner
+			continue
+		}
+		if !exists {
+			if batch.ownerByItem == nil {
+				seen[key] = index
+			} else {
+				seen[key] = len(batch.items)
+			}
+		}
+		if batch.ownerByItem != nil {
+			batch.ownerByItem[index] = len(batch.items)
+			batch.items = append(batch.items, item)
+		}
+	}
+	return batch
+}
+
+// hasCoalescibleIdempotentItems uses a half-full stack table for the bounded
+// common batch. Callers must pass at most appendIdempotencyStackItemLimit items.
+func hasCoalescibleIdempotentItems(items []preparedSend) bool {
+	var fingerprints [appendIdempotencyStackTableSize]uint64
+	var owners [appendIdempotencyStackTableSize]uint16
+	for index, item := range items {
+		cmd := item.Command
+		if cmd.FromUID == "" || cmd.ClientMsgNo == "" {
+			continue
+		}
+		fingerprint := logicalSendFingerprint(cmd)
+		slot := int(fingerprint & (appendIdempotencyStackTableSize - 1))
+		for {
+			owner := owners[slot]
+			if owner == 0 {
+				fingerprints[slot] = fingerprint
+				owners[slot] = uint16(index + 1)
+				break
+			}
+			if fingerprints[slot] == fingerprint && sameLogicalSend(items[int(owner)-1].Command, cmd) {
+				return true
+			}
+			slot = (slot + 1) & (appendIdempotencyStackTableSize - 1)
+		}
+	}
+	return false
+}
+
+func logicalSendFingerprint(cmd SendCommand) uint64 {
+	hash := uint64(idempotencyFNV64aOffset)
+	for index := 0; index < len(cmd.FromUID); index++ {
+		hash ^= uint64(cmd.FromUID[index])
+		hash *= idempotencyFNV64aPrime
+	}
+	hash ^= 0
+	hash *= idempotencyFNV64aPrime
+	for index := 0; index < len(cmd.ClientMsgNo); index++ {
+		hash ^= uint64(cmd.ClientMsgNo[index])
+		hash *= idempotencyFNV64aPrime
+	}
+	hash ^= 0
+	hash *= idempotencyFNV64aPrime
+	for _, value := range cmd.Payload {
+		hash ^= uint64(value)
+		hash *= idempotencyFNV64aPrime
+	}
+	return hash
+}
+
+func sameLogicalSend(left, right SendCommand) bool {
+	return left.FromUID == right.FromUID &&
+		left.ClientMsgNo == right.ClientMsgNo &&
+		bytes.Equal(left.Payload, right.Payload)
+}
+
+// expandCompletions restores one completion per accepted caller. Only the
+// canonical owner remains committed so post-commit work runs exactly once.
+func (b idempotentAppendBatch) expandCompletions(unique []appendItemCompletion) []appendItemCompletion {
+	if b.ownerByItem == nil {
+		return unique
+	}
+	out := make([]appendItemCompletion, len(b.original))
+	emitted := make([]bool, len(unique))
+	for index, owner := range b.ownerByItem {
+		completion := unique[owner]
+		completion.item = b.original[index]
+		if emitted[owner] {
+			completion.committed = false
+		}
+		emitted[owner] = true
+		out[index] = completion
+	}
+	return out
 }
 
 func appendPanicCompletion(effect appendEffect, recovered any) appendCompletedEvent {
@@ -116,15 +270,17 @@ func appendRequest(target AuthorityTarget, active []preparedSend, attempt int) A
 		attempt = appendInitialAttempt
 	}
 	req := AppendBatchRequest{
-		ChannelID:           target.ChannelID,
-		ExpectedEpoch:       target.Epoch,
-		ExpectedLeaderEpoch: target.LeaderEpoch,
-		Messages:            make([]Message, 0, len(active)),
-		Attempt:             attempt,
-		CommitMode:          CommitModeQuorum,
-		OmitResultPayload:   true,
+		ChannelID:                 target.ChannelID,
+		ExpectedEpoch:             target.Epoch,
+		ExpectedLeaderEpoch:       target.LeaderEpoch,
+		Messages:                  make([]Message, 0, len(active)),
+		Attempt:                   attempt,
+		CommitMode:                CommitModeQuorum,
+		OmitResultPayload:         true,
+		ServerAllocatedMessageIDs: len(active) > 0,
 	}
 	for _, item := range active {
+		req.ServerAllocatedMessageIDs = req.ServerAllocatedMessageIDs && item.serverAllocatedMessageID
 		cmd := item.Command
 		if req.TraceID == "" && cmd.TraceID != "" {
 			req.TraceID = cmd.TraceID
@@ -256,6 +412,84 @@ func appendBatchErrorCompletionsOrRecoveries(ctx context.Context, items []prepar
 		}
 	}
 	return out
+}
+
+// appendBatchErrorCompletionsOrRecoveriesAndRetry retries only durable lookup
+// misses when at least one sibling proves that the failed batch contained an
+// already committed send. The retry is bounded to one storage attempt.
+func appendBatchErrorCompletionsOrRecoveriesAndRetry(
+	ctx context.Context,
+	target AuthorityTarget,
+	items []preparedSend,
+	err error,
+	ports appendPorts,
+) ([]appendItemCompletion, time.Duration) {
+	if !errors.Is(err, ErrAppendFailed) || ports.idempotency == nil {
+		return appendBatchErrorCompletions(items, err), 0
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	out := make([]appendItemCompletion, len(items))
+	misses := make([]preparedSend, 0, len(items))
+	missIndexes := make([]int, 0, len(items))
+	recovered := false
+	for index, item := range items {
+		result, ok, lookupErr := lookupIdempotentSend(ctx, item.Command, preparePorts{idempotency: ports.idempotency})
+		switch {
+		case lookupErr != nil:
+			out[index] = appendItemErrorCompletion(item, lookupErr)
+		case ok:
+			recovered = true
+			out[index] = appendItemCompletion{
+				item:   item,
+				result: SendBatchItemResult{Result: result},
+			}
+		default:
+			misses = append(misses, item)
+			missIndexes = append(missIndexes, index)
+		}
+	}
+
+	if !recovered {
+		for offset, item := range misses {
+			out[missIndexes[offset]] = appendItemErrorCompletion(item, err)
+		}
+		return out, 0
+	}
+
+	retryItems := misses[:0]
+	retryIndexes := missIndexes[:0]
+	for offset, item := range misses {
+		if itemErr := appendItemError(item); itemErr != nil {
+			out[missIndexes[offset]] = appendItemErrorCompletion(item, itemErr)
+			continue
+		}
+		retryItems = append(retryItems, item)
+		retryIndexes = append(retryIndexes, missIndexes[offset])
+	}
+	if len(retryItems) == 0 {
+		return out, 0
+	}
+
+	req := appendRequest(target, retryItems, appendIdempotencyRecoveryAttempt)
+	retryCtx, cancel := appendBatchContext(ctx)
+	startedAt := time.Now()
+	res, retryErr := ports.appender.AppendBatch(retryCtx, req)
+	retryDur := sendtrace.Elapsed(startedAt, time.Now())
+	cancel()
+
+	var retryCompletions []appendItemCompletion
+	if retryErr != nil {
+		retryCompletions = appendBatchErrorCompletionsOrRecoveries(ctx, retryItems, retryErr, ports)
+	} else {
+		retryCompletions = appendResultCompletions(retryItems, res)
+	}
+	for offset, index := range retryIndexes {
+		out[index] = retryCompletions[offset]
+	}
+	return out, retryDur
 }
 
 func appendCompletionsResultClass(items []appendItemCompletion) string {

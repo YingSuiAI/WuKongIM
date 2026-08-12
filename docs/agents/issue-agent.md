@@ -19,6 +19,7 @@ PR or trusted Review event
   -> clean Verifier: apply diff, classify risk, rerun trusted tests
   -> Publisher: exact App-signed commit, Draft PR, state, status
   -> maintainer marks Ready
+  -> Publisher: mechanically synchronize stale Agent PR with current main
   -> independent Review Agent adjudication
   -> Review Agent findings may wake at most two bounded repair loops
   -> human merge
@@ -61,9 +62,12 @@ unbounded repair attempts.
 
 ## Authorization
 
-An Issue by an `OWNER`, `MEMBER`, or `COLLABORATOR` with current `write`,
-`maintain`, or `admin` permission may start automatically. Other reports need
-an exact first-line `/agent fix` from an actor whose permission is re-read.
+An Issue whose author currently has `write`, `maintain`, or `admin` permission
+may start automatically. GitHub's credential-sensitive `author_association`
+is context only and never gates that decision. Other reports need an exact
+first-line `/agent fix` from an actor whose permission is re-read. Transient
+permission API failures are retried for at most 3.1 seconds; a definitive
+non-write result waits and an unresolved API failure aborts reconciliation.
 The other commands are:
 
 - `/agent retry` — one fresh ephemeral attempt after `needs_human`;
@@ -138,6 +142,23 @@ risk, uncertainty, and `Fixes #N`. The Publisher executes no candidate code,
 never writes `main`, never force-adopts an external head, never merges, and
 never directly closes the Bug.
 
+When a Ready Agent PR is behind `main`, the Controller does not ask Codex to
+solve the same Issue again. The Publisher reconstructs the complete bounded,
+linear App-signed candidate history from its signed source, proves that current
+`main` did not change any final candidate path, creates the same result tree
+on current `main`, and atomically swaps the Agent ref through an expected-head
+staging transaction. The new commit is
+again App-authored and GitHub-signed. The atomic swap also fences `main` at
+the exact parent used to build that commit. Any overlap, unsupported tree
+change, external head, or exhausted three-sync budget stops durably at
+`needs_human`; a stale transactional fence changes no ref and is retried from
+fresh facts. The Publisher never performs a semantic conflict resolution.
+The signed state records the new base and head, clears prior Review authority,
+and requires the independent Review Agent to adjudicate the exact new head.
+If a ref swap completed before its state write and `main` advanced again,
+the next Controller first verifies and records that exact App-owned result,
+then a later reconciliation continues from its recorded base to newer `main`.
+
 Protected Issue Agent control paths cannot be modified by the Issue Agent
 itself. Such candidates are investigation-only and require a separately
 reviewed maintainer change.
@@ -169,8 +190,10 @@ Configure:
 
 The App installation is limited to this repository and the exact permissions
 validated by `internal/infra/issueagentgithub/app_token.go`. Branch protection
-must require the dedicated App-owned `Review Agent Verdict`; neither Agent can
-merge.
+must require the dedicated App-owned `Review Agent Verdict`. Issue Agent cannot
+merge. Review Agent may merge only an exact-head approved PR whose author is a
+repository administrator or organization member; Issue Agent Bot PRs otherwise
+wait for a human merge.
 
 Action or Codex upgrades require a reviewed policy/workflow change updating
 the full Action SHA, exact CLI version, contract tests, and this document.

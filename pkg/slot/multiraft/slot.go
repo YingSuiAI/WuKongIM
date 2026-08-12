@@ -99,6 +99,7 @@ const (
 	controlTransferLeader
 	controlCompactLog
 	controlCaptureHashSlotSnapshot
+	controlFreshStatus
 )
 
 type controlAction struct {
@@ -111,6 +112,7 @@ type controlAction struct {
 	compact        *logCompactionRequest
 	backupSnapshot *hashSlotSnapshotRequest
 	strictTransfer *strictLeaderTransferRequest
+	freshStatus    *freshStatusRequest
 }
 
 // strictLeaderTransferRequest carries one exact, timeout-bounded placement
@@ -219,6 +221,25 @@ func (r *hashSlotSnapshotRequest) finish(response hashSlotSnapshotResponse) bool
 		if response.result.Reader != nil {
 			_ = response.result.Reader.Close()
 		}
+		return false
+	}
+	r.resp <- response
+	return true
+}
+
+type freshStatusRequest struct {
+	ctx  context.Context
+	resp chan freshStatusResponse
+	done atomic.Bool
+}
+
+type freshStatusResponse struct {
+	status Status
+	err    error
+}
+
+func (r *freshStatusRequest) finish(response freshStatusResponse) bool {
+	if r == nil || !r.done.CompareAndSwap(false, true) {
 		return false
 	}
 	r.resp <- response
@@ -435,7 +456,7 @@ func (g *slot) processControls(ctx context.Context) bool {
 		case controlPropose:
 			action.future.observeStageSince("meta_create_slot_control_wait", nil, action.future.createdAt)
 			if err := g.rawNode.Propose(action.data); err != nil {
-				action.future.resolve(Result{}, classifyRawProposalError(err, g.rawNode.BasicStatus()))
+				action.future.resolveAndDispatch(Result{}, classifyRawProposalError(err, g.rawNode.BasicStatus()))
 				continue
 			}
 			g.mu.Lock()
@@ -444,11 +465,11 @@ func (g *slot) processControls(ctx context.Context) bool {
 		case controlConfigChange:
 			cc, err := toRaftConfChange(action.change)
 			if err != nil {
-				action.future.resolve(Result{}, err)
+				action.future.resolveAndDispatch(Result{}, err)
 				continue
 			}
 			if err := g.rawNode.ProposeConfChange(cc); err != nil {
-				action.future.resolve(Result{}, err)
+				action.future.resolveAndDispatch(Result{}, err)
 				continue
 			}
 			g.mu.Lock()
@@ -596,6 +617,22 @@ func (g *slot) processControls(ctx context.Context) bool {
 				CapturedAtUnixMillis: time.Now().UTC().UnixMilli(),
 				Reader:               reader,
 			}})
+		case controlFreshStatus:
+			request := action.freshStatus
+			if request == nil || request.done.Load() {
+				continue
+			}
+			if err := request.ctx.Err(); err != nil {
+				request.finish(freshStatusResponse{err: err})
+				continue
+			}
+			if err := g.currentErr(); err != nil {
+				request.finish(freshStatusResponse{err: err})
+				continue
+			}
+			g.refreshFullStatus()
+			status, err := g.statusSnapshot()
+			request.finish(freshStatusResponse{status: status, err: err})
 		}
 	}
 	return len(controls) > 0
@@ -1201,8 +1238,9 @@ func (g *slot) refreshBasicStatus() {
 	st := g.rawNode.BasicStatus()
 	g.mu.Lock()
 	g.basicStatusRefreshCount++
-	leaderEvent, applyEvent := g.applyBasicStatusLocked(st)
+	leaderEvent, applyEvent, completions := g.applyBasicStatusLocked(st)
 	g.mu.Unlock()
+	dispatchFutureCompletions(completions)
 	leaderEvent.emit()
 	applyEvent.emit()
 }
@@ -1218,8 +1256,9 @@ func (g *slot) refreshFullStatus() {
 	g.status.CurrentLearners = currentLearnersFromRaftStatus(st)
 	g.status.ConfState = confStateFromRaftStatus(st)
 	g.status.Progress = progressFromRaftStatus(st)
-	leaderEvent, applyEvent := g.applyBasicStatusLocked(st.BasicStatus)
+	leaderEvent, applyEvent, completions := g.applyBasicStatusLocked(st.BasicStatus)
 	g.mu.Unlock()
+	dispatchFutureCompletions(completions)
 	leaderEvent.emit()
 	applyEvent.emit()
 }
@@ -1232,7 +1271,7 @@ func (g *slot) refreshDurableAppliedStatus() {
 	applyEvent.emit()
 }
 
-func (g *slot) applyBasicStatusLocked(st raft.BasicStatus) (leaderChangeEvent, applyStateEvent) {
+func (g *slot) applyBasicStatusLocked(st raft.BasicStatus) (leaderChangeEvent, applyStateEvent, []futureCompletion) {
 	prevRole := g.status.Role
 	nextRole := mapRole(st.RaftState)
 	nextLeader := NodeID(st.Lead)
@@ -1245,10 +1284,11 @@ func (g *slot) applyBasicStatusLocked(st raft.BasicStatus) (leaderChangeEvent, a
 	g.status.AppliedIndex = g.durableAppliedIndex
 	g.status.Role = nextRole
 	applyEvent := g.applyStateEventLocked(st.Commit, g.durableAppliedIndex)
+	var completions []futureCompletion
 	if prevRole == RoleLeader && g.status.Role != RoleLeader {
-		g.failLeadershipDependentLocked(ErrNotLeader)
+		completions = g.failLeadershipDependentLocked(ErrNotLeader)
 	}
-	return leaderEvent, applyEvent
+	return leaderEvent, applyEvent, completions
 }
 
 func (g *slot) needsLearnerProgressRefreshLocked() bool {
@@ -1822,12 +1862,14 @@ func (g *slot) hasFatalErr() bool {
 
 func (g *slot) fail(err error) {
 	g.mu.Lock()
-	defer g.mu.Unlock()
 	if err == nil || g.closed || g.fatalErr != nil {
+		g.mu.Unlock()
 		return
 	}
 	g.fatalErr = err
-	g.failPendingLocked(err)
+	completions := g.failPendingLocked(err)
+	g.mu.Unlock()
+	dispatchFutureCompletions(completions)
 }
 
 func countTrackedReadyEntries(entries []raftpb.Entry) (proposalCount, configCount int) {
@@ -1973,17 +2015,19 @@ func (g *slot) resolveProposal(index, term uint64, result Result, err error) {
 	g.mu.Unlock()
 	g.observeSlotProposal(fut)
 	if fut != nil {
-		fut.resolve(result, err)
+		fut.resolveAndDispatch(result, err)
 	}
 }
 
 func (g *slot) failPending(err error) {
 	g.mu.Lock()
-	defer g.mu.Unlock()
-	g.failPendingLocked(err)
+	completions := g.failPendingLocked(err)
+	g.mu.Unlock()
+	dispatchFutureCompletions(completions)
 }
 
-func (g *slot) failPendingLocked(err error) {
+func (g *slot) failPendingLocked(err error) []futureCompletion {
+	completions := make([]futureCompletion, 0, len(g.submittedProposals)+len(g.submittedConfigs)+len(g.pendingProposals)+len(g.pendingConfigs))
 	for i := range g.controls {
 		if g.controls[i].strictTransfer != nil {
 			g.controls[i].strictTransfer.cancel(err)
@@ -1991,57 +2035,79 @@ func (g *slot) failPendingLocked(err error) {
 		if g.controls[i].backupSnapshot != nil {
 			g.controls[i].backupSnapshot.finish(hashSlotSnapshotResponse{err: err})
 		}
+		if g.controls[i].freshStatus != nil {
+			g.controls[i].freshStatus.finish(freshStatusResponse{err: err})
+		}
 	}
 	for _, fut := range g.submittedProposals {
-		fut.resolve(Result{}, err)
+		if completion := fut.resolve(Result{}, err); completion.future != nil {
+			completions = append(completions, completion)
+		}
 	}
 	for _, fut := range g.submittedConfigs {
-		fut.resolve(Result{}, err)
+		if completion := fut.resolve(Result{}, err); completion.future != nil {
+			completions = append(completions, completion)
+		}
 	}
 	for index, pending := range g.pendingProposals {
-		pending.future.resolve(Result{}, err)
+		if completion := pending.future.resolve(Result{}, err); completion.future != nil {
+			completions = append(completions, completion)
+		}
 		delete(g.pendingProposals, index)
 	}
 	for index, pending := range g.pendingConfigs {
-		pending.future.resolve(Result{}, err)
+		if completion := pending.future.resolve(Result{}, err); completion.future != nil {
+			completions = append(completions, completion)
+		}
 		delete(g.pendingConfigs, index)
 	}
 	g.submittedProposals = nil
 	g.submittedConfigs = nil
+	return completions
 }
 
-func (g *slot) failLeadershipDependentLocked(err error) {
+func (g *slot) failLeadershipDependentLocked(err error) []futureCompletion {
 	if err == nil {
-		return
+		return nil
 	}
+	completions := make([]futureCompletion, 0, len(g.submittedProposals)+len(g.submittedConfigs)+len(g.pendingProposals)+len(g.pendingConfigs))
 	for _, fut := range g.submittedProposals {
-		fut.resolve(Result{}, err)
+		if completion := fut.resolve(Result{}, err); completion.future != nil {
+			completions = append(completions, completion)
+		}
 	}
 	for _, fut := range g.submittedConfigs {
-		fut.resolve(Result{}, err)
+		if completion := fut.resolve(Result{}, err); completion.future != nil {
+			completions = append(completions, completion)
+		}
 	}
 	for index, pending := range g.pendingProposals {
-		pending.future.resolve(Result{}, err)
+		if completion := pending.future.resolve(Result{}, err); completion.future != nil {
+			completions = append(completions, completion)
+		}
 		delete(g.pendingProposals, index)
 	}
 	for index, pending := range g.pendingConfigs {
-		pending.future.resolve(Result{}, err)
+		if completion := pending.future.resolve(Result{}, err); completion.future != nil {
+			completions = append(completions, completion)
+		}
 		delete(g.pendingConfigs, index)
 	}
 	g.submittedProposals = nil
 	g.submittedConfigs = nil
+	return completions
 }
 
 func (g *slot) resolveConfig(index, term uint64, result Result, err error) {
 	g.mu.Lock()
-	defer g.mu.Unlock()
-
 	pending, ok := g.pendingConfigs[index]
 	if !ok || pending.term != term {
+		g.mu.Unlock()
 		return
 	}
 	delete(g.pendingConfigs, index)
-	pending.future.resolve(result, err)
+	g.mu.Unlock()
+	pending.future.resolveAndDispatch(result, err)
 }
 
 func (g *slot) observeSlotProposal(fut *future) {

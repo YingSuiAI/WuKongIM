@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	channelmembers "github.com/WuKongIM/WuKongIM/internal/contracts/channelmembers"
 	metadb "github.com/WuKongIM/WuKongIM/pkg/db/meta"
 	runtimechannelid "github.com/WuKongIM/WuKongIM/pkg/protocol/channelid"
 )
@@ -16,7 +17,7 @@ func TestSyncChannelMessagesNormalizesPersonChannelAndCapsLimit(t *testing.T) {
 			HasMore:  true,
 		},
 	}
-	app := New(Options{Reader: reader})
+	app := New(Options{Reader: reader, Memberships: liveSyncMembershipStore()})
 
 	result, err := app.SyncChannelMessages(context.Background(), SyncChannelMessagesQuery{
 		LoginUID:        "u1",
@@ -46,8 +47,66 @@ func TestSyncChannelMessagesNormalizesPersonChannelAndCapsLimit(t *testing.T) {
 	}
 }
 
+func TestSyncChannelMessagesRejectsRevokedMembershipBeforeMessageReadAndUsesAuthoritativeFence(t *testing.T) {
+	reader := &recordingChannelMessageReader{}
+	authority := &recordingLiveMembershipAuthority{results: []channelmembers.LiveMembershipAuthorityResult{{
+		ChannelFound: true, SubscriberMutationVersion: 7,
+	}}}
+	app := New(Options{
+		Reader: reader,
+		Memberships: &recordingSyncMembershipStore{row: metadb.UserChannelMembership{
+			UID: "u1", ChannelID: "g1", ChannelType: 2, SourceVersion: 5,
+		}, ok: true},
+		MembershipAuthority: authority,
+	})
+
+	_, err := app.SyncChannelMessages(context.Background(), SyncChannelMessagesQuery{LoginUID: "u1", ChannelID: "g1", ChannelType: 2})
+	if !errors.Is(err, ErrSyncMembershipRequired) {
+		t.Fatalf("SyncChannelMessages() error = %v, want %v", err, ErrSyncMembershipRequired)
+	}
+	if len(reader.queries) != 0 {
+		t.Fatalf("message reads = %d, want zero", len(reader.queries))
+	}
+	if len(authority.tombstones) != 1 || authority.tombstones[0].version != 7 {
+		t.Fatalf("tombstones = %+v, want authoritative version 7", authority.tombstones)
+	}
+}
+
+func TestSyncChannelMessagesDoesNotInventNewFenceForEqualVersionRevocation(t *testing.T) {
+	authority := &recordingLiveMembershipAuthority{results: []channelmembers.LiveMembershipAuthorityResult{{
+		ChannelFound: true, SubscriberMutationVersion: 5,
+	}}}
+	app := New(Options{
+		Reader: &recordingChannelMessageReader{},
+		Memberships: &recordingSyncMembershipStore{row: metadb.UserChannelMembership{
+			UID: "u1", ChannelID: "g1", ChannelType: 2, SourceVersion: 5,
+		}, ok: true},
+		MembershipAuthority: authority,
+	})
+	_, err := app.SyncChannelMessages(context.Background(), SyncChannelMessagesQuery{LoginUID: "u1", ChannelID: "g1", ChannelType: 2})
+	if !errors.Is(err, ErrSyncMembershipRequired) || len(authority.tombstones) != 0 {
+		t.Fatalf("error=%v tombstones=%+v, want rejection without source+1 repair", err, authority.tombstones)
+	}
+}
+
+func TestSyncChannelMessagesFailsClosedOnMembershipAuthorityErrorBeforeMessageRead(t *testing.T) {
+	reader := &recordingChannelMessageReader{}
+	authorityErr := errors.New("membership authority unavailable")
+	app := New(Options{
+		Reader: reader,
+		Memberships: &recordingSyncMembershipStore{row: metadb.UserChannelMembership{
+			UID: "u1", ChannelID: "g1", ChannelType: 2,
+		}, ok: true},
+		MembershipAuthority: &recordingLiveMembershipAuthority{results: []channelmembers.LiveMembershipAuthorityResult{{Err: authorityErr}}},
+	})
+	_, err := app.SyncChannelMessages(context.Background(), SyncChannelMessagesQuery{LoginUID: "u1", ChannelID: "g1", ChannelType: 2})
+	if !errors.Is(err, authorityErr) || len(reader.queries) != 0 {
+		t.Fatalf("error=%v message reads=%d, want authority error before read", err, len(reader.queries))
+	}
+}
+
 func TestSyncChannelMessagesReturnsEmptyForMissingChannelRuntime(t *testing.T) {
-	app := New(Options{Reader: &recordingChannelMessageReader{err: metadb.ErrNotFound}})
+	app := New(Options{Reader: &recordingChannelMessageReader{err: metadb.ErrNotFound}, Memberships: liveSyncMembershipStore(), MembershipAuthority: allowLiveMembershipAuthority()})
 
 	result, err := app.SyncChannelMessages(context.Background(), SyncChannelMessagesQuery{
 		LoginUID:    "u1",
@@ -61,6 +120,121 @@ func TestSyncChannelMessagesReturnsEmptyForMissingChannelRuntime(t *testing.T) {
 	}
 	if result.More || len(result.Messages) != 0 {
 		t.Fatalf("result = %#v, want empty page", result)
+	}
+}
+
+func TestSyncChannelMessagesRequiresLiveMembershipAndClampsVisibilityFloor(t *testing.T) {
+	reader := &recordingChannelMessageReader{}
+	memberships := &recordingSyncMembershipStore{row: metadb.UserChannelMembership{
+		UID: "u1", ChannelID: "g1", ChannelType: 2, JoinSeq: 8, DeletedToSeq: 10,
+	}, ok: true}
+	app := New(Options{Reader: reader, Memberships: memberships, MembershipAuthority: allowLiveMembershipAuthority()})
+	_, err := app.SyncChannelMessages(context.Background(), SyncChannelMessagesQuery{
+		LoginUID: "u1", ChannelID: "g1", ChannelType: 2, StartMessageSeq: 1, PullMode: PullModeUp,
+	})
+	if err != nil {
+		t.Fatalf("SyncChannelMessages() error = %v", err)
+	}
+	if len(reader.queries) != 1 || reader.queries[0].StartSeq != 11 || reader.queries[0].MinSeq != 11 {
+		t.Fatalf("queries = %#v, want start/min seq 11", reader.queries)
+	}
+
+	memberships.ok = false
+	_, err = app.SyncChannelMessages(context.Background(), SyncChannelMessagesQuery{LoginUID: "u1", ChannelID: "g1", ChannelType: 2})
+	if !errors.Is(err, ErrSyncMembershipRequired) {
+		t.Fatalf("missing membership error = %v, want %v", err, ErrSyncMembershipRequired)
+	}
+}
+
+func TestSyncChannelMessagesRequiresMembershipStore(t *testing.T) {
+	app := New(Options{Reader: &recordingChannelMessageReader{}})
+
+	_, err := app.SyncChannelMessages(context.Background(), SyncChannelMessagesQuery{
+		LoginUID: "u1", ChannelID: "g1", ChannelType: 2,
+	})
+
+	if !errors.Is(err, ErrSyncMembershipRequired) {
+		t.Fatalf("error = %v, want membership required", err)
+	}
+}
+
+func TestSyncChannelMessagesBatchValidatesMembershipsBeforeOneGroupedRead(t *testing.T) {
+	reader := &recordingChannelMessageReader{batchResults: []ChannelMessageReadResult{
+		{Page: ChannelMessagePage{Messages: []SyncedMessage{{MessageSeq: 12, ChannelID: "g1", ChannelType: 2}}}},
+		{Page: ChannelMessagePage{Messages: []SyncedMessage{{MessageSeq: 7, ChannelType: channelTypePerson}}}},
+	}}
+	personID := runtimechannelid.EncodePersonChannel("u1", "u2")
+	memberships := &multiSyncMembershipStore{rows: map[ChannelID]metadb.UserChannelMembership{
+		{ID: "g1", Type: 2}:     {UID: "u1", ChannelID: "g1", ChannelType: 2, JoinSeq: 10, DeletedToSeq: 11},
+		{ID: personID, Type: 1}: {UID: "u1", ChannelID: personID, ChannelType: 1, JoinSeq: 5},
+	}}
+	authority := &recordingLiveMembershipAuthority{}
+	app := New(Options{Reader: reader, Memberships: memberships, MembershipAuthority: authority})
+
+	result, err := app.SyncChannelMessagesBatch(context.Background(), SyncChannelMessagesBatchQuery{
+		LoginUID: "u1",
+		Items: []SyncChannelMessagesQuery{
+			{ChannelID: "g1", ChannelType: 2, StartMessageSeq: 1, PullMode: PullModeUp},
+			{ChannelID: "u2", ChannelType: channelTypePerson, StartMessageSeq: 1, PullMode: PullModeUp},
+		},
+	})
+	if err != nil {
+		t.Fatalf("SyncChannelMessagesBatch() error = %v", err)
+	}
+	if memberships.calls != 2 || reader.batchCalls != 1 {
+		t.Fatalf("membership calls=%d batch calls=%d, want 2 then 1", memberships.calls, reader.batchCalls)
+	}
+	if authority.calls != 1 || len(authority.candidates) != 1 || len(authority.candidates[0]) != 1 || authority.candidates[0][0].ChannelID != "g1" {
+		t.Fatalf("authority calls=%d candidates=%+v, want one batch for non-person item", authority.calls, authority.candidates)
+	}
+	if got := reader.batchQueries[0].StartSeq; got != 12 {
+		t.Fatalf("first start seq=%d, want delete floor 12", got)
+	}
+	if got := reader.batchQueries[1].ChannelID.ID; got != personID {
+		t.Fatalf("person channel=%q, want %q", got, personID)
+	}
+	if len(result.Items) != 2 || result.Items[0].Err != nil || result.Items[1].Err != nil {
+		t.Fatalf("result=%+v, want two aligned successes", result)
+	}
+}
+
+func TestSyncChannelMessagesBatchRejectsInvalidMembershipBeforeReadingAnyChannel(t *testing.T) {
+	reader := &recordingChannelMessageReader{}
+	memberships := &multiSyncMembershipStore{rows: map[ChannelID]metadb.UserChannelMembership{
+		{ID: "g1", Type: 2}: {UID: "u1", ChannelID: "g1", ChannelType: 2, JoinSeq: 1},
+	}}
+	app := New(Options{Reader: reader, Memberships: memberships})
+
+	_, err := app.SyncChannelMessagesBatch(context.Background(), SyncChannelMessagesBatchQuery{
+		LoginUID: "u1",
+		Items: []SyncChannelMessagesQuery{
+			{ChannelID: "g1", ChannelType: 2},
+			{ChannelID: "g2", ChannelType: 2},
+		},
+	})
+	if !errors.Is(err, ErrSyncMembershipRequired) {
+		t.Fatalf("error=%v, want membership required", err)
+	}
+	if reader.batchCalls != 0 {
+		t.Fatalf("batch calls=%d, want zero", reader.batchCalls)
+	}
+}
+
+func TestSyncChannelMessagesRejectsDisbandedChannelBeforeRead(t *testing.T) {
+	reader := &recordingChannelMessageReader{}
+	memberships := &recordingSyncMembershipStore{row: metadb.UserChannelMembership{
+		UID: "u1", ChannelID: "g1", ChannelType: 2, JoinSeq: 1,
+	}, ok: true}
+	app := New(Options{
+		Reader: reader, Memberships: memberships,
+		MembershipAuthority: &recordingLiveMembershipAuthority{results: []channelmembers.LiveMembershipAuthorityResult{{
+			ChannelFound: true, Subscriber: true, Disband: true,
+		}}},
+	})
+
+	_, err := app.SyncChannelMessages(context.Background(), SyncChannelMessagesQuery{LoginUID: "u1", ChannelID: "g1", ChannelType: 2})
+	if !errors.Is(err, ErrSyncChannelDisbanded) || len(reader.queries) != 0 {
+		t.Fatalf("SyncChannelMessages() error=%v queries=%+v", err, reader.queries)
 	}
 }
 
@@ -79,7 +253,7 @@ func TestSyncChannelMessagesRejectsMissingRequiredFields(t *testing.T) {
 
 func TestSyncChannelMessagesPropagatesReaderError(t *testing.T) {
 	readerErr := errors.New("reader failed")
-	app := New(Options{Reader: &recordingChannelMessageReader{err: readerErr}})
+	app := New(Options{Reader: &recordingChannelMessageReader{err: readerErr}, Memberships: liveSyncMembershipStore(), MembershipAuthority: allowLiveMembershipAuthority()})
 
 	_, err := app.SyncChannelMessages(context.Background(), SyncChannelMessagesQuery{
 		LoginUID:    "u1",
@@ -129,7 +303,7 @@ func TestSyncChannelMessagesEnrichesFullEventMeta(t *testing.T) {
 	reader := &recordingChannelMessageReader{page: ChannelMessagePage{Messages: []SyncedMessage{
 		{Setting: legacySettingStream, ChannelID: "g1", ChannelType: 2, ClientMsgNo: "cmn-1", MessageID: 9, Payload: []byte("base")},
 	}}}
-	app := New(Options{Reader: reader, EventStore: store})
+	app := New(Options{Reader: reader, Memberships: liveSyncMembershipStore(), MembershipAuthority: allowLiveMembershipAuthority(), EventStore: store})
 
 	result, err := app.SyncChannelMessages(context.Background(), SyncChannelMessagesQuery{
 		LoginUID:         "u1",
@@ -179,7 +353,7 @@ func TestSyncChannelMessagesBasicEventMetaOmitsSnapshots(t *testing.T) {
 	reader := &recordingChannelMessageReader{page: ChannelMessagePage{Messages: []SyncedMessage{
 		{Setting: legacySettingStream, ChannelID: "g1", ChannelType: 2, ClientMsgNo: "cmn-1"},
 	}}}
-	app := New(Options{Reader: reader, EventStore: store})
+	app := New(Options{Reader: reader, Memberships: liveSyncMembershipStore(), MembershipAuthority: allowLiveMembershipAuthority(), EventStore: store})
 
 	result, err := app.SyncChannelMessages(context.Background(), SyncChannelMessagesQuery{
 		LoginUID:         "u1",
@@ -204,7 +378,7 @@ func TestSyncChannelMessagesIncludeEventMetaDefaultsToFull(t *testing.T) {
 	reader := &recordingChannelMessageReader{page: ChannelMessagePage{Messages: []SyncedMessage{
 		{Setting: legacySettingStream, ChannelID: "g1", ChannelType: 2, ClientMsgNo: "cmn-1"},
 	}}}
-	app := New(Options{Reader: reader, EventStore: store})
+	app := New(Options{Reader: reader, Memberships: liveSyncMembershipStore(), MembershipAuthority: allowLiveMembershipAuthority(), EventStore: store})
 
 	result, err := app.SyncChannelMessages(context.Background(), SyncChannelMessagesQuery{
 		LoginUID:         "u1",
@@ -229,7 +403,7 @@ func TestSyncChannelMessagesSkipsNonStreamMessagesDuringEventEnrichment(t *testi
 	reader := &recordingChannelMessageReader{page: ChannelMessagePage{Messages: []SyncedMessage{
 		{ChannelID: "g1", ChannelType: 2, ClientMsgNo: "cmn-ordinary"},
 	}}}
-	app := New(Options{Reader: reader, EventStore: store})
+	app := New(Options{Reader: reader, Memberships: liveSyncMembershipStore(), MembershipAuthority: allowLiveMembershipAuthority(), EventStore: store})
 
 	_, err := app.SyncChannelMessages(context.Background(), SyncChannelMessagesQuery{
 		LoginUID:         "u1",
@@ -251,7 +425,7 @@ func TestSyncChannelMessagesSkipsEventStoreWhenSummaryModeEmpty(t *testing.T) {
 	reader := &recordingChannelMessageReader{page: ChannelMessagePage{Messages: []SyncedMessage{
 		{Setting: legacySettingStream, ChannelID: "g1", ChannelType: 2, ClientMsgNo: "cmn-1"},
 	}}}
-	app := New(Options{Reader: reader, EventStore: store})
+	app := New(Options{Reader: reader, Memberships: liveSyncMembershipStore(), MembershipAuthority: allowLiveMembershipAuthority(), EventStore: store})
 
 	_, err := app.SyncChannelMessages(context.Background(), SyncChannelMessagesQuery{
 		LoginUID:    "u1",
@@ -273,7 +447,7 @@ func TestSyncChannelMessagesPropagatesEventStoreError(t *testing.T) {
 	reader := &recordingChannelMessageReader{page: ChannelMessagePage{Messages: []SyncedMessage{
 		{Setting: legacySettingStream, ChannelID: "g1", ChannelType: 2, ClientMsgNo: "cmn-1"},
 	}}}
-	app := New(Options{Reader: reader, EventStore: store})
+	app := New(Options{Reader: reader, Memberships: liveSyncMembershipStore(), MembershipAuthority: allowLiveMembershipAuthority(), EventStore: store})
 
 	_, err := app.SyncChannelMessages(context.Background(), SyncChannelMessagesQuery{
 		LoginUID:         "u1",
@@ -288,12 +462,89 @@ func TestSyncChannelMessagesPropagatesEventStoreError(t *testing.T) {
 }
 
 type recordingChannelMessageReader struct {
-	queries []ChannelMessageQuery
-	page    ChannelMessagePage
+	queries      []ChannelMessageQuery
+	page         ChannelMessagePage
+	err          error
+	batchQueries []ChannelMessageQuery
+	batchResults []ChannelMessageReadResult
+	batchCalls   int
+}
+
+type recordingLiveMembershipAuthority struct {
+	results    []channelmembers.LiveMembershipAuthorityResult
+	calls      int
+	candidates [][]channelmembers.LiveMembership
+	tombstones []struct {
+		membership channelmembers.LiveMembership
+		version    uint64
+	}
+}
+
+func (a *recordingLiveMembershipAuthority) AuthorizeLiveMemberships(_ context.Context, memberships []channelmembers.LiveMembership) []channelmembers.LiveMembershipAuthorityResult {
+	a.calls++
+	a.candidates = append(a.candidates, append([]channelmembers.LiveMembership(nil), memberships...))
+	if a.results != nil {
+		return append([]channelmembers.LiveMembershipAuthorityResult(nil), a.results...)
+	}
+	results := make([]channelmembers.LiveMembershipAuthorityResult, len(memberships))
+	for index := range results {
+		results[index] = channelmembers.LiveMembershipAuthorityResult{ChannelFound: true, Subscriber: true}
+	}
+	return results
+}
+
+func (a *recordingLiveMembershipAuthority) TombstoneRevokedMembership(_ context.Context, membership channelmembers.LiveMembership, version uint64, _ int64) error {
+	a.tombstones = append(a.tombstones, struct {
+		membership channelmembers.LiveMembership
+		version    uint64
+	}{membership: membership, version: version})
+	return nil
+}
+
+type recordingSyncMembershipStore struct {
+	row metadb.UserChannelMembership
+	ok  bool
+}
+
+func liveSyncMembershipStore() *recordingSyncMembershipStore {
+	return &recordingSyncMembershipStore{row: metadb.UserChannelMembership{JoinSeq: 1}, ok: true}
+}
+
+func allowLiveMembershipAuthority() *recordingLiveMembershipAuthority {
+	return &recordingLiveMembershipAuthority{}
+}
+
+type staticSyncChannelStateStore struct {
+	channel metadb.Channel
 	err     error
+}
+
+func (s staticSyncChannelStateStore) GetChannelForMessagePull(context.Context, string, int64) (metadb.Channel, error) {
+	return s.channel, s.err
+}
+
+func (s *recordingSyncMembershipStore) GetUserChannelMembership(context.Context, string, string, int64) (metadb.UserChannelMembership, bool, error) {
+	return s.row, s.ok, nil
 }
 
 func (r *recordingChannelMessageReader) SyncMessages(_ context.Context, query ChannelMessageQuery) (ChannelMessagePage, error) {
 	r.queries = append(r.queries, query)
 	return r.page, r.err
+}
+
+func (r *recordingChannelMessageReader) SyncMessagesBatch(_ context.Context, queries []ChannelMessageQuery) ([]ChannelMessageReadResult, error) {
+	r.batchCalls++
+	r.batchQueries = append([]ChannelMessageQuery(nil), queries...)
+	return r.batchResults, r.err
+}
+
+type multiSyncMembershipStore struct {
+	rows  map[ChannelID]metadb.UserChannelMembership
+	calls int
+}
+
+func (s *multiSyncMembershipStore) GetUserChannelMembership(_ context.Context, _ string, channelID string, channelType int64) (metadb.UserChannelMembership, bool, error) {
+	s.calls++
+	row, ok := s.rows[ChannelID{ID: channelID, Type: uint8(channelType)}]
+	return row, ok, nil
 }

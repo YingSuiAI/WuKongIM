@@ -27,9 +27,6 @@ var (
 )
 
 const (
-	defaultConversationAuthorityFlushBatchRows = 512
-	// DefaultConversationAuthorityCacheMaxRows is the node-wide authority cache ceiling used when configuration omits it.
-	DefaultConversationAuthorityCacheMaxRows = 100_000
 	// DefaultDeliveryRecipientWorkerConcurrency is the bounded recipient-plan worker count used when configuration omits it.
 	DefaultDeliveryRecipientWorkerConcurrency = 100
 )
@@ -68,8 +65,6 @@ type Config struct {
 	Channel ChannelConfig
 	// ChannelAppend configures the local channel append authority runtime.
 	ChannelAppend ChannelAppendConfig
-	// Conversation configures conversation authority and list reads.
-	Conversation ConversationConfig
 	// Presence configures connection-route activation and authority touch behavior.
 	Presence PresenceConfig
 	// Delivery configures online message delivery fanout and owner-local ack tracking.
@@ -82,6 +77,8 @@ type Config struct {
 type APIConfig struct {
 	// ListenAddr is the HTTP API listen address. An empty value disables the API service.
 	ListenAddr string
+	// ServiceToken authenticates mutating service API calls such as /user/token.
+	ServiceToken string
 	// ExternalTCPAddr is the published WKProto TCP gateway address returned by bench capacity discovery.
 	ExternalTCPAddr string
 	// ExternalWSAddr is the published WebSocket gateway address returned by bench capacity discovery.
@@ -320,34 +317,8 @@ type ChannelAppendConfig struct {
 	AdvancePoolSize int
 	// EffectPoolSize is the direct ants pool size used separately by blocking append calls and post-append recipient effects. Zero derives a CPU-aware default.
 	EffectPoolSize int
-	// RecipientAuthorityDispatchConcurrency bounds per-message recipient authority fanout after append. Zero uses a bounded default.
+	// RecipientAuthorityDispatchConcurrency is retained for configuration compatibility; canonical Online Delivery plans ignore it.
 	RecipientAuthorityDispatchConcurrency int
-}
-
-// ConversationConfig contains conversation authority and read-model settings.
-type ConversationConfig struct {
-	// MaxLastMessageConcurrency bounds concurrent channel tail reads for one conversation list request.
-	MaxLastMessageConcurrency int
-	// AuthorityCacheMaxRowsPerUID is retained for config compatibility; the runtime-backed authority currently does not enforce a per-UID cache bound.
-	AuthorityCacheMaxRowsPerUID int
-	// AuthorityCacheMaxRows bounds all cached authority active rows on this node, including clean eviction reserves.
-	AuthorityCacheMaxRows int
-	// AuthorityListDBWindowMax is retained for config compatibility; the runtime-backed authority currently owns its active-view DB window internally.
-	AuthorityListDBWindowMax int
-	// AuthorityHandoffTimeout bounds how long a new authority waits for old-authority drain before explicit abandon.
-	AuthorityHandoffTimeout time.Duration
-	// AuthorityActiveCooldown coalesces receiver-only active_at persistence while the authority cache keeps the latest activity visible.
-	AuthorityActiveCooldown time.Duration
-	// AuthorityFlushInterval controls how often dirty authority active rows are flushed to durable storage.
-	AuthorityFlushInterval time.Duration
-	// AuthorityFlushTimeout bounds one authority active-row flush attempt.
-	AuthorityFlushTimeout time.Duration
-	// AuthorityFlushBatchRows bounds dirty authority active rows flushed by one periodic, pressure-woken, or handoff attempt.
-	AuthorityFlushBatchRows int
-	// AuthorityAdmitBatchRows limits active rows in one authority admission batch.
-	AuthorityAdmitBatchRows int
-	// AuthorityAdmitConcurrency limits concurrent authority admission batches.
-	AuthorityAdmitConcurrency int
 }
 
 // PresenceConfig contains connection presence and route-authority touch settings.
@@ -390,6 +361,8 @@ type WebhookConfig struct {
 	Enabled bool
 	// HTTPAddr receives JSON webhook POST requests as {HTTPAddr}?event=<event>.
 	HTTPAddr string
+	// SigningSecret authenticates webhook requests with HMAC-SHA256 when configured.
+	SigningSecret string
 	// FocusEvents limits delivered event names. Empty means all supported webhook events are delivered.
 	FocusEvents []string
 	// QueueSize bounds accepted webhook events waiting in memory before worker execution.
@@ -457,6 +430,9 @@ func defaultWebhookConfig(cfg WebhookConfig) WebhookConfig {
 func validateWebhookConfig(cfg WebhookConfig) error {
 	if cfg.Enabled && cfg.HTTPAddr == "" {
 		return fmt.Errorf("%w: webhook HTTPAddr is required when webhook is enabled", ErrInvalidConfig)
+	}
+	if cfg.HTTPAddr != "" && strings.TrimSpace(cfg.SigningSecret) == "" {
+		return fmt.Errorf("%w: webhook SigningSecret is required when webhook HTTPAddr is configured", ErrInvalidConfig)
 	}
 	if cfg.QueueSize < 0 {
 		return fmt.Errorf("%w: webhook QueueSize must be >= 0", ErrInvalidConfig)
@@ -670,43 +646,6 @@ func defaultChannelAppendEffectPoolSize() int {
 
 func defaultChannelAppendRecipientAuthorityDispatchConcurrency() int {
 	return 100
-}
-
-func defaultConversationConfig(cfg ConversationConfig) ConversationConfig {
-	if cfg.MaxLastMessageConcurrency == 0 {
-		cfg.MaxLastMessageConcurrency = 32
-	}
-	if cfg.AuthorityCacheMaxRowsPerUID == 0 {
-		cfg.AuthorityCacheMaxRowsPerUID = 4096
-	}
-	if cfg.AuthorityCacheMaxRows == 0 {
-		cfg.AuthorityCacheMaxRows = DefaultConversationAuthorityCacheMaxRows
-	}
-	if cfg.AuthorityListDBWindowMax == 0 {
-		cfg.AuthorityListDBWindowMax = 1000
-	}
-	if cfg.AuthorityHandoffTimeout == 0 {
-		cfg.AuthorityHandoffTimeout = 3 * time.Second
-	}
-	if cfg.AuthorityActiveCooldown == 0 {
-		cfg.AuthorityActiveCooldown = 2 * time.Hour
-	}
-	if cfg.AuthorityFlushInterval == 0 {
-		cfg.AuthorityFlushInterval = time.Second
-	}
-	if cfg.AuthorityFlushTimeout == 0 {
-		cfg.AuthorityFlushTimeout = 5 * time.Second
-	}
-	if cfg.AuthorityFlushBatchRows == 0 {
-		cfg.AuthorityFlushBatchRows = defaultConversationAuthorityFlushBatchRows
-	}
-	if cfg.AuthorityAdmitBatchRows == 0 {
-		cfg.AuthorityAdmitBatchRows = 512
-	}
-	if cfg.AuthorityAdmitConcurrency == 0 {
-		cfg.AuthorityAdmitConcurrency = 16
-	}
-	return cfg
 }
 
 func defaultObservabilityConfig(cfg ObservabilityConfig) ObservabilityConfig {
@@ -975,43 +914,6 @@ func validatePluginConfig(cfg PluginConfig) error {
 	}
 	if cfg.PersistAfterWorkers < 0 {
 		return fmt.Errorf("%w: plugin persist-after workers must be >= 0", ErrInvalidConfig)
-	}
-	return nil
-}
-
-func validateConversationConfig(cfg ConversationConfig) error {
-	if cfg.MaxLastMessageConcurrency < 0 {
-		return fmt.Errorf("%w: conversation last message concurrency must be non-negative", ErrInvalidConfig)
-	}
-	if cfg.AuthorityCacheMaxRowsPerUID <= 0 {
-		return fmt.Errorf("%w: conversation authority cache max rows per uid must be positive", ErrInvalidConfig)
-	}
-	if cfg.AuthorityCacheMaxRows <= 0 {
-		return fmt.Errorf("%w: conversation authority cache max rows must be positive", ErrInvalidConfig)
-	}
-	if cfg.AuthorityListDBWindowMax <= 0 {
-		return fmt.Errorf("%w: conversation authority list db window max must be positive", ErrInvalidConfig)
-	}
-	if cfg.AuthorityHandoffTimeout <= 0 {
-		return fmt.Errorf("%w: conversation authority handoff timeout must be positive", ErrInvalidConfig)
-	}
-	if cfg.AuthorityActiveCooldown <= 0 {
-		return fmt.Errorf("%w: conversation authority active cooldown must be positive", ErrInvalidConfig)
-	}
-	if cfg.AuthorityFlushInterval <= 0 {
-		return fmt.Errorf("%w: conversation authority flush interval must be positive", ErrInvalidConfig)
-	}
-	if cfg.AuthorityFlushTimeout <= 0 {
-		return fmt.Errorf("%w: conversation authority flush timeout must be positive", ErrInvalidConfig)
-	}
-	if cfg.AuthorityFlushBatchRows <= 0 {
-		return fmt.Errorf("%w: conversation authority flush batch rows must be positive", ErrInvalidConfig)
-	}
-	if cfg.AuthorityAdmitBatchRows <= 0 {
-		return fmt.Errorf("%w: conversation authority admit batch rows must be positive", ErrInvalidConfig)
-	}
-	if cfg.AuthorityAdmitConcurrency <= 0 {
-		return fmt.Errorf("%w: conversation authority admit concurrency must be positive", ErrInvalidConfig)
 	}
 	return nil
 }

@@ -24,11 +24,8 @@ import (
 	accessgateway "github.com/WuKongIM/WuKongIM/internal/access/gateway"
 	accessmanager "github.com/WuKongIM/WuKongIM/internal/access/manager"
 	accessnode "github.com/WuKongIM/WuKongIM/internal/access/node"
-	"github.com/WuKongIM/WuKongIM/internal/contracts/messageevents"
 	clusterinfra "github.com/WuKongIM/WuKongIM/internal/infra/cluster"
 	"github.com/WuKongIM/WuKongIM/internal/runtime/channelappend"
-	"github.com/WuKongIM/WuKongIM/internal/runtime/conversationactive"
-	runtimedelivery "github.com/WuKongIM/WuKongIM/internal/runtime/delivery"
 	"github.com/WuKongIM/WuKongIM/internal/runtime/online"
 	authoritypresence "github.com/WuKongIM/WuKongIM/internal/runtime/presence"
 	channelusecase "github.com/WuKongIM/WuKongIM/internal/usecase/channel"
@@ -39,6 +36,7 @@ import (
 	channelruntime "github.com/WuKongIM/WuKongIM/pkg/channel"
 	channelstore "github.com/WuKongIM/WuKongIM/pkg/channel/store"
 	clusterpkg "github.com/WuKongIM/WuKongIM/pkg/cluster"
+	clusterchannels "github.com/WuKongIM/WuKongIM/pkg/cluster/channels"
 	"github.com/WuKongIM/WuKongIM/pkg/cluster/control"
 	"github.com/WuKongIM/WuKongIM/pkg/cluster/routing"
 	controller "github.com/WuKongIM/WuKongIM/pkg/controller"
@@ -48,8 +46,8 @@ import (
 	gatewaycore "github.com/WuKongIM/WuKongIM/pkg/gateway/core"
 	"github.com/WuKongIM/WuKongIM/pkg/gateway/session"
 	goruntimeregistry "github.com/WuKongIM/WuKongIM/pkg/goroutine"
-	runtimechannelid "github.com/WuKongIM/WuKongIM/pkg/protocol/channelid"
 	"github.com/WuKongIM/WuKongIM/pkg/protocol/frame"
+	slotproxy "github.com/WuKongIM/WuKongIM/pkg/slot/proxy"
 	"github.com/WuKongIM/WuKongIM/pkg/wklog"
 	"github.com/bwmarrin/snowflake"
 )
@@ -1630,15 +1628,15 @@ func TestNewRegistersManagerSlotRaftRPCWhenClusterSupportsOperations(t *testing.
 }
 
 func TestNewRegistersManagerMessageRetentionRPCWhenClusterSupportsRetention(t *testing.T) {
-	key := metadb.ConversationKey{ChannelID: "room-1", ChannelType: 2}
+	key := metadb.ChannelKey{ChannelID: "room-1", ChannelType: 2}
 	cluster := &fakeManagerCluster{
 		nodeID: 1,
-		channelRuntimeMetas: map[metadb.ConversationKey]metadb.ChannelRuntimeMeta{key: {
+		channelRuntimeMetas: map[metadb.ChannelKey]metadb.ChannelRuntimeMeta{key: {
 			ChannelID: "room-1", ChannelType: 2,
 			ChannelEpoch: 4, LeaderEpoch: 5, Leader: 1, LeaseUntilMS: 1713859200123,
 			Replicas: []uint64{1}, ISR: []uint64{1}, MinISR: 1, Status: uint8(channelruntime.StatusActive),
 		}},
-		conversationMessages: map[metadb.ConversationKey][]channelruntime.Message{
+		conversationMessages: map[metadb.ChannelKey][]channelruntime.Message{
 			key: {{MessageID: 101, MessageSeq: 2, ChannelID: "room-1", ChannelType: 2}},
 		},
 	}
@@ -2471,13 +2469,15 @@ func TestManagerServerListsRecentConversationsFromConversationUsecase(t *testing
 			Slots:     []control.SlotAssignment{{SlotID: 1, DesiredPeers: []uint64{1}}},
 			HashSlots: control.HashSlotTable{Count: 4, Ranges: []control.HashSlotRange{{From: 0, To: 3, SlotID: 1}}},
 		},
-		conversationPages: map[string][]metadb.ConversationState{
+		membershipPages: map[string][]metadb.UserChannelMembership{
 			"u1": {{
-				UID: "u1", Kind: metadb.ConversationKindNormal, ChannelID: "g1", ChannelType: 2,
-				ReadSeq: 4, ActiveAt: 200000000000, UpdatedAt: 200000000000,
+				UID: "u1", ChannelID: "g1", ChannelType: 2, JoinSeq: 1,
+				ReadSeq: 4, ActivatedAt: 200000000000, UpdatedAt: 200000000000,
 			}},
 		},
-		conversationMessages: map[metadb.ConversationKey][]channelruntime.Message{
+		channelPages: map[uint32][]metadb.Channel{1: {{ChannelID: "g1", ChannelType: 2, SubscriberMutationVersion: 1}}},
+		systemUIDs:   []string{"u1"},
+		conversationMessages: map[metadb.ChannelKey][]channelruntime.Message{
 			{ChannelID: "g1", ChannelType: 2}: {{
 				MessageID: 99, MessageSeq: 7, ClientMsgNo: "c7",
 				ChannelID: "g1", ChannelType: 2, FromUID: "u2",
@@ -2543,7 +2543,7 @@ func TestManagerServerListsMessagesFromClusterCommittedLog(t *testing.T) {
 			Slots:     []control.SlotAssignment{{SlotID: 1, DesiredPeers: []uint64{1}}},
 			HashSlots: control.HashSlotTable{Count: 4, Ranges: []control.HashSlotRange{{From: 0, To: 3, SlotID: 1}}},
 		},
-		conversationMessages: map[metadb.ConversationKey][]channelruntime.Message{
+		conversationMessages: map[metadb.ChannelKey][]channelruntime.Message{
 			{ChannelID: "room-1", ChannelType: 2}: {
 				{MessageID: 100, MessageSeq: 9, ClientMsgNo: "c-100", ChannelID: "room-1", ChannelType: 2, FromUID: "u2", ServerTimestampMS: 1713859100000, Payload: []byte("older")},
 				{MessageID: 101, MessageSeq: 10, ClientMsgNo: "c-101", ChannelID: "room-1", ChannelType: 2, FromUID: "u1", ServerTimestampMS: 1713859200123, Payload: []byte("hello")},
@@ -2591,7 +2591,7 @@ func TestManagerServerListsMessagesFromClusterCommittedLog(t *testing.T) {
 }
 
 func TestManagerServerAdvancesMessageRetentionThroughClusterMeta(t *testing.T) {
-	key := metadb.ConversationKey{ChannelID: "room-1", ChannelType: 2}
+	key := metadb.ChannelKey{ChannelID: "room-1", ChannelType: 2}
 	meta := metadb.ChannelRuntimeMeta{
 		ChannelID: "room-1", ChannelType: 2,
 		ChannelEpoch: 4, LeaderEpoch: 5, Leader: 1, LeaseUntilMS: 1713859200123,
@@ -2603,8 +2603,8 @@ func TestManagerServerAdvancesMessageRetentionThroughClusterMeta(t *testing.T) {
 			Slots:     []control.SlotAssignment{{SlotID: 1, DesiredPeers: []uint64{1}}},
 			HashSlots: control.HashSlotTable{Count: 4, Ranges: []control.HashSlotRange{{From: 0, To: 3, SlotID: 1}}},
 		},
-		channelRuntimeMetas: map[metadb.ConversationKey]metadb.ChannelRuntimeMeta{key: meta},
-		conversationMessages: map[metadb.ConversationKey][]channelruntime.Message{
+		channelRuntimeMetas: map[metadb.ChannelKey]metadb.ChannelRuntimeMeta{key: meta},
+		conversationMessages: map[metadb.ChannelKey][]channelruntime.Message{
 			key: {
 				{MessageID: 100, MessageSeq: 1, ChannelID: "room-1", ChannelType: 2},
 				{MessageID: 101, MessageSeq: 2, ChannelID: "room-1", ChannelType: 2},
@@ -3083,102 +3083,6 @@ func TestValidateDeliveryConfigRejectsInvalidValues(t *testing.T) {
 	}
 }
 
-func TestNewWiresIndependentRecipientDeliveryWorkerConcurrency(t *testing.T) {
-	cluster := newFakePresenceCluster(1, nil)
-	app, err := newTestApp(t,
-		Config{
-			Cluster: clusterpkg.Config{NodeID: 1},
-			ChannelAppend: ChannelAppendConfig{
-				RecipientAuthorityDispatchConcurrency: 3,
-			},
-			Delivery: DeliveryConfig{
-				Enabled:                    true,
-				RecipientWorkerConcurrency: 7,
-			},
-		},
-		WithCluster(cluster),
-		WithGateway(&fakeGateway{calls: &[]string{}}),
-	)
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
-	}
-	if app.channelAppendDeliveryWorker == nil {
-		t.Fatal("channelappend recipient delivery worker was not wired")
-	}
-	if got := app.channelAppendDeliveryWorker.WorkerCapacity(); got != 7 {
-		t.Fatalf("recipient delivery worker capacity = %d, want 7", got)
-	}
-}
-
-func TestDefaultConversationConfigUsesRuntimeDefaults(t *testing.T) {
-	cfg := defaultConversationConfig(ConversationConfig{})
-
-	if cfg.MaxLastMessageConcurrency != 32 {
-		t.Fatalf("MaxLastMessageConcurrency = %d, want 32", cfg.MaxLastMessageConcurrency)
-	}
-
-	negative := defaultConversationConfig(ConversationConfig{
-		MaxLastMessageConcurrency: -2,
-	})
-	if negative.MaxLastMessageConcurrency != -2 {
-		t.Fatalf("negative conversation values were overwritten: %#v", negative)
-	}
-}
-
-func TestDefaultConversationAuthorityConfig(t *testing.T) {
-	cfg := defaultConversationConfig(ConversationConfig{})
-	if cfg.AuthorityCacheMaxRowsPerUID != 4096 ||
-		cfg.AuthorityCacheMaxRows != 100000 ||
-		cfg.AuthorityListDBWindowMax != 1000 ||
-		cfg.AuthorityHandoffTimeout != 3*time.Second ||
-		cfg.AuthorityActiveCooldown != 2*time.Hour ||
-		cfg.AuthorityFlushInterval != time.Second ||
-		cfg.AuthorityFlushTimeout != 5*time.Second ||
-		cfg.AuthorityFlushBatchRows != 512 ||
-		cfg.AuthorityAdmitBatchRows != 512 ||
-		cfg.AuthorityAdmitConcurrency != 16 {
-		t.Fatalf("conversation authority defaults = %#v", cfg)
-	}
-}
-
-func TestValidateConversationConfigRejectsInvalidValues(t *testing.T) {
-	tests := []struct {
-		name   string
-		mutate func(*ConversationConfig)
-	}{
-		{name: "last message concurrency", mutate: func(cfg *ConversationConfig) { cfg.MaxLastMessageConcurrency = -1 }},
-		{name: "authority cache max rows per uid negative", mutate: func(cfg *ConversationConfig) { cfg.AuthorityCacheMaxRowsPerUID = -1 }},
-		{name: "authority cache max rows per uid zero", mutate: func(cfg *ConversationConfig) { cfg.AuthorityCacheMaxRowsPerUID = 0 }},
-		{name: "authority cache max rows negative", mutate: func(cfg *ConversationConfig) { cfg.AuthorityCacheMaxRows = -1 }},
-		{name: "authority cache max rows zero", mutate: func(cfg *ConversationConfig) { cfg.AuthorityCacheMaxRows = 0 }},
-		{name: "authority list db window max negative", mutate: func(cfg *ConversationConfig) { cfg.AuthorityListDBWindowMax = -1 }},
-		{name: "authority list db window max zero", mutate: func(cfg *ConversationConfig) { cfg.AuthorityListDBWindowMax = 0 }},
-		{name: "authority handoff timeout negative", mutate: func(cfg *ConversationConfig) { cfg.AuthorityHandoffTimeout = -time.Nanosecond }},
-		{name: "authority handoff timeout zero", mutate: func(cfg *ConversationConfig) { cfg.AuthorityHandoffTimeout = 0 }},
-		{name: "authority active cooldown negative", mutate: func(cfg *ConversationConfig) { cfg.AuthorityActiveCooldown = -time.Nanosecond }},
-		{name: "authority active cooldown zero", mutate: func(cfg *ConversationConfig) { cfg.AuthorityActiveCooldown = 0 }},
-		{name: "authority flush interval negative", mutate: func(cfg *ConversationConfig) { cfg.AuthorityFlushInterval = -time.Nanosecond }},
-		{name: "authority flush interval zero", mutate: func(cfg *ConversationConfig) { cfg.AuthorityFlushInterval = 0 }},
-		{name: "authority flush timeout negative", mutate: func(cfg *ConversationConfig) { cfg.AuthorityFlushTimeout = -time.Nanosecond }},
-		{name: "authority flush timeout zero", mutate: func(cfg *ConversationConfig) { cfg.AuthorityFlushTimeout = 0 }},
-		{name: "authority flush batch rows negative", mutate: func(cfg *ConversationConfig) { cfg.AuthorityFlushBatchRows = -1 }},
-		{name: "authority flush batch rows zero", mutate: func(cfg *ConversationConfig) { cfg.AuthorityFlushBatchRows = 0 }},
-		{name: "authority admit batch rows negative", mutate: func(cfg *ConversationConfig) { cfg.AuthorityAdmitBatchRows = -1 }},
-		{name: "authority admit batch rows zero", mutate: func(cfg *ConversationConfig) { cfg.AuthorityAdmitBatchRows = 0 }},
-		{name: "authority admit concurrency negative", mutate: func(cfg *ConversationConfig) { cfg.AuthorityAdmitConcurrency = -1 }},
-		{name: "authority admit concurrency zero", mutate: func(cfg *ConversationConfig) { cfg.AuthorityAdmitConcurrency = 0 }},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cfg := defaultConversationConfig(ConversationConfig{})
-			tt.mutate(&cfg)
-			if err := validateConversationConfig(cfg); !errors.Is(err, ErrInvalidConfig) {
-				t.Fatalf("validateConversationConfig() error = %v, want %v", err, ErrInvalidConfig)
-			}
-		})
-	}
-}
-
 func TestNewBuildsRootLogger(t *testing.T) {
 	calls := make([]string, 0, 2)
 	cfg := Config{Log: LogConfig{Dir: t.TempDir(), Console: false, Format: "json"}}
@@ -3272,9 +3176,6 @@ func TestConfigureObservabilityWiresTopObserversWhenMetricsDisabled(t *testing.T
 	if clusterCfg.Transport.Observer == nil {
 		t.Fatal("transport top observer was not wired")
 	}
-	if app.deliveryObserver() == nil {
-		t.Fatal("delivery top observer was not wired")
-	}
 }
 
 func TestConfigureObservabilitySamplesResourcesForMetricsWithoutTopProvider(t *testing.T) {
@@ -3326,65 +3227,6 @@ func TestStopSyncsLogger(t *testing.T) {
 	}
 	if got := logger.syncCallCount(); got != 1 {
 		t.Fatalf("Sync calls = %d, want 1", got)
-	}
-}
-
-func TestNewWiresDeliveryWhenEnabled(t *testing.T) {
-	cluster := newFakePresenceCluster(1, nil)
-	app, err := newTestApp(t,
-		Config{
-			Cluster:  clusterpkg.Config{NodeID: 1},
-			Delivery: DeliveryConfig{Enabled: true},
-		},
-		WithCluster(cluster),
-		WithGateway(&fakeGateway{calls: &[]string{}}),
-	)
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
-	}
-
-	if app.Delivery() == nil {
-		t.Fatal("delivery usecase was not wired")
-	}
-	if app.deliveryManager == nil {
-		t.Fatal("delivery manager was not wired")
-	}
-	if _, ok := cluster.registeredHandlers[accessnode.DeliveryPushRPCServiceID]; !ok {
-		t.Fatalf("delivery push rpc service was not registered")
-	}
-	if app.deliveryWorker == nil {
-		t.Fatal("delivery worker was not wired")
-	}
-	if app.channelAppendDeliveryWorker == nil {
-		t.Fatal("channelappend recipient delivery worker was not wired")
-	}
-	if app.deliveryManager == nil || app.deliveryManager.PendingAckCount() != 0 {
-		t.Fatal("delivery manager was not initialized for async runtime")
-	}
-	group, ok := app.deliveryWorker.(deliveryWorkerGroup)
-	if !ok {
-		t.Fatalf("delivery worker = %T, want deliveryWorkerGroup", app.deliveryWorker)
-	}
-	if len(group) != 3 {
-		t.Fatalf("delivery worker count = %d, want recipient worker, retry scheduler, and manager", len(group))
-	}
-	if group[0] != app.deliveryRetry {
-		t.Fatalf("delivery worker[0] = %T, want retry scheduler", group[0])
-	}
-	if group[1] != app.deliveryManager {
-		t.Fatalf("delivery worker[1] = %T, want manager", group[1])
-	}
-	if _, ok := group[2].(*channelappend.RecipientDeliveryWorker); !ok {
-		t.Fatalf("delivery worker[2] = %T, want recipient delivery worker", group[2])
-	}
-	if group[2] != app.channelAppendDeliveryWorker {
-		t.Fatalf("delivery worker[2] = %T, want app channelappend recipient delivery worker", group[2])
-	}
-	if app.deliveryRetry == nil {
-		t.Fatal("delivery retry scheduler was not wired")
-	}
-	if _, ok := cluster.registeredHandlers[accessnode.DeliveryFanoutRPCServiceID]; !ok {
-		t.Fatalf("delivery fanout rpc service was not registered")
 	}
 }
 
@@ -3543,7 +3385,7 @@ func TestNewWiresTopMessageAppendWhenMetricsDisabled(t *testing.T) {
 	}
 }
 
-func TestNewWiresChannelAppendCommitEffectsWhenDeliveryDisabled(t *testing.T) {
+func TestChannelAppendDoesNotWriteConversationOrMembershipState(t *testing.T) {
 	cluster := newFakePresenceCluster(3, nil)
 	cluster.snapshot = readyFakeClusterSnapshot(3, 16)
 	app, err := newTestApp(t,
@@ -3557,55 +3399,71 @@ func TestNewWiresChannelAppendCommitEffectsWhenDeliveryDisabled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
-	if app.messages == nil {
-		t.Fatal("message usecase was not wired")
+	startTestApp(t, app)
+
+	result, err := app.messages.Send(context.Background(), message.SendCommand{
+		FromUID:     "u1",
+		ChannelID:   "g1",
+		ChannelType: frame.ChannelTypeGroup,
+		ClientMsgNo: "client-no-projection-1",
+		Payload:     []byte("payload"),
+	})
+	if err != nil || result.Reason != message.ReasonSuccess {
+		t.Fatalf("Send() = %#v err=%v, want success", result, err)
 	}
-	if app.channelAppends == nil || app.channelAppendRouter == nil {
-		t.Fatalf("channel append runtime = (%T, %T), want group and router", app.channelAppends, app.channelAppendRouter)
+
+	cluster.mu.Lock()
+	defer cluster.mu.Unlock()
+	if cluster.membershipMutationWrites != 0 {
+		t.Fatalf("message-time membership writes = %d, want zero", cluster.membershipMutationWrites)
+	}
+}
+
+func TestNewWiresTerminalDisbandCheckIntoMessageUsecase(t *testing.T) {
+	cluster := &terminalPermissionCluster{fakePresenceCluster: newFakePresenceCluster(3, nil)}
+	cluster.snapshot = readyFakeClusterSnapshot(3, 16)
+	cluster.channels = map[metadb.ChannelKey]metadb.Channel{
+		{ChannelID: "terminal-room", ChannelType: int64(frame.ChannelTypeGroup)}: {
+			ChannelID: "terminal-room", ChannelType: int64(frame.ChannelTypeGroup), Disband: 1,
+		},
+	}
+	app, err := newTestApp(t,
+		Config{
+			Cluster:  clusterpkg.Config{NodeID: 3},
+			Message:  MessageConfig{SystemDeviceID: "trusted-system-device"},
+			Delivery: DeliveryConfig{Enabled: false},
+		},
+		WithCluster(cluster),
+		WithGateway(&fakeGateway{calls: &[]string{}}),
+	)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
 	}
 	startTestApp(t, app)
 
-	channelID := runtimechannelid.EncodePersonChannel("u1", "u2")
 	result, err := app.messages.Send(context.Background(), message.SendCommand{
-		FromUID:     "u1",
-		ChannelID:   channelID,
-		ChannelType: frame.ChannelTypePerson,
-		ClientMsgNo: "client-conversation-1",
-		Payload:     []byte("conversation payload"),
+		FromUID:     "ordinary-sender",
+		ChannelID:   "terminal-room",
+		ChannelType: frame.ChannelTypeGroup,
+		ClientMsgNo: "terminal-cmd-1",
+		SyncOnce:    true,
+		Payload:     []byte("must not append"),
 	})
 	if err != nil {
 		t.Fatalf("Send() error = %v", err)
 	}
-	if result.Reason != message.ReasonSuccess {
-		t.Fatalf("send reason = %v, want success", result.Reason)
+	if result.Reason != message.ReasonDisband || result.MessageID != 0 || result.MessageSeq != 0 {
+		t.Fatalf("Send() = %#v, want terminal disband rejection", result)
 	}
-
-	cluster.mu.Lock()
-	if len(cluster.conversationStateBatches) != 0 {
-		t.Fatalf("conversation state batches = %#v, want no synchronous DB write", cluster.conversationStateBatches)
-	}
-	cluster.mu.Unlock()
-	if app.conversationAuthority == nil {
-		t.Fatal("local conversation authority was not wired")
-	}
-	if app.conversationAuthorityClient == nil {
-		t.Fatal("conversation authority client was not reused by app wiring")
-	}
-	if _, ok := cluster.registeredHandlers[accessnode.ConversationAuthorityRPCServiceID]; !ok {
-		t.Fatalf("conversation authority rpc service was not registered")
-	}
-	if _, ok := cluster.registeredHandlers[accessnode.ChannelAppendRPCServiceID]; !ok {
-		t.Fatalf("channel append rpc service was not registered")
-	}
-
-	for _, uid := range []string{"u1", "u2"} {
-		requireConversationEventually(t, app, uid, channelID, frame.ChannelTypePerson)
+	if cluster.appendSeq != 0 {
+		t.Fatalf("append seq = %d, want no durable append", cluster.appendSeq)
 	}
 }
 
-func TestNewWiresChannelAppendIdempotencyStore(t *testing.T) {
+func TestNewWiresChannelAppendIdempotencyStoreForWriteFencedRetry(t *testing.T) {
 	cluster := newFakePresenceCluster(3, nil)
 	cluster.snapshot = readyFakeClusterSnapshot(3, 16)
+	cluster.writeFenced = true
 	cluster.idempotencyOK = true
 	cluster.idempotencyHit = channelstore.IdempotencyHit{
 		Message:     channelruntime.Message{MessageID: 42, MessageSeq: 7},
@@ -3660,951 +3518,56 @@ func appTestPayloadHash(payload []byte) uint64 {
 	return hash
 }
 
-func TestNewWiresConversationMutationsWhenAuthorityEnabled(t *testing.T) {
+func TestNewWiresConversationMutationsToMembership(t *testing.T) {
 	cluster := newFakePresenceCluster(3, nil)
-	cluster.messages = map[metadb.ConversationKey][]channelruntime.Message{
+	cluster.memberships = map[fakeMembershipKey]metadb.UserChannelMembership{
+		{uid: "u1", channelID: "g1", channelType: 2}: {
+			UID: "u1", ChannelID: "g1", ChannelType: 2, JoinSeq: 1,
+		},
+	}
+	cluster.messages = map[metadb.ChannelKey][]channelruntime.Message{
 		{ChannelID: "g1", ChannelType: 2}: {{
-			ChannelID:   "g1",
-			ChannelType: 2,
-			MessageSeq:  12,
+			ChannelID: "g1", ChannelType: 2, MessageSeq: 12,
 		}},
 	}
-	app, err := newTestApp(t,
-		Config{
-			Cluster:  clusterpkg.Config{NodeID: 3},
-			Delivery: DeliveryConfig{Enabled: false},
-		},
-		WithCluster(cluster),
-		WithGateway(&fakeGateway{calls: &[]string{}}),
-	)
+	app, err := newTestApp(t, Config{Cluster: clusterpkg.Config{NodeID: 3}},
+		WithCluster(cluster), WithGateway(&fakeGateway{calls: &[]string{}}))
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
+	if app.conversations == nil {
+		t.Fatal("membership-backed conversation usecase was not wired")
+	}
 
-	err = app.conversations.SetUnread(context.Background(), conversationusecase.SetUnreadCommand{
-		UID:         "u1",
-		ChannelID:   "g1",
-		ChannelType: 2,
-		Unread:      3,
-	})
-	if err != nil {
+	if err := app.conversations.SetUnread(context.Background(), conversationusecase.SetUnreadCommand{
+		UID: "u1", ChannelID: "g1", ChannelType: 2, Unread: 3,
+	}); err != nil {
 		t.Fatalf("SetUnread() error = %v", err)
 	}
-	err = app.conversations.DeleteConversation(context.Background(), conversationusecase.DeleteConversationCommand{
-		UID:         "u1",
-		ChannelID:   "g1",
-		ChannelType: 2,
-		MessageSeq:  12,
-	})
-	if err != nil {
+	if err := app.conversations.DeleteConversation(context.Background(), conversationusecase.DeleteConversationCommand{
+		UID: "u1", ChannelID: "g1", ChannelType: 2,
+	}); err != nil {
 		t.Fatalf("DeleteConversation() error = %v", err)
 	}
 
 	cluster.mu.Lock()
 	defer cluster.mu.Unlock()
-	if len(cluster.conversationStateBatches) != 1 || len(cluster.conversationStateBatches[0]) != 1 {
-		t.Fatalf("conversation state batches = %#v, want one read-state write", cluster.conversationStateBatches)
-	}
-	got := cluster.conversationStateBatches[0][0]
-	if got.UID != "u1" || got.ChannelID != "g1" || got.ChannelType != 2 || got.ReadSeq != 9 {
-		t.Fatalf("conversation state = %#v, want read seq 9", got)
-	}
-	if len(cluster.conversationDeleteBatches) != 1 || len(cluster.conversationDeleteBatches[0]) != 1 {
-		t.Fatalf("conversation delete batches = %#v, want one delete-barrier write", cluster.conversationDeleteBatches)
-	}
-	deleted := cluster.conversationDeleteBatches[0][0]
-	if deleted.UID != "u1" || deleted.ChannelID != "g1" || deleted.ChannelType != 2 || deleted.DeletedToSeq != 12 {
-		t.Fatalf("conversation delete = %#v, want delete barrier 12", deleted)
+	row := cluster.memberships[fakeMembershipKey{uid: "u1", channelID: "g1", channelType: 2}]
+	if row.ReadSeq != 9 || row.DeletedToSeq != 12 || row.ActivatedAt != 0 {
+		t.Fatalf("membership state = %#v, want read_seq=9 deleted_to_seq=12 activated_at=0", row)
 	}
 }
 
-func TestNewDoesNotWireConversationFallbackWhenAuthorityUnavailable(t *testing.T) {
+func TestNewDoesNotWireConversationWithoutMembershipDirectory(t *testing.T) {
 	cluster := &fakeConversationFallbackCluster{}
-	app, err := newTestApp(t,
-		Config{
-			Cluster:  clusterpkg.Config{NodeID: 3},
-			Delivery: DeliveryConfig{Enabled: false},
-		},
-		WithCluster(cluster),
-		WithGateway(&fakeGateway{calls: &[]string{}}),
-	)
+	app, err := newTestApp(t, Config{Cluster: clusterpkg.Config{NodeID: 3}},
+		WithCluster(cluster), WithGateway(&fakeGateway{calls: &[]string{}}))
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
-	if app.conversationAuthority != nil || app.conversationAuthorityClient != nil {
-		t.Fatalf("authority fields = (%T, %T), want authority unavailable", app.conversationAuthority, app.conversationAuthorityClient)
+	if app.conversations != nil {
+		t.Fatalf("conversation usecase = %T, want nil without membership directory", app.conversations)
 	}
-	if app.channelAppends == nil || app.channelAppendRouter == nil {
-		t.Fatalf("channel append runtime = (%T, %T), want append-only group and router", app.channelAppends, app.channelAppendRouter)
-	}
-	startTestApp(t, app)
-
-	channelID := runtimechannelid.EncodePersonChannel("u1", "u2")
-	result, err := app.messages.Send(context.Background(), message.SendCommand{
-		FromUID:     "u1",
-		ChannelID:   channelID,
-		ChannelType: frame.ChannelTypePerson,
-		ClientMsgNo: "client-fallback-1",
-		Payload:     []byte("fallback payload"),
-	})
-	if err != nil {
-		t.Fatalf("Send() error = %v", err)
-	}
-	if result.Reason != message.ReasonSuccess {
-		t.Fatalf("send reason = %v, want success", result.Reason)
-	}
-
-	cluster.mu.Lock()
-	stateBatches := append([][]metadb.ConversationState(nil), cluster.conversationStateBatches...)
-	cluster.mu.Unlock()
-	if len(stateBatches) != 0 {
-		t.Fatalf("conversation state batches = %#v, want no legacy DB projection", stateBatches)
-	}
-
-	list, err := app.Conversations().List(context.Background(), conversationusecase.ListRequest{UID: "u1", Limit: 10})
-	if err != nil {
-		t.Fatalf("Conversations().List() error = %v", err)
-	}
-	if len(list.Items) != 0 {
-		t.Fatalf("conversation list = %#v, want no legacy DB fallback row", list.Items)
-	}
-}
-
-func TestChannelAppendUpdatesPersonConversationEventually(t *testing.T) {
-	cluster := newFakePresenceCluster(3, nil)
-	cluster.snapshot = readyFakeClusterSnapshot(3, 16)
-	app, err := newTestApp(t,
-		Config{
-			Cluster:  clusterpkg.Config{NodeID: 3},
-			Delivery: DeliveryConfig{Enabled: false},
-		},
-		WithCluster(cluster),
-		WithGateway(&fakeGateway{calls: &[]string{}}),
-	)
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
-	}
-	startTestApp(t, app)
-
-	channelID := runtimechannelid.EncodePersonChannel("u1", "u2")
-	first, err := app.messages.Send(context.Background(), message.SendCommand{
-		FromUID:     "u1",
-		ChannelID:   channelID,
-		ChannelType: frame.ChannelTypePerson,
-		ClientMsgNo: "client-coalesce-1",
-		Payload:     []byte("old"),
-	})
-	if err != nil || first.Reason != message.ReasonSuccess {
-		t.Fatalf("first Send() = %#v err=%v, want success", first, err)
-	}
-	second, err := app.messages.Send(context.Background(), message.SendCommand{
-		FromUID:     "u2",
-		ChannelID:   channelID,
-		ChannelType: frame.ChannelTypePerson,
-		ClientMsgNo: "client-coalesce-2",
-		Payload:     []byte("new"),
-	})
-	if err != nil || second.Reason != message.ReasonSuccess {
-		t.Fatalf("second Send() = %#v err=%v, want success", second, err)
-	}
-
-	for _, uid := range []string{"u1", "u2"} {
-		requireConversationEventually(t, app, uid, channelID, frame.ChannelTypePerson)
-	}
-}
-
-func TestConversationAuthorityFansOutConfiguredSmallGroups(t *testing.T) {
-	cluster := newFakePresenceCluster(3, nil)
-	cluster.snapshot = readyFakeClusterSnapshot(3, 16)
-	cluster.subscribers = map[string][]string{"g-small": []string{"sender", "member"}}
-	app, err := newTestApp(t,
-		Config{
-			Cluster: clusterpkg.Config{NodeID: 3},
-		},
-		WithCluster(cluster),
-		WithGateway(&fakeGateway{calls: &[]string{}}),
-	)
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
-	}
-	startTestApp(t, app)
-
-	result, err := app.messages.Send(context.Background(), message.SendCommand{
-		FromUID:     "sender",
-		ChannelID:   "g-small",
-		ChannelType: frame.ChannelTypeGroup,
-		ClientMsgNo: "client-small-1",
-		Payload:     []byte("small"),
-	})
-	if err != nil || result.Reason != message.ReasonSuccess {
-		t.Fatalf("Send() = %#v err=%v, want success", result, err)
-	}
-
-	for _, uid := range []string{"sender", "member"} {
-		requireConversationEventually(t, app, uid, "g-small", frame.ChannelTypeGroup)
-	}
-}
-
-func TestChannelAppendUsesDurableSubscribersAndSenderActiveRow(t *testing.T) {
-	cluster := newFakePresenceCluster(3, nil)
-	cluster.snapshot = readyFakeClusterSnapshot(3, 16)
-	cluster.subscribers = map[string][]string{"g-small-missing-sender": []string{"member"}}
-	app, err := newTestApp(t,
-		Config{
-			Cluster: clusterpkg.Config{NodeID: 3},
-		},
-		WithCluster(cluster),
-		WithGateway(&fakeGateway{calls: &[]string{}}),
-	)
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
-	}
-	startTestApp(t, app)
-
-	result, err := app.messages.Send(context.Background(), message.SendCommand{
-		FromUID:     "sender",
-		ChannelID:   "g-small-missing-sender",
-		ChannelType: frame.ChannelTypeGroup,
-		ClientMsgNo: "client-small-missing-sender-1",
-		Payload:     []byte("small"),
-	})
-	if err != nil || result.Reason != message.ReasonSuccess {
-		t.Fatalf("Send() = %#v err=%v, want success", result, err)
-	}
-
-	member := requireConversationEventually(t, app, "member", "g-small-missing-sender", frame.ChannelTypeGroup)
-	if member.ReadSeq != 0 {
-		t.Fatalf("member ReadSeq = %d, want receiver row without sender read state", member.ReadSeq)
-	}
-	sender := requireConversationEventually(t, app, "sender", "g-small-missing-sender", frame.ChannelTypeGroup)
-	if sender.ReadSeq != result.MessageSeq {
-		t.Fatalf("sender ReadSeq = %d, want latest message seq %d", sender.ReadSeq, result.MessageSeq)
-	}
-}
-
-func TestAppStopFlushesConversationActiveRows(t *testing.T) {
-	cluster := newFakePresenceCluster(3, nil)
-	cluster.snapshot = readyFakeClusterSnapshot(3, 16)
-	app, err := newTestApp(t,
-		Config{
-			Cluster: clusterpkg.Config{NodeID: 3},
-			Conversation: ConversationConfig{
-				AuthorityFlushInterval:  time.Hour,
-				AuthorityFlushBatchRows: 8,
-			},
-		},
-		WithCluster(cluster),
-		WithGateway(&fakeGateway{calls: &[]string{}}),
-	)
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
-	}
-	if app.conversationActiveWorker == nil {
-		t.Fatal("conversation active flush worker was not wired")
-	}
-	if err := app.Start(context.Background()); err != nil {
-		t.Fatalf("Start() error = %v", err)
-	}
-
-	channelID := runtimechannelid.EncodePersonChannel("sender", "receiver")
-	result, err := app.messages.Send(context.Background(), message.SendCommand{
-		FromUID:     "sender",
-		ChannelID:   channelID,
-		ChannelType: frame.ChannelTypePerson,
-		ClientMsgNo: "client-stop-flush-1",
-		Payload:     []byte("flush"),
-	})
-	if err != nil || result.Reason != message.ReasonSuccess {
-		t.Fatalf("Send() = %#v err=%v, want success", result, err)
-	}
-	requireConversationEventually(t, app, "sender", channelID, frame.ChannelTypePerson)
-
-	cluster.mu.Lock()
-	beforeStop := len(cluster.conversationPatchBatches)
-	cluster.mu.Unlock()
-	if beforeStop != 0 {
-		t.Fatalf("conversation active flush batches before stop = %d, want no periodic flush with hourly interval", beforeStop)
-	}
-
-	stopCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	if err := app.Stop(stopCtx); err != nil {
-		t.Fatalf("Stop() error = %v", err)
-	}
-
-	cluster.mu.Lock()
-	defer cluster.mu.Unlock()
-	if len(cluster.conversationPatchBatches) == 0 {
-		t.Fatal("conversation active flush batches after stop = 0, want final dirty flush")
-	}
-	patches := conversationPatchesByUID(cluster.conversationPatchBatches[len(cluster.conversationPatchBatches)-1])
-	if patches["sender"].ReadSeq != result.MessageSeq {
-		t.Fatalf("sender flushed ReadSeq = %d, want %d", patches["sender"].ReadSeq, result.MessageSeq)
-	}
-	if patches["receiver"].ReadSeq != 0 {
-		t.Fatalf("receiver flushed ReadSeq = %d, want receiver row without sender read state", patches["receiver"].ReadSeq)
-	}
-}
-
-func TestChannelAppendPagesAllGroupSubscribers(t *testing.T) {
-	cluster := newFakePresenceCluster(3, nil)
-	cluster.snapshot = readyFakeClusterSnapshot(3, 16)
-	cluster.subscribers = map[string][]string{"g-large": []string{"sender", "member"}}
-	app, err := newTestApp(t,
-		Config{
-			Cluster: clusterpkg.Config{NodeID: 3},
-		},
-		WithCluster(cluster),
-		WithGateway(&fakeGateway{calls: &[]string{}}),
-	)
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
-	}
-	startTestApp(t, app)
-
-	result, err := app.messages.Send(context.Background(), message.SendCommand{
-		FromUID:     "sender",
-		ChannelID:   "g-large",
-		ChannelType: frame.ChannelTypeGroup,
-		ClientMsgNo: "client-large-1",
-		Payload:     []byte("large"),
-	})
-	if err != nil || result.Reason != message.ReasonSuccess {
-		t.Fatalf("Send() = %#v err=%v, want success", result, err)
-	}
-
-	for _, uid := range []string{"sender", "member"} {
-		requireConversationEventually(t, app, uid, "g-large", frame.ChannelTypeGroup)
-	}
-}
-
-func TestConversationAuthorityRouteLifecycleWatchesLocalAuthorityEvents(t *testing.T) {
-	target := conversationusecase.RouteTarget{HashSlot: 7, SlotID: 2, LeaderNodeID: 1, RouteRevision: 10, AuthorityEpoch: 20}
-	store := &appRecordingConversationAuthorityStore{}
-	local := newConversationAuthority(conversationAuthorityOptions{LocalNodeID: 1, Store: store})
-	watch := make(chan clusterpkg.RouteAuthorityEvent)
-	node := &recordingConversationAuthorityRouteNode{
-		nodeID: 1,
-		routes: map[string]clusterpkg.Route{
-			"u1": routeFromConversationTarget(target),
-		},
-		watch: watch,
-	}
-	client := clusterinfra.NewConversationAuthorityClient(node, local)
-	lifecycle := newConversationAuthorityRouteLifecycle(conversationAuthorityRouteLifecycleOptions{
-		LocalAuthority: local,
-		LocalNodeID:    1,
-		Watch:          node.WatchRouteAuthorities,
-		HandoffTimeout: 50 * time.Millisecond,
-	})
-	if err := lifecycle.Start(context.Background()); err != nil {
-		t.Fatalf("Start() error = %v", err)
-	}
-	defer func() {
-		if err := lifecycle.Stop(context.Background()); err != nil {
-			t.Fatalf("Stop() error = %v", err)
-		}
-	}()
-
-	watch <- clusterpkg.RouteAuthorityEvent{Authorities: []clusterpkg.RouteAuthority{authorityFromConversationTarget(target)}}
-	waitUntil(t, time.Second, func() bool {
-		return local.AdmitPatches(context.Background(), target, nil) == nil
-	})
-
-	patch := conversationusecase.ActivePatch{
-		UID:         "u1",
-		Kind:        metadb.ConversationKindNormal,
-		ChannelID:   "g-watch",
-		ChannelType: 2,
-		ActiveAt:    100,
-		UpdatedAt:   101,
-		MessageSeq:  7,
-	}
-	if err := client.AdmitPatches(context.Background(), []conversationusecase.ActivePatch{patch}); err != nil {
-		t.Fatalf("client AdmitPatches() error = %v", err)
-	}
-	page, err := client.ListConversationActiveView(context.Background(), metadb.ConversationKindNormal, "u1", metadb.ConversationActiveCursor{}, 10)
-	if err != nil {
-		t.Fatalf("client ListConversationActiveView() error = %v", err)
-	}
-	if len(page.Rows) != 1 || page.Rows[0].ChannelID != "g-watch" || page.Rows[0].ActiveAt != 100 {
-		t.Fatalf("authority page rows = %#v, want watched local cache row", page.Rows)
-	}
-}
-
-func TestConversationAuthorityRouteLifecycleStartIdempotentDoesNotCreateSecondWatch(t *testing.T) {
-	local := newConversationAuthority(conversationAuthorityOptions{LocalNodeID: 1, Store: &appRecordingConversationAuthorityStore{}})
-	var mu sync.Mutex
-	watchCalls := 0
-	lifecycle := newConversationAuthorityRouteLifecycle(conversationAuthorityRouteLifecycleOptions{
-		LocalAuthority: local,
-		LocalNodeID:    1,
-		Watch: func() <-chan clusterpkg.RouteAuthorityEvent {
-			mu.Lock()
-			defer mu.Unlock()
-			watchCalls++
-			return make(chan clusterpkg.RouteAuthorityEvent)
-		},
-		HandoffTimeout: 50 * time.Millisecond,
-	})
-	if err := lifecycle.Start(context.Background()); err != nil {
-		t.Fatalf("first Start() error = %v", err)
-	}
-	defer lifecycle.Stop(context.Background())
-	if err := lifecycle.Start(context.Background()); err != nil {
-		t.Fatalf("second Start() error = %v", err)
-	}
-
-	mu.Lock()
-	got := watchCalls
-	mu.Unlock()
-	if got != 1 {
-		t.Fatalf("watch calls = %d, want 1 for idempotent Start", got)
-	}
-}
-
-func TestConversationActiveAdmitBatchRPCUpdatesRemoteAndLocalCache(t *testing.T) {
-	localTarget := conversationusecase.RouteTarget{HashSlot: 1, SlotID: 2, LeaderNodeID: 1, RouteRevision: 10, AuthorityEpoch: 20}
-	remoteTarget := conversationusecase.RouteTarget{HashSlot: 2, SlotID: 2, LeaderNodeID: 2, RouteRevision: 11, AuthorityEpoch: 21}
-	localStore := &appRecordingConversationAuthorityStore{}
-	remoteStore := &appRecordingConversationAuthorityStore{}
-	localAuthority := newConversationAuthority(conversationAuthorityOptions{LocalNodeID: 1, Store: localStore})
-	remoteAuthority := newConversationAuthority(conversationAuthorityOptions{LocalNodeID: 2, Store: remoteStore})
-	localAuthority.markActive(localTarget)
-	remoteAuthority.markActive(remoteTarget)
-	remoteAdapter := accessnode.New(accessnode.Options{ConversationAuthority: remoteAuthority})
-	node := &recordingConversationAuthorityRouteNode{
-		nodeID: 1,
-		routes: map[string]clusterpkg.Route{
-			"sender":   routeFromConversationTarget(remoteTarget),
-			"receiver": routeFromConversationTarget(localTarget),
-		},
-		handler: appNodeRPCHandlerFunc(func(ctx context.Context, payload []byte) ([]byte, error) {
-			return remoteAdapter.HandleConversationAuthorityRPC(ctx, payload)
-		}),
-	}
-	client := clusterinfra.NewConversationAuthorityClient(node, localAuthority)
-
-	err := client.AdmitActiveBatch(context.Background(), conversationactive.ActiveBatch{
-		Kind:        metadb.ConversationKindNormal,
-		SenderUID:   "sender",
-		ChannelID:   "g-active",
-		ChannelType: 2,
-		MessageSeq:  42,
-		ActiveAtMS:  1234,
-		Recipients:  []conversationactive.ActiveEntry{{UID: "receiver"}},
-	})
-	if err != nil {
-		t.Fatalf("AdmitActiveBatch() error = %v", err)
-	}
-
-	senderPage, err := client.ListConversationActiveView(context.Background(), metadb.ConversationKindNormal, "sender", metadb.ConversationActiveCursor{}, 10)
-	if err != nil {
-		t.Fatalf("ListConversationActiveView(sender) error = %v", err)
-	}
-	if len(senderPage.Rows) != 1 || senderPage.Rows[0].ChannelID != "g-active" || senderPage.Rows[0].ReadSeq != 42 || senderPage.Rows[0].ActiveAt != 1234 {
-		t.Fatalf("sender active rows = %#v, want cached sender row with read seq", senderPage.Rows)
-	}
-
-	receiverPage, err := client.ListConversationActiveView(context.Background(), metadb.ConversationKindNormal, "receiver", metadb.ConversationActiveCursor{}, 10)
-	if err != nil {
-		t.Fatalf("ListConversationActiveView(receiver) error = %v", err)
-	}
-	if len(receiverPage.Rows) != 1 || receiverPage.Rows[0].ChannelID != "g-active" || receiverPage.Rows[0].ReadSeq != 0 || receiverPage.Rows[0].ActiveAt != 1234 {
-		t.Fatalf("receiver active rows = %#v, want cached receiver row without sender read seq", receiverPage.Rows)
-	}
-	if localStore.totalTouchPatches() != 0 || remoteStore.totalTouchPatches() != 0 {
-		t.Fatalf("touch patches local/remote = %d/%d, want cache-visible rows before flush", localStore.totalTouchPatches(), remoteStore.totalTouchPatches())
-	}
-}
-
-func TestConversationAuthorityRouteLifecycleRemoteEventDrainsPreviousLocalTarget(t *testing.T) {
-	localTarget := conversationusecase.RouteTarget{HashSlot: 7, SlotID: 2, LeaderNodeID: 1, RouteRevision: 10, AuthorityEpoch: 20}
-	remoteTarget := conversationusecase.RouteTarget{HashSlot: 7, SlotID: 2, LeaderNodeID: 2, RouteRevision: 11, AuthorityEpoch: 21}
-	store := &appRecordingConversationAuthorityStore{}
-	local := newConversationAuthority(conversationAuthorityOptions{LocalNodeID: 1, Store: store})
-	watch := make(chan clusterpkg.RouteAuthorityEvent)
-	lifecycle := newConversationAuthorityRouteLifecycle(conversationAuthorityRouteLifecycleOptions{
-		LocalAuthority: local,
-		LocalNodeID:    1,
-		Initial: func() []clusterpkg.RouteAuthority {
-			return []clusterpkg.RouteAuthority{authorityFromConversationTarget(localTarget)}
-		},
-		Watch:          func() <-chan clusterpkg.RouteAuthorityEvent { return watch },
-		HandoffTimeout: 75 * time.Millisecond,
-	})
-	if err := lifecycle.Start(context.Background()); err != nil {
-		t.Fatalf("Start() error = %v", err)
-	}
-	if err := local.AdmitPatches(context.Background(), localTarget, []conversationusecase.ActivePatch{{
-		UID:         "u1",
-		Kind:        metadb.ConversationKindNormal,
-		ChannelID:   "g-drain",
-		ChannelType: 2,
-		ActiveAt:    100,
-		UpdatedAt:   101,
-		MessageSeq:  7,
-	}}); err != nil {
-		t.Fatalf("seed AdmitPatches() error = %v", err)
-	}
-
-	sent := make(chan struct{})
-	go func() {
-		watch <- clusterpkg.RouteAuthorityEvent{Authorities: []clusterpkg.RouteAuthority{authorityFromConversationTarget(remoteTarget)}}
-		close(sent)
-	}()
-	select {
-	case <-sent:
-	case <-time.After(time.Second):
-		t.Fatal("timed out sending remote route-authority event")
-	}
-	waitUntil(t, time.Second, func() bool {
-		return store.totalTouchPatches() == 1
-	})
-	if !store.lastTouchDeadlineWithin(75*time.Millisecond, 75*time.Millisecond) {
-		t.Fatalf("handoff drain deadline = %v, want about 75ms", store.lastTouchDeadline())
-	}
-	if _, err := local.ListConversationActiveViewForTarget(context.Background(), localTarget, metadb.ConversationKindNormal, "u1", metadb.ConversationActiveCursor{}, 10); !errors.Is(err, conversationusecase.ErrStaleRoute) {
-		t.Fatalf("stale local ListConversationActiveViewForTarget() error = %v, want %v", err, conversationusecase.ErrStaleRoute)
-	}
-	if err := local.AdmitPatches(context.Background(), localTarget, []conversationusecase.ActivePatch{{
-		UID:         "u1",
-		Kind:        metadb.ConversationKindNormal,
-		ChannelID:   "g-drain-2",
-		ChannelType: 2,
-		ActiveAt:    102,
-		MessageSeq:  8,
-	}}); !errors.Is(err, conversationusecase.ErrStaleRoute) {
-		t.Fatalf("stale local AdmitPatches() error = %v, want %v", err, conversationusecase.ErrStaleRoute)
-	}
-	if err := lifecycle.Stop(context.Background()); err != nil {
-		t.Fatalf("Stop() error = %v", err)
-	}
-}
-
-func TestConversationAuthorityRouteLifecycleDrainDoesNotBlockNewLocalAuthority(t *testing.T) {
-	oldLocalTarget := conversationusecase.RouteTarget{HashSlot: 7, SlotID: 2, LeaderNodeID: 1, RouteRevision: 10, AuthorityEpoch: 20}
-	remoteTarget := conversationusecase.RouteTarget{HashSlot: 7, SlotID: 2, LeaderNodeID: 2, RouteRevision: 11, AuthorityEpoch: 21}
-	newLocalTarget := conversationusecase.RouteTarget{HashSlot: 7, SlotID: 2, LeaderNodeID: 1, RouteRevision: 12, AuthorityEpoch: 22}
-	touchStarted := make(chan struct{})
-	touchBlock := make(chan struct{})
-	store := &appRecordingConversationAuthorityStore{
-		touchStarted: touchStarted,
-		touchBlock:   touchBlock,
-	}
-	local := newConversationAuthority(conversationAuthorityOptions{LocalNodeID: 1, Store: store})
-	watch := make(chan clusterpkg.RouteAuthorityEvent, 2)
-	lifecycle := newConversationAuthorityRouteLifecycle(conversationAuthorityRouteLifecycleOptions{
-		LocalAuthority: local,
-		LocalNodeID:    1,
-		Initial: func() []clusterpkg.RouteAuthority {
-			return []clusterpkg.RouteAuthority{authorityFromConversationTarget(oldLocalTarget)}
-		},
-		Watch:          func() <-chan clusterpkg.RouteAuthorityEvent { return watch },
-		HandoffTimeout: 250 * time.Millisecond,
-	})
-	if err := lifecycle.Start(context.Background()); err != nil {
-		t.Fatalf("Start() error = %v", err)
-	}
-	defer func() {
-		close(touchBlock)
-		if err := lifecycle.Stop(context.Background()); err != nil {
-			t.Fatalf("Stop() error = %v", err)
-		}
-	}()
-	if err := local.AdmitPatches(context.Background(), oldLocalTarget, []conversationusecase.ActivePatch{{
-		UID:         "u1",
-		Kind:        metadb.ConversationKindNormal,
-		ChannelID:   "g-blocking-drain",
-		ChannelType: 2,
-		ActiveAt:    100,
-		UpdatedAt:   101,
-		MessageSeq:  7,
-	}}); err != nil {
-		t.Fatalf("seed AdmitPatches() error = %v", err)
-	}
-
-	watch <- clusterpkg.RouteAuthorityEvent{Authorities: []clusterpkg.RouteAuthority{authorityFromConversationTarget(remoteTarget)}}
-	select {
-	case <-touchStarted:
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for handoff drain to enter store touch")
-	}
-	watch <- clusterpkg.RouteAuthorityEvent{Authorities: []clusterpkg.RouteAuthority{authorityFromConversationTarget(newLocalTarget)}}
-
-	waitUntil(t, 75*time.Millisecond, func() bool {
-		return local.AdmitPatches(context.Background(), newLocalTarget, nil) == nil
-	})
-}
-
-func TestConversationAuthorityRouteLifecycleReservationWaitDoesNotBlockNewLocalAuthority(t *testing.T) {
-	oldLocalTarget := conversationusecase.RouteTarget{HashSlot: 7, SlotID: 2, LeaderNodeID: 1, LeaderTerm: 9, ConfigEpoch: 3, RouteRevision: 10, AuthorityEpoch: 20}
-	remoteTarget := conversationusecase.RouteTarget{HashSlot: 7, SlotID: 2, LeaderNodeID: 2, LeaderTerm: 10, ConfigEpoch: 3, RouteRevision: 11, AuthorityEpoch: 21}
-	newLocalTarget := conversationusecase.RouteTarget{HashSlot: 7, SlotID: 2, LeaderNodeID: 1, LeaderTerm: 11, ConfigEpoch: 3, RouteRevision: 12, AuthorityEpoch: 22}
-	local := newConversationAuthority(conversationAuthorityOptions{LocalNodeID: 1, Store: &appRecordingConversationAuthorityStore{}, MaxRows: 10})
-	watch := make(chan clusterpkg.RouteAuthorityEvent, 2)
-	lifecycle := newConversationAuthorityRouteLifecycle(conversationAuthorityRouteLifecycleOptions{
-		LocalAuthority: local,
-		LocalNodeID:    1,
-		Initial: func() []clusterpkg.RouteAuthority {
-			return []clusterpkg.RouteAuthority{authorityFromConversationTarget(oldLocalTarget)}
-		},
-		Watch:          func() <-chan clusterpkg.RouteAuthorityEvent { return watch },
-		HandoffTimeout: 250 * time.Millisecond,
-	})
-	if err := lifecycle.Start(context.Background()); err != nil {
-		t.Fatalf("Start() error = %v", err)
-	}
-
-	mutationReady := make(chan struct{})
-	releaseMutation := make(chan struct{})
-	local.beforeActiveMutation = func() {
-		close(mutationReady)
-		<-releaseMutation
-	}
-	admitDone := make(chan error, 1)
-	go func() {
-		admitDone <- local.AdmitActiveBatch(context.Background(), oldLocalTarget, conversationactive.ActiveBatch{
-			Kind: metadb.ConversationKindNormal, SenderUID: "old", ChannelID: "reservation-wait", ChannelType: 2, MessageSeq: 7, ActiveAtMS: 100,
-		})
-	}()
-	<-mutationReady
-
-	watch <- clusterpkg.RouteAuthorityEvent{Authorities: []clusterpkg.RouteAuthority{authorityFromConversationTarget(remoteTarget)}}
-	waitUntil(t, 75*time.Millisecond, func() bool {
-		local.mu.Lock()
-		defer local.mu.Unlock()
-		return local.targets[targetKey(oldLocalTarget)] == conversationAuthorityDraining
-	})
-	watch <- clusterpkg.RouteAuthorityEvent{Authorities: []clusterpkg.RouteAuthority{authorityFromConversationTarget(newLocalTarget)}}
-	waitUntil(t, 75*time.Millisecond, func() bool {
-		return local.AdmitPatches(context.Background(), newLocalTarget, nil) == nil
-	})
-
-	close(releaseMutation)
-	if err := <-admitDone; err != nil {
-		t.Fatalf("old AdmitActiveBatch() error = %v", err)
-	}
-	if err := lifecycle.Stop(context.Background()); err != nil {
-		t.Fatalf("Stop() error = %v", err)
-	}
-}
-
-func TestConversationAuthorityRouteLifecycleUnknownThenRemoteRetainsOlderDrainReservation(t *testing.T) {
-	oldLocalTarget := conversationusecase.RouteTarget{HashSlot: 7, SlotID: 2, LeaderNodeID: 1, LeaderTerm: 9, ConfigEpoch: 3, RouteRevision: 10, AuthorityEpoch: 20}
-	unknownTarget := conversationusecase.RouteTarget{HashSlot: 7, SlotID: 2, LeaderNodeID: 0, LeaderTerm: 10, ConfigEpoch: 3, RouteRevision: 11, AuthorityEpoch: 21}
-	remoteTarget := conversationusecase.RouteTarget{HashSlot: 7, SlotID: 2, LeaderNodeID: 2, LeaderTerm: 11, ConfigEpoch: 3, RouteRevision: 12, AuthorityEpoch: 22}
-	store := &appRecordingConversationAuthorityStore{}
-	observer := &appHandoffChannelObserver{results: make(chan string, 4)}
-	local := newConversationAuthority(conversationAuthorityOptions{LocalNodeID: 1, Store: store, MaxRows: 10, Observer: observer})
-	watch := make(chan clusterpkg.RouteAuthorityEvent, 2)
-	lifecycle := newConversationAuthorityRouteLifecycle(conversationAuthorityRouteLifecycleOptions{
-		LocalAuthority: local,
-		LocalNodeID:    1,
-		Initial: func() []clusterpkg.RouteAuthority {
-			return []clusterpkg.RouteAuthority{authorityFromConversationTarget(oldLocalTarget)}
-		},
-		Watch:          func() <-chan clusterpkg.RouteAuthorityEvent { return watch },
-		HandoffTimeout: time.Second,
-	})
-	if err := lifecycle.Start(context.Background()); err != nil {
-		t.Fatalf("Start() error = %v", err)
-	}
-
-	mutationReady := make(chan struct{})
-	releaseMutation := make(chan struct{})
-	local.beforeActiveMutation = func() {
-		close(mutationReady)
-		<-releaseMutation
-	}
-	admitDone := make(chan error, 1)
-	go func() {
-		admitDone <- local.AdmitActiveBatch(context.Background(), oldLocalTarget, conversationactive.ActiveBatch{
-			Kind: metadb.ConversationKindNormal, SenderUID: "old", ChannelID: "unknown-remote-reservation", ChannelType: 2, MessageSeq: 7, ActiveAtMS: 100,
-		})
-	}()
-	<-mutationReady
-
-	watch <- clusterpkg.RouteAuthorityEvent{Authorities: []clusterpkg.RouteAuthority{authorityFromConversationTarget(unknownTarget)}}
-	waitUntil(t, 75*time.Millisecond, func() bool {
-		local.mu.Lock()
-		defer local.mu.Unlock()
-		return local.targets[targetKey(unknownTarget)] == conversationAuthorityWarming
-	})
-	watch <- clusterpkg.RouteAuthorityEvent{Authorities: []clusterpkg.RouteAuthority{authorityFromConversationTarget(remoteTarget)}}
-	deadline := time.After(500 * time.Millisecond)
-	for {
-		select {
-		case result := <-observer.results:
-			if result == string(conversationDrainResultNoDirty) {
-				goto remoteDrainComplete
-			}
-		case <-deadline:
-			t.Fatal("timed out waiting for the successor remote drain to complete empty")
-		}
-	}
-
-remoteDrainComplete:
-
-	close(releaseMutation)
-	if err := <-admitDone; err != nil {
-		t.Fatalf("old AdmitActiveBatch() error = %v", err)
-	}
-	waitUntil(t, time.Second, func() bool {
-		return store.totalTouchPatches() == 1
-	})
-	if err := lifecycle.Stop(context.Background()); err != nil {
-		t.Fatalf("Stop() error = %v", err)
-	}
-}
-
-type appHandoffChannelObserver struct {
-	results chan string
-}
-
-func (*appHandoffChannelObserver) ObserveConversationAuthorityAdmit(conversationAuthorityAdmitEvent) {
-}
-
-func (*appHandoffChannelObserver) ObserveConversationAuthorityCachePressure(conversationAuthorityCachePressureEvent) {
-}
-
-func (*appHandoffChannelObserver) ObserveConversationAuthorityList(conversationAuthorityListEvent) {
-}
-
-func (o *appHandoffChannelObserver) ObserveConversationAuthorityHandoff(event conversationAuthorityHandoffEvent) {
-	if o == nil || o.results == nil {
-		return
-	}
-	o.results <- event.Result
-}
-
-func TestConversationAuthorityRouteLifecycleIgnoresStaleRouteEvents(t *testing.T) {
-	currentTarget := conversationusecase.RouteTarget{HashSlot: 7, SlotID: 2, LeaderNodeID: 1, LeaderTerm: 9, ConfigEpoch: 3, RouteRevision: 10, AuthorityEpoch: 20}
-	staleTarget := conversationusecase.RouteTarget{HashSlot: 7, SlotID: 2, LeaderNodeID: 2, LeaderTerm: 9, ConfigEpoch: 3, RouteRevision: 9, AuthorityEpoch: 99}
-	store := &appRecordingConversationAuthorityStore{}
-	local := newConversationAuthority(conversationAuthorityOptions{LocalNodeID: 1, Store: store})
-	watch := make(chan clusterpkg.RouteAuthorityEvent, 1)
-	lifecycle := newConversationAuthorityRouteLifecycle(conversationAuthorityRouteLifecycleOptions{
-		LocalAuthority: local,
-		LocalNodeID:    1,
-		Initial: func() []clusterpkg.RouteAuthority {
-			return []clusterpkg.RouteAuthority{authorityFromConversationTarget(currentTarget)}
-		},
-		Watch:          func() <-chan clusterpkg.RouteAuthorityEvent { return watch },
-		HandoffTimeout: 50 * time.Millisecond,
-	})
-	if err := lifecycle.Start(context.Background()); err != nil {
-		t.Fatalf("Start() error = %v", err)
-	}
-	sent := make(chan struct{})
-	go func() {
-		watch <- clusterpkg.RouteAuthorityEvent{Authorities: []clusterpkg.RouteAuthority{authorityFromConversationTarget(staleTarget)}}
-		close(sent)
-	}()
-	select {
-	case <-sent:
-	case <-time.After(time.Second):
-		t.Fatal("timed out sending stale route-authority event")
-	}
-	if err := lifecycle.Stop(context.Background()); err != nil {
-		t.Fatalf("Stop() error = %v", err)
-	}
-	if store.totalTouchPatches() != 0 {
-		t.Fatalf("touch patches = %d, want stale route event ignored without drain", store.totalTouchPatches())
-	}
-	if err := local.AdmitPatches(context.Background(), currentTarget, nil); err != nil {
-		t.Fatalf("current local target was not preserved: %v", err)
-	}
-}
-
-func TestConversationAuthorityRouteLifecyclePrefersConfigEpochBeforeAuthorityEpoch(t *testing.T) {
-	currentTarget := conversationusecase.RouteTarget{HashSlot: 7, SlotID: 2, LeaderNodeID: 1, LeaderTerm: 9, ConfigEpoch: 3, RouteRevision: 10, AuthorityEpoch: 20}
-	staleTarget := currentTarget
-	staleTarget.LeaderNodeID = 2
-	staleTarget.ConfigEpoch = 2
-	staleTarget.AuthorityEpoch = 99
-	store := &appRecordingConversationAuthorityStore{}
-	local := newConversationAuthority(conversationAuthorityOptions{LocalNodeID: 1, Store: store})
-	watch := make(chan clusterpkg.RouteAuthorityEvent, 1)
-	lifecycle := newConversationAuthorityRouteLifecycle(conversationAuthorityRouteLifecycleOptions{
-		LocalAuthority: local,
-		LocalNodeID:    1,
-		Initial: func() []clusterpkg.RouteAuthority {
-			return []clusterpkg.RouteAuthority{authorityFromConversationTarget(currentTarget)}
-		},
-		Watch:          func() <-chan clusterpkg.RouteAuthorityEvent { return watch },
-		HandoffTimeout: 50 * time.Millisecond,
-	})
-	if err := lifecycle.Start(context.Background()); err != nil {
-		t.Fatalf("Start() error = %v", err)
-	}
-	watch <- clusterpkg.RouteAuthorityEvent{Authorities: []clusterpkg.RouteAuthority{authorityFromConversationTarget(staleTarget)}}
-	if err := lifecycle.Stop(context.Background()); err != nil {
-		t.Fatalf("Stop() error = %v", err)
-	}
-	if store.totalTouchPatches() != 0 {
-		t.Fatalf("touch patches = %d, want lower config epoch ignored without drain", store.totalTouchPatches())
-	}
-	if err := local.AdmitPatches(context.Background(), currentTarget, nil); err != nil {
-		t.Fatalf("current local target was not preserved: %v", err)
-	}
-}
-
-func TestConversationAuthorityRouteLifecyclePeriodicReconcileRepairsDroppedAuthorityEvent(t *testing.T) {
-	remoteTarget := conversationusecase.RouteTarget{HashSlot: 7, SlotID: 2, LeaderNodeID: 2, LeaderTerm: 9, ConfigEpoch: 3, RouteRevision: 10, AuthorityEpoch: 20}
-	localTarget := remoteTarget
-	localTarget.LeaderNodeID = 1
-	localTarget.AuthorityEpoch = 21
-	store := &appRecordingConversationAuthorityStore{}
-	local := newConversationAuthority(conversationAuthorityOptions{LocalNodeID: 1, Store: store})
-	var mu sync.Mutex
-	authorities := []clusterpkg.RouteAuthority{authorityFromConversationTarget(remoteTarget)}
-	lifecycle := newConversationAuthorityRouteLifecycle(conversationAuthorityRouteLifecycleOptions{
-		LocalAuthority:    local,
-		LocalNodeID:       1,
-		HandoffTimeout:    50 * time.Millisecond,
-		ReconcileInterval: 10 * time.Millisecond,
-		Initial: func() []clusterpkg.RouteAuthority {
-			mu.Lock()
-			defer mu.Unlock()
-			return append([]clusterpkg.RouteAuthority(nil), authorities...)
-		},
-	})
-	if err := lifecycle.Start(context.Background()); err != nil {
-		t.Fatalf("Start() error = %v", err)
-	}
-	defer lifecycle.Stop(context.Background())
-	if err := local.AdmitPatches(context.Background(), localTarget, nil); !errors.Is(err, conversationusecase.ErrStaleRoute) {
-		t.Fatalf("local target before reconcile error = %v, want ErrStaleRoute", err)
-	}
-
-	mu.Lock()
-	authorities = []clusterpkg.RouteAuthority{authorityFromConversationTarget(localTarget)}
-	mu.Unlock()
-
-	waitUntil(t, time.Second, func() bool {
-		return local.AdmitPatches(context.Background(), localTarget, nil) == nil
-	})
-}
-
-func TestDeliveryWorkerGroupStopKeepsDependenciesRunningWhenDrainFails(t *testing.T) {
-	retry := &recordingWorkerRuntime{}
-	manager := &recordingWorkerRuntime{stopErr: context.DeadlineExceeded}
-	group := deliveryWorkerGroup{retry, manager}
-
-	err := group.Stop(context.Background())
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("Stop() error = %v, want deadline exceeded", err)
-	}
-	if manager.stopCount != 1 {
-		t.Fatalf("manager stop count = %d, want 1", manager.stopCount)
-	}
-	if retry.stopCount != 0 {
-		t.Fatalf("retry stop count = %d, want dependency kept running", retry.stopCount)
-	}
-}
-
-func TestAppSubscriberPlannerReturnsPersonChannelUIDs(t *testing.T) {
-	channelID := runtimechannelid.EncodePersonChannel("u1", "u2")
-	page, err := appSubscriberPlanner{}.NextPartitionPage(context.Background(), runtimedelivery.FanoutTask{
-		Envelope: runtimedelivery.Envelope{ChannelID: channelID, ChannelType: frame.ChannelTypePerson},
-	}, "", 512)
-	if err != nil {
-		t.Fatalf("NextPartitionPage() error = %v", err)
-	}
-	if !page.Done {
-		t.Fatalf("Done = false, want true")
-	}
-	if len(page.UIDs) != 2 || page.UIDs[0] == page.UIDs[1] {
-		t.Fatalf("UIDs = %#v, want two distinct participants", page.UIDs)
-	}
-	want := map[string]bool{"u1": true, "u2": true}
-	for _, uid := range page.UIDs {
-		if !want[uid] {
-			t.Fatalf("unexpected UID %q in %#v", uid, page.UIDs)
-		}
-	}
-}
-
-func TestDeliveryRuntimeAdapterScopesPersonChannelAcrossPartitions(t *testing.T) {
-	runner := &appRecordingFanoutRunner{}
-	manager := runtimedelivery.NewManager(runtimedelivery.ManagerOptions{
-		Planner: runtimedelivery.NewPlanner(runtimedelivery.PlannerOptions{
-			Partitioner: appStaticDeliveryPartitioner{
-				partitions: []runtimedelivery.Partition{
-					{ID: 1, LeaderNodeID: 1},
-					{ID: 2, LeaderNodeID: 2},
-					{ID: 3, LeaderNodeID: 3},
-				},
-			},
-		}),
-		Runner: runner,
-	})
-	if err := manager.Start(context.Background()); err != nil {
-		t.Fatalf("Start() error = %v", err)
-	}
-	defer func() {
-		stopCtx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		if err := manager.Stop(stopCtx); err != nil {
-			t.Fatalf("Stop() error = %v", err)
-		}
-	}()
-	channelID := runtimechannelid.EncodePersonChannel("u1", "u2")
-
-	err := deliveryRuntimeAdapter{manager: manager}.SubmitCommitted(context.Background(), messageevents.MessageCommitted{
-		MessageID:   1,
-		MessageSeq:  1,
-		ChannelID:   channelID,
-		ChannelType: frame.ChannelTypePerson,
-		FromUID:     "u1",
-	})
-	if err != nil {
-		t.Fatalf("SubmitCommitted() error = %v", err)
-	}
-	tasks := waitAppFanoutTasks(t, runner, 1, time.Second)
-	if len(tasks) != 1 {
-		t.Fatalf("fanout tasks = %d, want 1 scoped person task", len(tasks))
-	}
-	got := tasks[0].Envelope.MessageScopedUIDs
-	if len(got) != 2 {
-		t.Fatalf("MessageScopedUIDs = %#v, want two participants", got)
-	}
-	want := map[string]bool{"u1": true, "u2": true}
-	for _, uid := range got {
-		if !want[uid] {
-			t.Fatalf("unexpected scoped UID %q in %#v", uid, got)
-		}
-	}
-}
-
-func waitAppDeliveryPendingAckCount(t *testing.T, app *App, want int, timeout time.Duration) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	var got int
-	for time.Now().Before(deadline) {
-		got = app.deliveryManager.PendingAckCount()
-		if got == want {
-			return
-		}
-		time.Sleep(time.Millisecond)
-	}
-	t.Fatalf("pending ack count = %d, want %d", got, want)
-}
-
-func waitAppFanoutTasks(t *testing.T, runner *appRecordingFanoutRunner, want int, timeout time.Duration) []runtimedelivery.FanoutTask {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	var tasks []runtimedelivery.FanoutTask
-	for time.Now().Before(deadline) {
-		tasks = runner.snapshot()
-		if len(tasks) == want {
-			return tasks
-		}
-		time.Sleep(time.Millisecond)
-	}
-	t.Fatalf("fanout tasks = %d, want %d", len(tasks), want)
-	return nil
 }
 
 func TestDeliveryEnabledPersonSendWritesRecvAndRecvackClearsPending(t *testing.T) {
@@ -4680,7 +3643,7 @@ func TestDeliveryEnabledPersonSendWritesRecvAndRecvackClearsPending(t *testing.T
 func TestDeliveryEnabledGroupSendUsesSubscriberSource(t *testing.T) {
 	cluster := newFakePresenceCluster(1, nil)
 	cluster.snapshot = readyFakeClusterSnapshot(1, 16)
-	cluster.channels = map[metadb.ConversationKey]metadb.Channel{
+	cluster.channels = map[metadb.ChannelKey]metadb.Channel{
 		{ChannelID: "g1", ChannelType: int64(frame.ChannelTypeGroup)}: {
 			ChannelID:                 "g1",
 			ChannelType:               int64(frame.ChannelTypeGroup),
@@ -4689,8 +3652,8 @@ func TestDeliveryEnabledGroupSendUsesSubscriberSource(t *testing.T) {
 		},
 	}
 	subscribers := &fakeDeliverySubscriberSource{
-		pages: []runtimedelivery.UIDPage{
-			{UIDs: []string{"u2"}, Done: true},
+		pages: []channelappend.SubscriberPage{
+			{Recipients: []channelappend.Recipient{{UID: "u2"}}, Done: true},
 		},
 	}
 	app, err := newTestApp(t,
@@ -4756,11 +3719,8 @@ func TestDeliveryEnabledGroupSendUsesSubscriberSource(t *testing.T) {
 		t.Fatalf("subscriber requests = %d, want 1", len(subscribers.requests))
 	}
 	req := subscribers.requests[0]
-	if req.ChannelID != "g1" || req.ChannelType != frame.ChannelTypeGroup || req.Limit != app.cfg.Delivery.FanoutPageSize {
+	if req.ChannelID.ID != "g1" || req.ChannelID.Type != frame.ChannelTypeGroup || req.Limit != app.cfg.Delivery.FanoutPageSize {
 		t.Fatalf("subscriber request = %#v, want group channel with configured page size", req)
-	}
-	if req.Partition != (runtimedelivery.Partition{}) {
-		t.Fatalf("subscriber partition = %#v, want recipient-authority unpartitioned scan", req.Partition)
 	}
 
 	if err := app.Handler().OnFrame(gateway.Context{Session: recipient, RequestContext: context.Background()}, &frame.RecvackPacket{
@@ -4772,7 +3732,7 @@ func TestDeliveryEnabledGroupSendUsesSubscriberSource(t *testing.T) {
 	waitAppDeliveryPendingAckCount(t, app, 0, time.Second)
 }
 
-func TestDeliveryMetaStoreWritesBenchDataAndFiltersSubscriberPages(t *testing.T) {
+func TestDeliveryMetaStoreWritesBenchDataAndPagesSubscribers(t *testing.T) {
 	const hashSlotCount = 16
 	slotThreeUID := testUIDForHashSlot(t, 3, hashSlotCount)
 	slotNineUID := testUIDForHashSlot(t, 9, hashSlotCount)
@@ -4820,76 +3780,64 @@ func TestDeliveryMetaStoreWritesBenchDataAndFiltersSubscriberPages(t *testing.T)
 		t.Fatalf("removed = %#v accepted=%d, want one subscriber at mutation version 3", node.removed, removedSubscribers)
 	}
 
-	page, err := store.ListSubscribers(context.Background(), runtimedelivery.SubscriberPageRequest{
-		ChannelID:   "g1",
-		ChannelType: frame.ChannelTypeGroup,
-		Partition:   runtimedelivery.Partition{HashSlotStart: 3, HashSlotEnd: 3},
-		Limit:       10,
+	page, err := store.NextSubscriberPage(context.Background(), channelappend.SubscriberPageRequest{
+		ChannelID: channelappend.ChannelID{ID: "g1", Type: frame.ChannelTypeGroup},
+		Limit:     10,
 	})
 	if err != nil {
-		t.Fatalf("ListSubscribers() error = %v", err)
+		t.Fatalf("NextSubscriberPage() error = %v", err)
 	}
-	if len(page.UIDs) != 1 || page.UIDs[0] != slotThreeUID || !page.Done {
-		t.Fatalf("slot-filtered page = %#v, want only slot 3 uid", page)
+	if len(page.Recipients) != 2 || page.Recipients[0].UID != slotThreeUID || page.Recipients[1].UID != slotNineUID || !page.Done {
+		t.Fatalf("subscriber page = %#v, want both durable subscribers", page)
 	}
-	first, err := store.ListSubscribers(context.Background(), runtimedelivery.SubscriberPageRequest{
-		ChannelID:   "g1",
-		ChannelType: frame.ChannelTypeGroup,
-		Partition:   runtimedelivery.Partition{HashSlotStart: 0, HashSlotEnd: hashSlotCount - 1},
-		Limit:       1,
+	first, err := store.NextSubscriberPage(context.Background(), channelappend.SubscriberPageRequest{
+		ChannelID: channelappend.ChannelID{ID: "g1", Type: frame.ChannelTypeGroup},
+		Limit:     1,
 	})
 	if err != nil {
-		t.Fatalf("ListSubscribers(first) error = %v", err)
+		t.Fatalf("NextSubscriberPage(first) error = %v", err)
 	}
-	if len(first.UIDs) != 1 || first.NextCursor == "" || first.Done {
+	if len(first.Recipients) != 1 || first.Cursor == "" || first.Done {
 		t.Fatalf("first page = %#v, want one uid and continuation", first)
 	}
-	second, err := store.ListSubscribers(context.Background(), runtimedelivery.SubscriberPageRequest{
-		ChannelID:   "g1",
-		ChannelType: frame.ChannelTypeGroup,
-		Partition:   runtimedelivery.Partition{HashSlotStart: 0, HashSlotEnd: hashSlotCount - 1},
-		Cursor:      first.NextCursor,
-		Limit:       1,
+	second, err := store.NextSubscriberPage(context.Background(), channelappend.SubscriberPageRequest{
+		ChannelID: channelappend.ChannelID{ID: "g1", Type: frame.ChannelTypeGroup},
+		Cursor:    first.Cursor,
+		Limit:     1,
 	})
 	if err != nil {
-		t.Fatalf("ListSubscribers(second) error = %v", err)
+		t.Fatalf("NextSubscriberPage(second) error = %v", err)
 	}
-	if len(second.UIDs) != 1 || !second.Done {
+	if len(second.Recipients) != 1 || !second.Done {
 		t.Fatalf("second page = %#v, want final uid", second)
 	}
 }
 
-func TestDeliveryMetaStoreCachesSubscriberSnapshotAcrossPartitions(t *testing.T) {
-	const hashSlotCount = 16
-	slotThreeUID := testUIDForHashSlot(t, 3, hashSlotCount)
-	slotNineUID := testUIDForHashSlot(t, 9, hashSlotCount)
+func TestDeliveryMetaStoreCachesSubscriberSnapshotAcrossPages(t *testing.T) {
 	node := &recordingDeliveryMetaNode{
-		snapshot:    readyFakeClusterSnapshot(1, hashSlotCount),
-		subscribers: map[string][]string{"g1": []string{slotThreeUID, slotNineUID}},
+		snapshot:    readyFakeClusterSnapshot(1, 16),
+		subscribers: map[string][]string{"g1": {"u1", "u2"}},
 	}
 	store := newDeliveryMetaStore(node)
 
-	first, err := store.ListSubscribers(context.Background(), runtimedelivery.SubscriberPageRequest{
-		ChannelID:   "g1",
-		ChannelType: frame.ChannelTypeGroup,
-		Partition:   runtimedelivery.Partition{HashSlotStart: 3, HashSlotEnd: 3},
-		Limit:       10,
+	first, err := store.NextSubscriberPage(context.Background(), channelappend.SubscriberPageRequest{
+		ChannelID: channelappend.ChannelID{ID: "g1", Type: frame.ChannelTypeGroup},
+		Limit:     1,
 	})
 	if err != nil {
-		t.Fatalf("ListSubscribers(first) error = %v", err)
+		t.Fatalf("NextSubscriberPage(first) error = %v", err)
 	}
-	second, err := store.ListSubscribers(context.Background(), runtimedelivery.SubscriberPageRequest{
-		ChannelID:   "g1",
-		ChannelType: frame.ChannelTypeGroup,
-		Partition:   runtimedelivery.Partition{HashSlotStart: 9, HashSlotEnd: 9},
-		Limit:       10,
+	second, err := store.NextSubscriberPage(context.Background(), channelappend.SubscriberPageRequest{
+		ChannelID: channelappend.ChannelID{ID: "g1", Type: frame.ChannelTypeGroup},
+		Cursor:    first.Cursor,
+		Limit:     1,
 	})
 	if err != nil {
-		t.Fatalf("ListSubscribers(second) error = %v", err)
+		t.Fatalf("NextSubscriberPage(second) error = %v", err)
 	}
 
-	if len(first.UIDs) != 1 || first.UIDs[0] != slotThreeUID || len(second.UIDs) != 1 || second.UIDs[0] != slotNineUID {
-		t.Fatalf("partition pages first=%#v second=%#v, want cached slot-specific results", first, second)
+	if len(first.Recipients) != 1 || first.Recipients[0].UID != "u1" || len(second.Recipients) != 1 || second.Recipients[0].UID != "u2" {
+		t.Fatalf("pages first=%#v second=%#v, want cached subscriber order", first, second)
 	}
 	if node.listCalls != 1 {
 		t.Fatalf("subscriber list calls = %d, want one cached channel snapshot read", node.listCalls)
@@ -4902,8 +3850,9 @@ func TestDeliveryMetaStoreInvalidatesSubscriberCacheAfterMutation(t *testing.T) 
 		subscribers: map[string][]string{"g1": []string{"u1"}},
 	}
 	store := newDeliveryMetaStore(node)
-	if _, err := store.ListSubscribers(context.Background(), runtimedelivery.SubscriberPageRequest{ChannelID: "g1", ChannelType: frame.ChannelTypeGroup, Limit: 10}); err != nil {
-		t.Fatalf("ListSubscribers(before) error = %v", err)
+	request := channelappend.SubscriberPageRequest{ChannelID: channelappend.ChannelID{ID: "g1", Type: frame.ChannelTypeGroup}, Limit: 10}
+	if _, err := store.NextSubscriberPage(context.Background(), request); err != nil {
+		t.Fatalf("NextSubscriberPage(before) error = %v", err)
 	}
 	if _, err := store.AddSubscribers(context.Background(), []accessapi.BenchSubscriberMutation{{
 		ChannelID:   "g1",
@@ -4915,11 +3864,11 @@ func TestDeliveryMetaStoreInvalidatesSubscriberCacheAfterMutation(t *testing.T) 
 	node.mu.Lock()
 	node.subscribers["g1"] = []string{"u1", "u2"}
 	node.mu.Unlock()
-	after, err := store.ListSubscribers(context.Background(), runtimedelivery.SubscriberPageRequest{ChannelID: "g1", ChannelType: frame.ChannelTypeGroup, Limit: 10})
+	after, err := store.NextSubscriberPage(context.Background(), request)
 	if err != nil {
-		t.Fatalf("ListSubscribers(after) error = %v", err)
+		t.Fatalf("NextSubscriberPage(after) error = %v", err)
 	}
-	if len(after.UIDs) != 2 || after.UIDs[1] != "u2" {
+	if len(after.Recipients) != 2 || after.Recipients[1].UID != "u2" {
 		t.Fatalf("after mutation page = %#v, want refreshed subscribers", after)
 	}
 	if node.listCalls != 2 {
@@ -5091,8 +4040,8 @@ func TestStartOrderStartsClusterThenPresenceWorkerThenGateway(t *testing.T) {
 		t.Fatalf("Start() error = %v", err)
 	}
 
-	if got := joinCalls(calls); got != "cluster.start,presence.start,presence.start,gateway.start" {
-		t.Fatalf("calls = %s, want cluster.start,presence.start,presence.start,gateway.start", got)
+	if got := joinCalls(calls); got != "cluster.start,presence.start,gateway.start" {
+		t.Fatalf("calls = %s, want cluster.start,presence.start,gateway.start", got)
 	}
 }
 
@@ -6226,7 +5175,7 @@ func TestAppWiresConversationListMetrics(t *testing.T) {
 		t.Fatalf("Gather() error = %v", err)
 	}
 	for _, family := range families {
-		if family.GetName() != "wukongim_conversation_list_total" {
+		if family.GetName() != "wukongim_conversation_directory_list_total" {
 			continue
 		}
 		for _, metric := range family.GetMetric() {
@@ -6234,7 +5183,7 @@ func TestAppWiresConversationListMetrics(t *testing.T) {
 			for _, label := range metric.GetLabel() {
 				labels[label.GetName()] = label.GetValue()
 			}
-			if labels["result"] == "ok" && labels["more"] == "false" && metric.GetCounter().GetValue() == 1 {
+			if labels["result"] == "ok" && labels["done"] == "true" && metric.GetCounter().GetValue() == 1 {
 				return
 			}
 		}
@@ -6443,11 +5392,9 @@ func TestStopDeadlineKeepsChannelAppendDependenciesRunningUntilRetryDrain(t *tes
 		Appender:    appender,
 	})
 	app := &App{
-		cluster:                    &fakeCluster{calls: &calls},
-		conversationRouteLifecycle: &recordingWorkerRuntime{name: "conversation_route", calls: &calls},
-		conversationActiveWorker:   &recordingWorkerRuntime{name: "conversation_active", calls: &calls},
-		deliveryWorker:             &recordingWorkerRuntime{name: "delivery", calls: &calls},
-		channelAppends:             channelAppends,
+		cluster:        &fakeCluster{calls: &calls},
+		deliveryWorker: &recordingWorkerRuntime{name: "delivery", calls: &calls},
+		channelAppends: channelAppends,
 	}
 	if err := app.Start(context.Background()); err != nil {
 		t.Fatalf("Start() error = %v", err)
@@ -6464,7 +5411,7 @@ func TestStopDeadlineKeepsChannelAppendDependenciesRunningUntilRetryDrain(t *tes
 	if err := app.Stop(firstStopCtx); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("first Stop() error = %v, want context deadline exceeded", err)
 	}
-	if got := joinCalls(calls); got != "cluster.start,conversation_route.start,conversation_active.start,delivery.start" {
+	if got := joinCalls(calls); got != "cluster.start,delivery.start" {
 		t.Fatalf("calls after timed-out Stop = %s, want channel append dependencies still running", got)
 	}
 
@@ -6481,7 +5428,7 @@ func TestStopDeadlineKeepsChannelAppendDependenciesRunningUntilRetryDrain(t *tes
 	if len(results) != 1 || results[0].Err != nil || results[0].Result.Reason != channelappend.ReasonSuccess {
 		t.Fatalf("append results = %#v, want one success", results)
 	}
-	if got := joinCalls(calls); got != "cluster.start,conversation_route.start,conversation_active.start,delivery.start,delivery.stop,conversation_active.stop,conversation_route.stop,cluster.stop" {
+	if got := joinCalls(calls); got != "cluster.start,delivery.start,delivery.stop,cluster.stop" {
 		t.Fatalf("calls after retry drain = %s, want dependencies stopped after channel append", got)
 	}
 }
@@ -6511,12 +5458,10 @@ func TestRollbackDeadlineKeepsChannelAppendDependenciesRunningUntilStopRetry(t *
 		},
 	}
 	app := &App{
-		cluster:                    &fakeCluster{calls: &calls},
-		conversationRouteLifecycle: &recordingWorkerRuntime{name: "conversation_route", calls: &calls},
-		conversationActiveWorker:   &recordingWorkerRuntime{name: "conversation_active", calls: &calls},
-		deliveryWorker:             &recordingWorkerRuntime{name: "delivery", calls: &calls},
-		channelAppends:             channelAppends,
-		top:                        top,
+		cluster:        &fakeCluster{calls: &calls},
+		deliveryWorker: &recordingWorkerRuntime{name: "delivery", calls: &calls},
+		channelAppends: channelAppends,
+		top:            top,
 	}
 
 	startCtx, cancelStart := context.WithTimeout(context.Background(), 30*time.Millisecond)
@@ -6525,7 +5470,7 @@ func TestRollbackDeadlineKeepsChannelAppendDependenciesRunningUntilStopRetry(t *
 	if !errors.Is(err, startFailure) || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Start() error = %v, want start failure and rollback deadline", err)
 	}
-	if got := joinCalls(calls); got != "cluster.start,conversation_route.start,conversation_active.start,delivery.start,top.start" {
+	if got := joinCalls(calls); got != "cluster.start,delivery.start,top.start" {
 		t.Fatalf("calls after timed-out rollback = %s, want channel append dependencies still running", got)
 	}
 
@@ -6542,7 +5487,7 @@ func TestRollbackDeadlineKeepsChannelAppendDependenciesRunningUntilStopRetry(t *
 	if len(results) != 1 || results[0].Err != nil || results[0].Result.Reason != channelappend.ReasonSuccess {
 		t.Fatalf("append results = %#v, want one success", results)
 	}
-	if got := joinCalls(calls); got != "cluster.start,conversation_route.start,conversation_active.start,delivery.start,top.start,delivery.stop,conversation_active.stop,conversation_route.stop,cluster.stop" {
+	if got := joinCalls(calls); got != "cluster.start,delivery.start,top.start,delivery.stop,cluster.stop" {
 		t.Fatalf("calls after Stop retry = %s, want dependencies stopped after channel append", got)
 	}
 }
@@ -6784,10 +5729,10 @@ type fakeManagerCluster struct {
 	devices      map[fakeManagerDeviceKey]metadb.Device
 	systemUIDs   []string
 
-	conversationPages         map[string][]metadb.ConversationState
-	conversationMessages      map[metadb.ConversationKey][]channelruntime.Message
-	channelRuntimeMetas       map[metadb.ConversationKey]metadb.ChannelRuntimeMeta
-	channelRetentionViews     map[metadb.ConversationKey]channelruntime.RetentionView
+	membershipPages           map[string][]metadb.UserChannelMembership
+	conversationMessages      map[metadb.ChannelKey][]channelruntime.Message
+	channelRuntimeMetas       map[metadb.ChannelKey]metadb.ChannelRuntimeMeta
+	channelRetentionViews     map[metadb.ChannelKey]channelruntime.RetentionView
 	pluginBindingsByUID       map[string][]metadb.PluginUserBinding
 	channelOwnerMetas         map[channelruntime.ChannelID]channelruntime.Meta
 	registeredHandlers        map[uint8]clusterpkg.NodeRPCHandler
@@ -7111,60 +6056,121 @@ func (f *fakeManagerCluster) HasChannelSubscribersAuthoritative(context.Context,
 	return len(f.systemUIDs) > 0, nil
 }
 
-func (f *fakeManagerCluster) ListConversationActivePage(_ context.Context, kind metadb.ConversationKind, uid string, after metadb.ConversationActiveCursor, limit int) ([]metadb.ConversationState, metadb.ConversationActiveCursor, bool, error) {
-	items := f.conversationPages[uid]
-	filtered := make([]metadb.ConversationState, 0, len(items))
-	for _, item := range items {
-		if item.Kind == kind {
-			filtered = append(filtered, item)
+func (f *fakeManagerCluster) ReadPermissionMetadataBatchAuthoritative(ctx context.Context, reads []slotproxy.PermissionMetadataRead) []slotproxy.PermissionMetadataReadResult {
+	results := make([]slotproxy.PermissionMetadataReadResult, len(reads))
+	for index, read := range reads {
+		switch read.Kind {
+		case slotproxy.PermissionMetadataReadChannel:
+			channel, err := f.GetChannelMetadataAuthoritative(ctx, read.ChannelID, read.ChannelType)
+			if errors.Is(err, metadb.ErrNotFound) {
+				continue
+			}
+			results[index].Channel = channel
+			results[index].Found = err == nil
+			results[index].Err = err
+		case slotproxy.PermissionMetadataReadSubscriberContains:
+			results[index].Value, results[index].Err = f.ContainsChannelSubscriberAuthoritative(ctx, read.ChannelID, read.ChannelType, read.UID)
+		case slotproxy.PermissionMetadataReadSubscriberHasAny:
+			results[index].Value, results[index].Err = f.HasChannelSubscribersAuthoritative(ctx, read.ChannelID, read.ChannelType)
+		default:
+			results[index].Err = metadb.ErrInvalidArgument
 		}
 	}
-	items = filtered
-	start := 0
-	if after.ChannelID != "" {
-		for i, item := range items {
-			if item.ChannelID == after.ChannelID && item.ChannelType == after.ChannelType && item.ActiveAt == after.ActiveAt {
-				start = i + 1
-				break
+	return results
+}
+
+func (f *fakeManagerCluster) TombstoneUserChannelMemberships(_ context.Context, channelID string, channelType int64, uids []string, sourceVersion uint64, updatedAt int64) error {
+	for _, uid := range uids {
+		rows := f.membershipPages[uid]
+		for index := range rows {
+			if rows[index].ChannelID == channelID && rows[index].ChannelType == channelType && sourceVersion > rows[index].SourceVersion {
+				rows[index].Tombstone = true
+				rows[index].SourceVersion = sourceVersion
+				rows[index].UpdatedAt = updatedAt
 			}
 		}
+		f.membershipPages[uid] = rows
 	}
-	if limit <= 0 {
+	return nil
+}
+
+func (f *fakeManagerCluster) UpsertUserChannelMemberships(_ context.Context, channelID string, channelType int64, uids []string, committedTail, sourceVersion uint64, updatedAt int64) error {
+	for _, uid := range uids {
+		rows := f.membershipPages[uid]
+		found := false
+		for index := range rows {
+			if rows[index].ChannelID == channelID && rows[index].ChannelType == channelType {
+				found = true
+				if sourceVersion > rows[index].SourceVersion {
+					rows[index].Tombstone = false
+					rows[index].SourceVersion = sourceVersion
+					rows[index].UpdatedAt = updatedAt
+				}
+			}
+		}
+		if !found {
+			rows = append(rows, metadb.UserChannelMembership{
+				UID: uid, ChannelID: channelID, ChannelType: channelType,
+				JoinSeq: committedTail + 1, SourceVersion: sourceVersion, UpdatedAt: updatedAt,
+			})
+		}
+		f.membershipPages[uid] = rows
+	}
+	return nil
+}
+
+func (f *fakeManagerCluster) ListUserChannelMembershipPage(_ context.Context, uid string, _ metadb.UserChannelMembershipCursor, limit int) ([]metadb.UserChannelMembership, metadb.UserChannelMembershipCursor, bool, error) {
+	items := f.membershipPages[uid]
+	if limit <= 0 || limit > len(items) {
 		limit = len(items)
 	}
-	end := start + limit
-	if end > len(items) {
-		end = len(items)
+	rows := append([]metadb.UserChannelMembership(nil), items[:limit]...)
+	var cursor metadb.UserChannelMembershipCursor
+	if len(rows) > 0 {
+		last := rows[len(rows)-1]
+		cursor = metadb.UserChannelMembershipCursor{ActivatedAt: last.ActivatedAt, ChannelID: last.ChannelID, ChannelType: last.ChannelType}
 	}
-	page := append([]metadb.ConversationState(nil), items[start:end]...)
-	cursor := after
-	if len(page) > 0 {
-		last := page[len(page)-1]
-		cursor = metadb.ConversationActiveCursor{ActiveAt: last.ActiveAt, ChannelID: last.ChannelID, ChannelType: last.ChannelType}
-	}
-	return page, cursor, end >= len(items), nil
+	return rows, cursor, limit >= len(items), nil
 }
 
-func (f *fakeManagerCluster) GetConversationState(_ context.Context, kind metadb.ConversationKind, uid, channelID string, channelType int64) (metadb.ConversationState, bool, error) {
-	for _, state := range f.conversationPages[uid] {
-		if state.Kind == kind && state.ChannelID == channelID && state.ChannelType == channelType {
-			return state, true, nil
+func (f *fakeManagerCluster) ReadChannelConversationHeads(_ context.Context, ids []channelruntime.ChannelID, uid string) ([]clusterchannels.ConversationHeadResult, error) {
+	results := make([]clusterchannels.ConversationHeadResult, len(ids))
+	for index, id := range ids {
+		messages := f.conversationMessages[metadb.ChannelKey{ChannelID: id.ID, ChannelType: int64(id.Type)}]
+		if len(messages) == 0 {
+			continue
 		}
-	}
-	return metadb.ConversationState{}, false, nil
-}
-
-func (f *fakeManagerCluster) GetConversationStates(_ context.Context, keys []metadb.ConversationStateKey) (map[metadb.ConversationStateKey]metadb.ConversationState, error) {
-	states := make(map[metadb.ConversationStateKey]metadb.ConversationState, len(keys))
-	for _, key := range keys {
-		for _, state := range f.conversationPages[key.UID] {
-			if state.Kind == key.Kind && state.ChannelID == key.ChannelID && state.ChannelType == key.ChannelType {
-				states[key] = state
+		last := messages[len(messages)-1]
+		results[index].Head = clusterchannels.ConversationHead{Found: true, LastCommittedSeq: last.MessageSeq, Message: last}
+		for messageIndex := len(messages) - 1; messageIndex >= 0; messageIndex-- {
+			if messages[messageIndex].FromUID == uid {
+				results[index].Head.CurrentUserLastSendSeq = messages[messageIndex].MessageSeq
 				break
 			}
 		}
 	}
-	return states, nil
+	return results, nil
+}
+
+func (f *fakeManagerCluster) GetUserChannelMembership(_ context.Context, uid, channelID string, channelType int64) (metadb.UserChannelMembership, bool, error) {
+	for _, membership := range f.membershipPages[uid] {
+		if membership.ChannelID == channelID && membership.ChannelType == channelType {
+			return membership, true, nil
+		}
+	}
+	return metadb.UserChannelMembership{}, false, nil
+}
+
+func (f *fakeManagerCluster) AdvanceUserChannelMembershipReadSeq(context.Context, string, string, int64, uint64, int64) error {
+	return nil
+}
+
+func (f *fakeManagerCluster) HideUserChannelMembership(context.Context, string, string, int64, uint64, int64) error {
+	return nil
+}
+
+func (f *fakeManagerCluster) ActivateUserChannelMembership(context.Context, string, string, int64, int64, int64) error {
+	return nil
 }
 
 func (f *fakeManagerCluster) ListPluginBindingsByUID(_ context.Context, uid string) ([]metadb.PluginUserBinding, error) {
@@ -7238,7 +6244,7 @@ func (f *fakeManagerCluster) UnbindPluginUser(_ context.Context, uid, pluginNo s
 }
 
 func (f *fakeManagerCluster) ReadChannelLastVisible(_ context.Context, channelID channelruntime.ChannelID, visibleAfterSeq uint64) (channelruntime.Message, bool, error) {
-	key := metadb.ConversationKey{ChannelID: channelID.ID, ChannelType: int64(channelID.Type)}
+	key := metadb.ChannelKey{ChannelID: channelID.ID, ChannelType: int64(channelID.Type)}
 	messages := f.conversationMessages[key]
 	for i := len(messages) - 1; i >= 0; i-- {
 		if messages[i].MessageSeq > visibleAfterSeq {
@@ -7249,7 +6255,7 @@ func (f *fakeManagerCluster) ReadChannelLastVisible(_ context.Context, channelID
 }
 
 func (f *fakeManagerCluster) ReadChannelCommitted(_ context.Context, channelID channelruntime.ChannelID, req channelstore.ReadCommittedRequest) (channelstore.ReadCommittedResult, error) {
-	key := metadb.ConversationKey{ChannelID: channelID.ID, ChannelType: int64(channelID.Type)}
+	key := metadb.ChannelKey{ChannelID: channelID.ID, ChannelType: int64(channelID.Type)}
 	source := f.conversationMessages[key]
 	messages := make([]channelruntime.Message, 0, len(source))
 	for _, message := range source {
@@ -7278,8 +6284,16 @@ func (f *fakeManagerCluster) ReadChannelCommitted(_ context.Context, channelID c
 	return channelstore.ReadCommittedResult{Messages: messages}, nil
 }
 
+func (f *fakeManagerCluster) ReadChannelCommittedBatch(ctx context.Context, reads []clusterchannels.CommittedRead) ([]clusterchannels.CommittedReadResult, error) {
+	results := make([]clusterchannels.CommittedReadResult, len(reads))
+	for index, read := range reads {
+		results[index].Read, results[index].Err = f.ReadChannelCommitted(ctx, read.ChannelID, read.Request)
+	}
+	return results, nil
+}
+
 func (f *fakeManagerCluster) GetChannelRuntimeMeta(_ context.Context, channelID string, channelType int64) (metadb.ChannelRuntimeMeta, error) {
-	meta, ok := f.channelRuntimeMetas[metadb.ConversationKey{ChannelID: channelID, ChannelType: channelType}]
+	meta, ok := f.channelRuntimeMetas[metadb.ChannelKey{ChannelID: channelID, ChannelType: channelType}]
 	if !ok {
 		return metadb.ChannelRuntimeMeta{}, metadb.ErrNotFound
 	}
@@ -7287,7 +6301,7 @@ func (f *fakeManagerCluster) GetChannelRuntimeMeta(_ context.Context, channelID 
 }
 
 func (f *fakeManagerCluster) ChannelRetentionView(_ context.Context, id channelruntime.ChannelID) (channelruntime.RetentionView, error) {
-	key := metadb.ConversationKey{ChannelID: id.ID, ChannelType: int64(id.Type)}
+	key := metadb.ChannelKey{ChannelID: id.ID, ChannelType: int64(id.Type)}
 	if view, ok := f.channelRetentionViews[key]; ok {
 		return view, nil
 	}
@@ -7305,7 +6319,7 @@ func (f *fakeManagerCluster) ChannelRetentionView(_ context.Context, id channelr
 
 func (f *fakeManagerCluster) AdvanceChannelRetentionThroughSeq(_ context.Context, req metadb.ChannelRetentionAdvance) error {
 	f.retentionAdvance = req
-	key := metadb.ConversationKey{ChannelID: req.ChannelID, ChannelType: req.ChannelType}
+	key := metadb.ChannelKey{ChannelID: req.ChannelID, ChannelType: req.ChannelType}
 	meta := f.channelRuntimeMetas[key]
 	meta.RetentionThroughSeq = req.RetentionThroughSeq
 	meta.RetentionUpdatedAtMS = req.RetentionUpdatedAtMS
@@ -7403,38 +6417,72 @@ func (f *fakeSeedJoinWriteReadyCluster) CallRPC(context.Context, uint64, uint8, 
 
 type fakePresenceCluster struct {
 	fakeCluster
-	nodeID                    uint64
-	events                    <-chan clusterpkg.RouteAuthorityEvent
-	snapshot                  clusterpkg.Snapshot
-	registeredService         uint8
-	registeredHandler         clusterpkg.NodeRPCHandler
-	registeredHandlers        map[uint8]clusterpkg.NodeRPCHandler
-	appendSeq                 uint64
-	mu                        sync.Mutex
-	idempotencyHit            channelstore.IdempotencyHit
-	idempotencyOK             bool
-	idempotencyErr            error
-	idempotencyLookups        int
-	messages                  map[metadb.ConversationKey][]channelruntime.Message
-	conversationStateBatches  [][]metadb.ConversationState
-	conversationDeleteBatches [][]metadb.ConversationDelete
-	conversationPatchBatches  [][]metadb.ConversationActivePatch
-	messageEventAppends       []metadb.MessageEventAppend
-	messageEventStates        map[metadb.MessageEventMessageKey][]metadb.MessageEventState
-	subscribers               map[string][]string
-	channels                  map[metadb.ConversationKey]metadb.Channel
+	nodeID                   uint64
+	events                   <-chan clusterpkg.RouteAuthorityEvent
+	snapshot                 clusterpkg.Snapshot
+	registeredService        uint8
+	registeredHandler        clusterpkg.NodeRPCHandler
+	registeredHandlers       map[uint8]clusterpkg.NodeRPCHandler
+	appendSeq                uint64
+	mu                       sync.Mutex
+	idempotencyHit           channelstore.IdempotencyHit
+	idempotencyOK            bool
+	idempotencyErr           error
+	idempotencyLookups       int
+	writeFenced              bool
+	messages                 map[metadb.ChannelKey][]channelruntime.Message
+	messageEventAppends      []metadb.MessageEventAppend
+	messageEventStates       map[metadb.MessageEventMessageKey][]metadb.MessageEventState
+	subscribers              map[string][]string
+	channels                 map[metadb.ChannelKey]metadb.Channel
+	memberships              map[fakeMembershipKey]metadb.UserChannelMembership
+	membershipMutationWrites int
+}
+
+type fakeMembershipKey struct {
+	uid         string
+	channelID   string
+	channelType int64
 }
 
 var _ clusterinfra.PresenceNode = (*fakePresenceCluster)(nil)
 
+type terminalPermissionCluster struct {
+	*fakePresenceCluster
+}
+
+func (c *terminalPermissionCluster) UpsertChannelMetadata(_ context.Context, channel metadb.Channel) error {
+	c.channels[metadb.ChannelKey{ChannelID: channel.ChannelID, ChannelType: channel.ChannelType}] = channel
+	return nil
+}
+
+func (c *terminalPermissionCluster) DeleteChannelMetadata(_ context.Context, channelID string, channelType int64) error {
+	delete(c.channels, metadb.ChannelKey{ChannelID: channelID, ChannelType: channelType})
+	return nil
+}
+
+func (c *terminalPermissionCluster) AddChannelSubscribers(context.Context, string, int64, []string, uint64) error {
+	return nil
+}
+
+func (c *terminalPermissionCluster) RemoveChannelSubscribers(context.Context, string, int64, []string, uint64) error {
+	return nil
+}
+
+func (c *terminalPermissionCluster) ListChannelSubscribersAuthoritative(ctx context.Context, channelID string, channelType int64, afterUID string, limit int) ([]string, string, bool, error) {
+	return c.ListChannelSubscribersPage(ctx, channelID, channelType, afterUID, limit)
+}
+
+func (c *terminalPermissionCluster) ContainsChannelSubscriberAuthoritative(context.Context, string, int64, string) (bool, error) {
+	return true, nil
+}
+
+func (c *terminalPermissionCluster) HasChannelSubscribersAuthoritative(context.Context, string, int64) (bool, error) {
+	return false, nil
+}
+
 type fakeConversationFallbackCluster struct {
 	fakeCluster
-	appendSeq                uint64
-	mu                       sync.Mutex
-	messages                 map[metadb.ConversationKey][]channelruntime.Message
-	conversationStateBatches [][]metadb.ConversationState
-	subscribers              map[string][]string
-	channels                 map[metadb.ConversationKey]metadb.Channel
 }
 
 type recordingDeliveryMetaNode struct {
@@ -7458,276 +6506,16 @@ type recordedSubscriberMutation struct {
 }
 
 type recordedMembershipProjection struct {
-	channelID   string
-	channelType int64
-	uids        []string
-	joinSeq     uint64
-	updatedAt   int64
+	channelID     string
+	channelType   int64
+	uids          []string
+	joinSeq       uint64
+	sourceVersion uint64
+	updatedAt     int64
 }
 
 func newFakePresenceCluster(nodeID uint64, events <-chan clusterpkg.RouteAuthorityEvent) *fakePresenceCluster {
-	return &fakePresenceCluster{nodeID: nodeID, events: events}
-}
-
-func conversationStatesByUID(states []metadb.ConversationState) map[string]metadb.ConversationState {
-	out := make(map[string]metadb.ConversationState, len(states))
-	for _, state := range states {
-		out[state.UID] = state
-	}
-	return out
-}
-
-func conversationPatchesByUID(patches []metadb.ConversationActivePatch) map[string]metadb.ConversationActivePatch {
-	out := make(map[string]metadb.ConversationActivePatch, len(patches))
-	for _, patch := range patches {
-		out[patch.UID] = patch
-	}
-	return out
-}
-
-type appRecordingConversationAuthorityStore struct {
-	mu                 sync.Mutex
-	touchStarted       chan struct{}
-	touchStartedOnce   sync.Once
-	touchBlock         <-chan struct{}
-	touchBatches       [][]metadb.ConversationActivePatch
-	rows               map[metadb.ConversationKey]metadb.ConversationState
-	lastTouchDeadlineV time.Time
-}
-
-func (s *appRecordingConversationAuthorityStore) ListConversationActivePage(_ context.Context, kind metadb.ConversationKind, uid string, after metadb.ConversationActiveCursor, limit int) ([]metadb.ConversationState, metadb.ConversationActiveCursor, bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	rows := make([]metadb.ConversationState, 0, len(s.rows))
-	for _, row := range s.rows {
-		if row.UID == uid && row.Kind == kind && conversationRowAfter(row, after) {
-			rows = append(rows, row)
-		}
-	}
-	sortConversationRows(rows)
-	if limit <= 0 || len(rows) <= limit {
-		return append([]metadb.ConversationState(nil), rows...), conversationRowsCursor(rows, after), true, nil
-	}
-	page := append([]metadb.ConversationState(nil), rows[:limit]...)
-	return page, conversationRowsCursor(page, after), false, nil
-}
-
-func (s *appRecordingConversationAuthorityStore) GetConversationState(_ context.Context, kind metadb.ConversationKind, uid, channelID string, channelType int64) (metadb.ConversationState, bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	row, ok := s.rows[metadb.ConversationKey{ChannelID: channelID, ChannelType: channelType}]
-	if !ok || row.UID != uid || row.Kind != kind {
-		return metadb.ConversationState{}, false, nil
-	}
-	return row, true, nil
-}
-
-func (s *appRecordingConversationAuthorityStore) GetConversationStates(_ context.Context, keys []metadb.ConversationStateKey) (map[metadb.ConversationStateKey]metadb.ConversationState, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	states := make(map[metadb.ConversationStateKey]metadb.ConversationState, len(keys))
-	for _, key := range keys {
-		row, ok := s.rows[metadb.ConversationKey{ChannelID: key.ChannelID, ChannelType: key.ChannelType}]
-		if !ok || row.UID != key.UID || row.Kind != key.Kind {
-			continue
-		}
-		states[key] = row
-	}
-	return states, nil
-}
-
-func (s *appRecordingConversationAuthorityStore) TouchConversationActiveAtBatch(ctx context.Context, patches []metadb.ConversationActivePatch) error {
-	if s.touchStarted != nil {
-		s.touchStartedOnce.Do(func() {
-			close(s.touchStarted)
-		})
-	}
-	if s.touchBlock != nil {
-		select {
-		case <-s.touchBlock:
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if deadline, ok := ctx.Deadline(); ok {
-		s.lastTouchDeadlineV = deadline
-	}
-	s.touchBatches = append(s.touchBatches, append([]metadb.ConversationActivePatch(nil), patches...))
-	if s.rows == nil {
-		s.rows = make(map[metadb.ConversationKey]metadb.ConversationState)
-	}
-	for _, patch := range patches {
-		key := metadb.ConversationKey{ChannelID: patch.ChannelID, ChannelType: patch.ChannelType}
-		row := s.rows[key]
-		row.UID = patch.UID
-		row.Kind = patch.Kind
-		row.ChannelID = patch.ChannelID
-		row.ChannelType = patch.ChannelType
-		if patch.ReadSeq > row.ReadSeq {
-			row.ReadSeq = patch.ReadSeq
-		}
-		if patch.DeletedToSeq > row.DeletedToSeq {
-			row.DeletedToSeq = patch.DeletedToSeq
-		}
-		if patch.ActiveAt > row.ActiveAt {
-			row.ActiveAt = patch.ActiveAt
-		}
-		if patch.UpdatedAt > row.UpdatedAt {
-			row.UpdatedAt = patch.UpdatedAt
-		}
-		if patch.SparseActiveSet {
-			row.SparseActive = patch.SparseActive
-		}
-		s.rows[key] = row
-	}
-	return nil
-}
-
-func (s *appRecordingConversationAuthorityStore) HideConversationsBatch(ctx context.Context, deletes []metadb.ConversationDelete) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if s.rows == nil {
-		s.rows = make(map[metadb.ConversationKey]metadb.ConversationState)
-	}
-	for _, req := range deletes {
-		key := metadb.ConversationKey{ChannelID: req.ChannelID, ChannelType: req.ChannelType}
-		row := s.rows[key]
-		if row.UID == "" {
-			row = metadb.ConversationState{UID: req.UID, Kind: req.Kind, ChannelID: req.ChannelID, ChannelType: req.ChannelType}
-		}
-		if req.DeletedToSeq <= row.DeletedToSeq {
-			continue
-		}
-		row.DeletedToSeq = req.DeletedToSeq
-		row.ActiveAt = 0
-		if req.UpdatedAt > row.UpdatedAt {
-			row.UpdatedAt = req.UpdatedAt
-		}
-		s.rows[key] = row
-	}
-	return nil
-}
-
-func (s *appRecordingConversationAuthorityStore) UpsertConversationStatesBatch(ctx context.Context, states []metadb.ConversationState) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if s.rows == nil {
-		s.rows = make(map[metadb.ConversationKey]metadb.ConversationState)
-	}
-	for _, state := range states {
-		key := metadb.ConversationKey{ChannelID: state.ChannelID, ChannelType: state.ChannelType}
-		if existing, ok := s.rows[key]; ok && existing.UID == state.UID {
-			state = mergeConversationState(existing, state)
-		}
-		s.rows[key] = state
-	}
-	return nil
-}
-
-func (s *appRecordingConversationAuthorityStore) totalTouchPatches() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	total := 0
-	for _, batch := range s.touchBatches {
-		total += len(batch)
-	}
-	return total
-}
-
-func (s *appRecordingConversationAuthorityStore) lastTouchDeadline() time.Time {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.lastTouchDeadlineV
-}
-
-func (s *appRecordingConversationAuthorityStore) lastTouchDeadlineWithin(timeout, slop time.Duration) bool {
-	deadline := s.lastTouchDeadline()
-	if deadline.IsZero() {
-		return false
-	}
-	remaining := time.Until(deadline)
-	return remaining > 0 && remaining <= timeout+slop
-}
-
-type recordingConversationAuthorityRouteNode struct {
-	nodeID                uint64
-	routes                map[string]clusterpkg.Route
-	watch                 <-chan clusterpkg.RouteAuthorityEvent
-	handler               clusterpkg.NodeRPCHandler
-	routeKeysPartialCalls int
-}
-
-func (n *recordingConversationAuthorityRouteNode) NodeID() uint64 {
-	return n.nodeID
-}
-
-func (n *recordingConversationAuthorityRouteNode) RouteKey(uid string) (clusterpkg.Route, error) {
-	route, ok := n.routes[uid]
-	if !ok {
-		return clusterpkg.Route{}, clusterpkg.ErrRouteNotReady
-	}
-	return route, nil
-}
-
-func (n *recordingConversationAuthorityRouteNode) RouteKeysPartial(uids []string) ([]clusterpkg.RouteKeyResult, error) {
-	n.routeKeysPartialCalls++
-	results := make([]clusterpkg.RouteKeyResult, len(uids))
-	for index, uid := range uids {
-		route, err := n.RouteKey(uid)
-		results[index] = clusterpkg.RouteKeyResult{Route: route, Err: err}
-	}
-	return results, nil
-}
-
-func (n *recordingConversationAuthorityRouteNode) CallRPC(ctx context.Context, _ uint64, _ uint8, payload []byte) ([]byte, error) {
-	if n.handler != nil {
-		return n.handler.HandleRPC(ctx, payload)
-	}
-	return nil, errors.New("unexpected conversation authority rpc")
-}
-
-func (n *recordingConversationAuthorityRouteNode) RegisterRPC(uint8, clusterpkg.NodeRPCHandler) {}
-
-func (n *recordingConversationAuthorityRouteNode) WatchRouteAuthorities() <-chan clusterpkg.RouteAuthorityEvent {
-	return n.watch
-}
-
-type appNodeRPCHandlerFunc func(context.Context, []byte) ([]byte, error)
-
-func (f appNodeRPCHandlerFunc) HandleRPC(ctx context.Context, payload []byte) ([]byte, error) {
-	return f(ctx, payload)
-}
-
-func routeFromConversationTarget(target conversationusecase.RouteTarget) clusterpkg.Route {
-	return clusterpkg.Route{
-		HashSlot:       target.HashSlot,
-		SlotID:         target.SlotID,
-		Leader:         target.LeaderNodeID,
-		LeaderTerm:     target.LeaderTerm,
-		ConfigEpoch:    target.ConfigEpoch,
-		Revision:       target.RouteRevision,
-		AuthorityEpoch: target.AuthorityEpoch,
-	}
-}
-
-func authorityFromConversationTarget(target conversationusecase.RouteTarget) clusterpkg.RouteAuthority {
-	return clusterpkg.RouteAuthority{
-		HashSlot:       target.HashSlot,
-		SlotID:         target.SlotID,
-		LeaderNodeID:   target.LeaderNodeID,
-		LeaderTerm:     target.LeaderTerm,
-		ConfigEpoch:    target.ConfigEpoch,
-		RouteRevision:  target.RouteRevision,
-		AuthorityEpoch: target.AuthorityEpoch,
-	}
+	return &fakePresenceCluster{nodeID: nodeID, events: events, memberships: make(map[fakeMembershipKey]metadb.UserChannelMembership)}
 }
 
 func readyFakeClusterSnapshot(nodeID uint64, hashSlotCount uint16) clusterpkg.Snapshot {
@@ -7885,29 +6673,35 @@ func (n *recordingDeliveryMetaNode) HasChannelSubscribersAuthoritative(_ context
 	return len(n.subscribers[channelID]) > 0, nil
 }
 
-func (n *recordingDeliveryMetaNode) UpsertUserChannelMemberships(_ context.Context, channelID string, channelType int64, uids []string, joinSeq uint64, updatedAt int64) error {
+func (n *recordingDeliveryMetaNode) UpsertUserChannelMemberships(_ context.Context, channelID string, channelType int64, uids []string, joinSeq, sourceVersion uint64, updatedAt int64) error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.membershipUpserts = append(n.membershipUpserts, recordedMembershipProjection{
-		channelID:   channelID,
-		channelType: channelType,
-		uids:        append([]string(nil), uids...),
-		joinSeq:     joinSeq,
-		updatedAt:   updatedAt,
+		channelID:     channelID,
+		channelType:   channelType,
+		uids:          append([]string(nil), uids...),
+		joinSeq:       joinSeq,
+		sourceVersion: sourceVersion,
+		updatedAt:     updatedAt,
 	})
 	return nil
 }
 
-func (n *recordingDeliveryMetaNode) DeleteUserChannelMemberships(_ context.Context, channelID string, channelType int64, uids []string, updatedAt int64) error {
+func (n *recordingDeliveryMetaNode) TombstoneUserChannelMemberships(_ context.Context, channelID string, channelType int64, uids []string, sourceVersion uint64, updatedAt int64) error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.membershipDeletes = append(n.membershipDeletes, recordedMembershipProjection{
-		channelID:   channelID,
-		channelType: channelType,
-		uids:        append([]string(nil), uids...),
-		updatedAt:   updatedAt,
+		channelID:     channelID,
+		channelType:   channelType,
+		uids:          append([]string(nil), uids...),
+		sourceVersion: sourceVersion,
+		updatedAt:     updatedAt,
 	})
 	return nil
+}
+
+func (n *recordingDeliveryMetaNode) CommittedChannelTail(context.Context, string, int64) (uint64, error) {
+	return 0, nil
 }
 
 func (f *fakePresenceCluster) NodeID() uint64 {
@@ -7915,17 +6709,29 @@ func (f *fakePresenceCluster) NodeID() uint64 {
 }
 
 func (f *fakePresenceCluster) ResolveChannelAppendAuthority(_ context.Context, id channelruntime.ChannelID) (channelruntime.Meta, error) {
-	return fakeChannelAuthorityMeta(f.nodeID, id), nil
+	meta := fakeChannelAuthorityMeta(f.nodeID, id)
+	if f.writeFenced {
+		meta.WriteFence = channelruntime.WriteFence{
+			Token:   "app-test-write-fence",
+			Version: 1,
+			Reason:  channelruntime.WriteFenceReasonLeaderTransfer,
+		}
+	}
+	return meta, nil
 }
 
 func (f *fakePresenceCluster) GetChannelMetadata(_ context.Context, channelID string, channelType int64) (metadb.Channel, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	channel, ok := f.channels[metadb.ConversationKey{ChannelID: channelID, ChannelType: channelType}]
+	channel, ok := f.channels[metadb.ChannelKey{ChannelID: channelID, ChannelType: channelType}]
 	if !ok {
 		return metadb.Channel{}, metadb.ErrNotFound
 	}
 	return channel, nil
+}
+
+func (f *fakePresenceCluster) GetChannelMetadataAuthoritative(ctx context.Context, channelID string, channelType int64) (metadb.Channel, error) {
+	return f.GetChannelMetadata(ctx, channelID, channelType)
 }
 
 func (f *fakePresenceCluster) RouteKey(uid string) (clusterpkg.Route, error) {
@@ -7984,30 +6790,6 @@ func (f *fakePresenceCluster) LookupChannelIdempotency(_ context.Context, _ chan
 	return f.idempotencyHit, f.idempotencyOK, f.idempotencyErr
 }
 
-func (f *fakePresenceCluster) UpsertConversationStatesBatch(_ context.Context, states []metadb.ConversationState) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	batch := append([]metadb.ConversationState(nil), states...)
-	f.conversationStateBatches = append(f.conversationStateBatches, batch)
-	return nil
-}
-
-func (f *fakePresenceCluster) HideConversationsBatch(_ context.Context, deletes []metadb.ConversationDelete) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	batch := append([]metadb.ConversationDelete(nil), deletes...)
-	f.conversationDeleteBatches = append(f.conversationDeleteBatches, batch)
-	return nil
-}
-
-func (f *fakePresenceCluster) TouchConversationActiveAtBatch(_ context.Context, patches []metadb.ConversationActivePatch) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	batch := append([]metadb.ConversationActivePatch(nil), patches...)
-	f.conversationPatchBatches = append(f.conversationPatchBatches, batch)
-	return nil
-}
-
 func (f *fakePresenceCluster) ListChannelSubscribersPage(_ context.Context, channelID string, _ int64, afterUID string, limit int) ([]string, string, bool, error) {
 	f.mu.Lock()
 	uids := append([]string(nil), f.subscribers[channelID]...)
@@ -8034,45 +6816,113 @@ func (f *fakePresenceCluster) ListChannelSubscribersPage(_ context.Context, chan
 	return page, page[len(page)-1], false, nil
 }
 
-func (f *fakePresenceCluster) ListUserChannelMembershipPage(_ context.Context, _ string, _ metadb.UserChannelMembershipCursor, _ int) ([]metadb.UserChannelMembership, metadb.UserChannelMembershipCursor, bool, error) {
-	return nil, metadb.UserChannelMembershipCursor{}, true, nil
-}
-
-func (f *fakePresenceCluster) ListConversationActivePage(_ context.Context, _ metadb.ConversationKind, _ string, _ metadb.ConversationActiveCursor, _ int) ([]metadb.ConversationState, metadb.ConversationActiveCursor, bool, error) {
-	return nil, metadb.ConversationActiveCursor{}, true, nil
-}
-
-func (f *fakePresenceCluster) GetConversationState(_ context.Context, kind metadb.ConversationKind, uid, channelID string, channelType int64) (metadb.ConversationState, bool, error) {
+func (f *fakePresenceCluster) ListUserChannelMembershipPage(_ context.Context, uid string, _ metadb.UserChannelMembershipCursor, _ int) ([]metadb.UserChannelMembership, metadb.UserChannelMembershipCursor, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	for i := len(f.conversationStateBatches) - 1; i >= 0; i-- {
-		for _, state := range f.conversationStateBatches[i] {
-			if state.UID == uid && state.Kind == kind && state.ChannelID == channelID && state.ChannelType == channelType {
-				return state, true, nil
+	rows := make([]metadb.UserChannelMembership, 0, len(f.memberships))
+	for key, row := range f.memberships {
+		if key.uid == uid {
+			rows = append(rows, row)
+		}
+	}
+	return rows, metadb.UserChannelMembershipCursor{}, true, nil
+}
+
+func (f *fakePresenceCluster) ListUserCMDChannelMembershipPage(context.Context, string, metadb.UserCMDChannelMembershipCursor, int) ([]metadb.UserCMDChannelMembership, metadb.UserCMDChannelMembershipCursor, bool, error) {
+	return nil, metadb.UserCMDChannelMembershipCursor{}, true, nil
+}
+
+func (f *fakePresenceCluster) UpsertUserCMDChannelMemberships(context.Context, []metadb.UserCMDChannelMembership) error {
+	return nil
+}
+
+func (f *fakePresenceCluster) AdvanceUserCMDChannelMembershipAcks(context.Context, []metadb.UserCMDChannelMembership) error {
+	return nil
+}
+
+func (f *fakePresenceCluster) TombstoneUserCMDChannelMemberships(context.Context, []metadb.UserCMDChannelMembership) error {
+	return nil
+}
+
+func (f *fakePresenceCluster) CommittedChannelTail(context.Context, string, int64) (uint64, error) {
+	return f.appendSeq, nil
+}
+
+func (f *fakePresenceCluster) ReadChannelConversationHeads(_ context.Context, ids []channelruntime.ChannelID, uid string) ([]clusterchannels.ConversationHeadResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	results := make([]clusterchannels.ConversationHeadResult, len(ids))
+	for index, id := range ids {
+		messages := f.messages[metadb.ChannelKey{ChannelID: id.ID, ChannelType: int64(id.Type)}]
+		if len(messages) == 0 {
+			continue
+		}
+		last := messages[len(messages)-1]
+		results[index].Head.Found = true
+		results[index].Head.LastCommittedSeq = last.MessageSeq
+		results[index].Head.Message = last
+		for messageIndex := len(messages) - 1; messageIndex >= 0; messageIndex-- {
+			if messages[messageIndex].FromUID == uid {
+				results[index].Head.CurrentUserLastSendSeq = messages[messageIndex].MessageSeq
+				break
 			}
 		}
 	}
-	return metadb.ConversationState{}, false, nil
+	return results, nil
 }
 
-func (f *fakePresenceCluster) GetConversationStates(ctx context.Context, keys []metadb.ConversationStateKey) (map[metadb.ConversationStateKey]metadb.ConversationState, error) {
-	states := make(map[metadb.ConversationStateKey]metadb.ConversationState, len(keys))
-	for _, key := range keys {
-		state, ok, err := f.GetConversationState(ctx, key.Kind, key.UID, key.ChannelID, key.ChannelType)
-		if err != nil {
-			return nil, err
-		}
-		if ok {
-			states[key] = state
-		}
+func (f *fakePresenceCluster) GetUserChannelMembership(_ context.Context, uid, channelID string, channelType int64) (metadb.UserChannelMembership, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	row, ok := f.memberships[fakeMembershipKey{uid: uid, channelID: channelID, channelType: channelType}]
+	return row, ok, nil
+}
+
+func (f *fakePresenceCluster) AdvanceUserChannelMembershipReadSeq(_ context.Context, uid, channelID string, channelType int64, readSeq uint64, updatedAt int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	key := fakeMembershipKey{uid: uid, channelID: channelID, channelType: channelType}
+	row := f.memberships[key]
+	if readSeq > row.ReadSeq {
+		row.ReadSeq = readSeq
 	}
-	return states, nil
+	row.UpdatedAt = updatedAt
+	f.memberships[key] = row
+	f.membershipMutationWrites++
+	return nil
+}
+
+func (f *fakePresenceCluster) HideUserChannelMembership(_ context.Context, uid, channelID string, channelType int64, deletedToSeq uint64, updatedAt int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	key := fakeMembershipKey{uid: uid, channelID: channelID, channelType: channelType}
+	row := f.memberships[key]
+	if deletedToSeq > row.DeletedToSeq {
+		row.DeletedToSeq = deletedToSeq
+	}
+	row.ActivatedAt = 0
+	row.UpdatedAt = updatedAt
+	f.memberships[key] = row
+	f.membershipMutationWrites++
+	return nil
+}
+
+func (f *fakePresenceCluster) ActivateUserChannelMembership(_ context.Context, uid, channelID string, channelType int64, activatedAt, updatedAt int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	key := fakeMembershipKey{uid: uid, channelID: channelID, channelType: channelType}
+	row := f.memberships[key]
+	row.ActivatedAt = activatedAt
+	row.UpdatedAt = updatedAt
+	f.memberships[key] = row
+	f.membershipMutationWrites++
+	return nil
 }
 
 func (f *fakePresenceCluster) ReadChannelLastVisible(_ context.Context, id channelruntime.ChannelID, visibleAfterSeq uint64) (channelruntime.Message, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	messages := f.messages[metadb.ConversationKey{ChannelID: id.ID, ChannelType: int64(id.Type)}]
+	messages := f.messages[metadb.ChannelKey{ChannelID: id.ID, ChannelType: int64(id.Type)}]
 	for i := len(messages) - 1; i >= 0; i-- {
 		msg := messages[i]
 		if msg.MessageSeq <= visibleAfterSeq {
@@ -8086,6 +6936,10 @@ func (f *fakePresenceCluster) ReadChannelLastVisible(_ context.Context, id chann
 
 func (f *fakePresenceCluster) ReadChannelCommitted(context.Context, channelruntime.ChannelID, channelstore.ReadCommittedRequest) (channelstore.ReadCommittedResult, error) {
 	return channelstore.ReadCommittedResult{}, nil
+}
+
+func (f *fakePresenceCluster) ReadChannelCommittedBatch(_ context.Context, reads []clusterchannels.CommittedRead) ([]clusterchannels.CommittedReadResult, error) {
+	return make([]clusterchannels.CommittedReadResult, len(reads)), nil
 }
 
 func (f *fakePresenceCluster) AppendMessageEvent(_ context.Context, event metadb.MessageEventAppend) (metadb.MessageEventAppendResult, error) {
@@ -8158,218 +7012,6 @@ func (f *fakePresenceCluster) WatchRouteAuthorities() <-chan clusterpkg.RouteAut
 	}
 	ch := make(chan clusterpkg.RouteAuthorityEvent)
 	return ch
-}
-
-func (f *fakeConversationFallbackCluster) AppendChannelBatch(_ context.Context, req channelruntime.AppendBatchRequest) (channelruntime.AppendBatchResult, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.messages == nil {
-		f.messages = make(map[metadb.ConversationKey][]channelruntime.Message)
-	}
-	key := metadb.ConversationKey{ChannelID: req.ChannelID.ID, ChannelType: int64(req.ChannelID.Type)}
-	items := make([]channelruntime.AppendBatchItemResult, 0, len(req.Messages))
-	for _, msg := range req.Messages {
-		f.appendSeq++
-		msg.MessageSeq = f.appendSeq
-		msg.Payload = append([]byte(nil), msg.Payload...)
-		f.messages[key] = append(f.messages[key], msg)
-		items = append(items, channelruntime.AppendBatchItemResult{
-			MessageID:  msg.MessageID,
-			MessageSeq: msg.MessageSeq,
-			Message:    msg,
-		})
-	}
-	return channelruntime.AppendBatchResult{Items: items}, nil
-}
-
-func (f *fakeConversationFallbackCluster) NodeID() uint64 {
-	return 3
-}
-
-func (f *fakeConversationFallbackCluster) ResolveChannelAppendAuthority(_ context.Context, id channelruntime.ChannelID) (channelruntime.Meta, error) {
-	return fakeChannelAuthorityMeta(3, id), nil
-}
-
-func (f *fakeConversationFallbackCluster) GetChannelMetadata(_ context.Context, channelID string, channelType int64) (metadb.Channel, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	channel, ok := f.channels[metadb.ConversationKey{ChannelID: channelID, ChannelType: channelType}]
-	if !ok {
-		return metadb.Channel{}, metadb.ErrNotFound
-	}
-	return channel, nil
-}
-
-func (f *fakeConversationFallbackCluster) UpsertConversationStatesBatch(_ context.Context, states []metadb.ConversationState) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	batch := append([]metadb.ConversationState(nil), states...)
-	f.conversationStateBatches = append(f.conversationStateBatches, batch)
-	return nil
-}
-
-func (f *fakeConversationFallbackCluster) TouchConversationActiveAtBatch(context.Context, []metadb.ConversationActivePatch) error {
-	return errors.New("unexpected authority active patch fallback write")
-}
-
-func (f *fakeConversationFallbackCluster) HideConversationsBatch(context.Context, []metadb.ConversationDelete) error {
-	return errors.New("unexpected authority conversation hide fallback write")
-}
-
-func (f *fakeConversationFallbackCluster) ListChannelSubscribersPage(_ context.Context, channelID string, _ int64, afterUID string, limit int) ([]string, string, bool, error) {
-	f.mu.Lock()
-	uids := append([]string(nil), f.subscribers[channelID]...)
-	f.mu.Unlock()
-	start := 0
-	for start < len(uids) && afterUID != "" {
-		if uids[start] == afterUID {
-			start++
-			break
-		}
-		start++
-	}
-	if limit <= 0 || start >= len(uids) {
-		return nil, "", true, nil
-	}
-	end := start + limit
-	if end > len(uids) {
-		end = len(uids)
-	}
-	page := append([]string(nil), uids[start:end]...)
-	if end >= len(uids) {
-		return page, "", true, nil
-	}
-	return page, page[len(page)-1], false, nil
-}
-
-func (f *fakeConversationFallbackCluster) ListConversationActivePage(_ context.Context, kind metadb.ConversationKind, uid string, after metadb.ConversationActiveCursor, limit int) ([]metadb.ConversationState, metadb.ConversationActiveCursor, bool, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if limit <= 0 {
-		return nil, metadb.ConversationActiveCursor{}, true, nil
-	}
-	latest := make(map[metadb.ConversationKey]metadb.ConversationState)
-	for _, batch := range f.conversationStateBatches {
-		for _, state := range batch {
-			if state.UID != uid || state.Kind != kind {
-				continue
-			}
-			key := metadb.ConversationKey{ChannelID: state.ChannelID, ChannelType: state.ChannelType}
-			existing, ok := latest[key]
-			if !ok {
-				latest[key] = state
-				continue
-			}
-			latest[key] = mergeConversationState(existing, state)
-		}
-	}
-	rows := make([]metadb.ConversationState, 0, len(latest))
-	for _, state := range latest {
-		if conversationRowAfter(state, after) {
-			rows = append(rows, state)
-		}
-	}
-	sortConversationRows(rows)
-	if len(rows) <= limit {
-		return rows, conversationRowsCursor(rows, after), true, nil
-	}
-	page := append([]metadb.ConversationState(nil), rows[:limit]...)
-	return page, conversationRowsCursor(page, after), false, nil
-}
-
-func (f *fakeConversationFallbackCluster) GetConversationState(_ context.Context, kind metadb.ConversationKind, uid, channelID string, channelType int64) (metadb.ConversationState, bool, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	var out metadb.ConversationState
-	found := false
-	for _, batch := range f.conversationStateBatches {
-		for _, state := range batch {
-			if state.UID != uid || state.Kind != kind || state.ChannelID != channelID || state.ChannelType != channelType {
-				continue
-			}
-			if found {
-				out = mergeConversationState(out, state)
-			} else {
-				out = state
-				found = true
-			}
-		}
-	}
-	return out, found, nil
-}
-
-func (f *fakeConversationFallbackCluster) GetConversationStates(ctx context.Context, keys []metadb.ConversationStateKey) (map[metadb.ConversationStateKey]metadb.ConversationState, error) {
-	states := make(map[metadb.ConversationStateKey]metadb.ConversationState, len(keys))
-	for _, key := range keys {
-		state, ok, err := f.GetConversationState(ctx, key.Kind, key.UID, key.ChannelID, key.ChannelType)
-		if err != nil {
-			return nil, err
-		}
-		if ok {
-			states[key] = state
-		}
-	}
-	return states, nil
-}
-
-func (f *fakeConversationFallbackCluster) ReadChannelLastVisible(_ context.Context, id channelruntime.ChannelID, visibleAfterSeq uint64) (channelruntime.Message, bool, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	key := metadb.ConversationKey{ChannelID: id.ID, ChannelType: int64(id.Type)}
-	messages := f.messages[key]
-	for i := len(messages) - 1; i >= 0; i-- {
-		msg := messages[i]
-		if msg.MessageSeq <= visibleAfterSeq {
-			continue
-		}
-		msg.Payload = append([]byte(nil), msg.Payload...)
-		return msg, true, nil
-	}
-	return channelruntime.Message{}, false, nil
-}
-
-func (f *fakeConversationFallbackCluster) ReadChannelCommitted(_ context.Context, id channelruntime.ChannelID, req channelstore.ReadCommittedRequest) (channelstore.ReadCommittedResult, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	key := metadb.ConversationKey{ChannelID: id.ID, ChannelType: int64(id.Type)}
-	messages := f.messages[key]
-	out := make([]channelruntime.Message, 0, req.Limit)
-	limit := req.Limit
-	if limit <= 0 {
-		limit = len(messages)
-	}
-	maxSeq := req.MaxSeq
-	if maxSeq == 0 {
-		maxSeq = ^uint64(0)
-	}
-	if req.Reverse {
-		fromSeq := req.FromSeq
-		if fromSeq == 0 || fromSeq > uint64(len(messages)) {
-			fromSeq = uint64(len(messages))
-		}
-		for seq := fromSeq; seq >= 1 && seq <= uint64(len(messages)); seq-- {
-			msg := messages[seq-1]
-			if msg.MessageSeq > maxSeq {
-				continue
-			}
-			out = append(out, cloneChannelMessage(msg))
-			if len(out) >= limit || seq == 1 {
-				break
-			}
-		}
-		return channelstore.ReadCommittedResult{Messages: out}, nil
-	}
-	fromSeq := req.FromSeq
-	if fromSeq == 0 {
-		fromSeq = 1
-	}
-	for seq := fromSeq; seq <= maxSeq && seq <= uint64(len(messages)); seq++ {
-		out = append(out, cloneChannelMessage(messages[seq-1]))
-		if len(out) >= limit {
-			break
-		}
-	}
-	return channelstore.ReadCommittedResult{Messages: out}, nil
 }
 
 func cloneChannelMessage(msg channelruntime.Message) channelruntime.Message {
@@ -8453,21 +7095,8 @@ type recordingSessionHandle struct {
 }
 
 type fakeDeliverySubscriberSource struct {
-	requests []runtimedelivery.SubscriberPageRequest
-	pages    []runtimedelivery.UIDPage
-}
-
-type appStaticDeliveryPartitioner struct {
-	partitions []runtimedelivery.Partition
-}
-
-func (p appStaticDeliveryPartitioner) Partitions(context.Context) ([]runtimedelivery.Partition, error) {
-	return append([]runtimedelivery.Partition(nil), p.partitions...), nil
-}
-
-type appRecordingFanoutRunner struct {
-	mu    sync.Mutex
-	tasks []runtimedelivery.FanoutTask
+	requests []channelappend.SubscriberPageRequest
+	pages    []channelappend.SubscriberPage
 }
 
 type recordingWorkerRuntime struct {
@@ -8503,23 +7132,10 @@ func (r *recordingWorkerRuntime) Stop(context.Context) error {
 	return r.stopErr
 }
 
-func (r *appRecordingFanoutRunner) RunTask(_ context.Context, task runtimedelivery.FanoutTask) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.tasks = append(r.tasks, task)
-	return nil
-}
-
-func (r *appRecordingFanoutRunner) snapshot() []runtimedelivery.FanoutTask {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return append([]runtimedelivery.FanoutTask(nil), r.tasks...)
-}
-
-func (s *fakeDeliverySubscriberSource) ListSubscribers(_ context.Context, req runtimedelivery.SubscriberPageRequest) (runtimedelivery.UIDPage, error) {
+func (s *fakeDeliverySubscriberSource) NextSubscriberPage(_ context.Context, req channelappend.SubscriberPageRequest) (channelappend.SubscriberPage, error) {
 	s.requests = append(s.requests, req)
 	if len(s.pages) == 0 {
-		return runtimedelivery.UIDPage{Done: true}, nil
+		return channelappend.SubscriberPage{Done: true}, nil
 	}
 	page := s.pages[0]
 	s.pages = s.pages[1:]
@@ -8691,36 +7307,6 @@ func (w *sendackSmokeSessionWrites) waitForRecvPacket(t *testing.T, timeout time
 		}
 		time.Sleep(time.Millisecond)
 	}
-}
-
-func requireConversationEventually(t *testing.T, app *App, uid, channelID string, channelType uint8) conversationusecase.Conversation {
-	t.Helper()
-	var got []conversationusecase.Conversation
-	var lastErr error
-	waitUntil(t, time.Second, func() bool {
-		list, err := app.Conversations().List(context.Background(), conversationusecase.ListRequest{UID: uid, Limit: 10})
-		lastErr = err
-		if err != nil {
-			return false
-		}
-		got = list.Items
-		if len(got) != 1 {
-			return false
-		}
-		item := got[0]
-		return item.ChannelID == channelID &&
-			item.ChannelType == int64(channelType) &&
-			item.ActiveAt > 0 &&
-			!item.SparseActive
-	})
-	if lastErr != nil {
-		t.Fatalf("Conversations().List(%s) error = %v", uid, lastErr)
-	}
-	item := got[0]
-	if item.ChannelID != channelID || item.ChannelType != int64(channelType) || item.ActiveAt <= 0 || item.SparseActive {
-		t.Fatalf("conversation list for %s = %#v, want dense row for %s/%d", uid, got, channelID, channelType)
-	}
-	return item
 }
 
 func freshReadyAppNodeHealth(revision uint64) control.NodeHealth {

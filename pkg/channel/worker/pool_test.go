@@ -284,6 +284,11 @@ func TestPoolReportsFullClosedAndCanceledAdmission(t *testing.T) {
 	if got := obs.admissions["rpc:closed"]; got != 1 {
 		t.Fatalf("closed admissions = %d, want 1", got)
 	}
+	for _, result := range []string{"full", "canceled", "closed"} {
+		if got := obs.typedAdmissions["rpc:func:"+result]; got != 1 {
+			t.Fatalf("typed %s admissions = %d, want 1", result, got)
+		}
+	}
 }
 
 func TestPoolSubmitRejectsCanceledContextWithQueueCapacity(t *testing.T) {
@@ -335,6 +340,18 @@ func TestPoolSubmitRejectsCanceledContextWithQueueCapacity(t *testing.T) {
 	if got := obs.admissions["rpc:canceled"]; got != attempts {
 		t.Fatalf("canceled admissions = %d, want %d", got, attempts)
 	}
+}
+
+func TestPoolReportsQueueCapacity(t *testing.T) {
+	pool, err := NewPool(
+		PoolConfig{Name: "capacity", Workers: 1, QueueSize: 7},
+		Deps{Stores: store.NewMemoryFactory()},
+		&captureSink{ch: make(chan Result, 1)},
+	)
+	require.NoError(t, err)
+	defer pool.Close()
+
+	require.Equal(t, 7, pool.QueueCapacity())
 }
 
 func TestPoolReportsAdmissionResultLabels(t *testing.T) {
@@ -1015,6 +1032,12 @@ func TestPoolUsesFirstRPCTaskBatchLimit(t *testing.T) {
 	require.Equal(t, 12, pullHintLed.MaxItems)
 	require.Equal(t, rpcBatchMaxWait, pullLed.MaxWait)
 	require.Equal(t, rpcBatchMaxWait, pullHintLed.MaxWait)
+}
+
+func TestPoolUsesQPSValidatedDefaultRPCBatchLimit(t *testing.T) {
+	pool := &Pool{cfg: PoolConfig{Name: "rpc"}}
+
+	require.Equal(t, 16, pool.rpcBatchMaxItems())
 }
 
 func TestPoolBatchesStoreApplyTasksWhenFactorySupportsBatch(t *testing.T) {
@@ -1977,15 +2000,16 @@ func (o *captureWorkerObserver) InflightPeak(pool string) int {
 }
 
 type recordingPoolPressureObserver struct {
-	mu         sync.Mutex
-	workers    map[string]int
-	capacity   map[string]int
-	admissions map[string]int
-	waits      map[string]time.Duration
-	tasks      map[string]time.Duration
-	batchCalls map[string]int
-	batchItems map[string]int
-	antsUsage  map[string]recordedAntsUsage
+	mu              sync.Mutex
+	workers         map[string]int
+	capacity        map[string]int
+	admissions      map[string]int
+	typedAdmissions map[string]int
+	waits           map[string]time.Duration
+	tasks           map[string]time.Duration
+	batchCalls      map[string]int
+	batchItems      map[string]int
+	antsUsage       map[string]recordedAntsUsage
 }
 
 type recordedAntsUsage struct {
@@ -2030,6 +2054,7 @@ func (o *recordingPoolPressureObserver) ensure() {
 		o.workers = make(map[string]int)
 		o.capacity = make(map[string]int)
 		o.admissions = make(map[string]int)
+		o.typedAdmissions = make(map[string]int)
 		o.waits = make(map[string]time.Duration)
 		o.tasks = make(map[string]time.Duration)
 		o.batchCalls = make(map[string]int)
@@ -2072,6 +2097,13 @@ func (o *recordingPoolPressureObserver) ObserveWorkerAdmission(pool string, resu
 	defer o.mu.Unlock()
 	o.ensure()
 	o.admissions[pool+":"+result]++
+}
+
+func (o *recordingPoolPressureObserver) ObserveWorkerAdmissionKind(pool string, kind TaskKind, result string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.ensure()
+	o.typedAdmissions[pool+":"+taskKindTestLabel(kind)+":"+result]++
 }
 
 func (o *recordingPoolPressureObserver) ObserveWorkerWait(pool string, kind TaskKind, d time.Duration) {

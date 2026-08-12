@@ -161,6 +161,16 @@ app -> access/usecase/runtime/infra/pkg
   Its control code, Workflows, policy, schemas, prompts, and instruction files
   are protected from automated changes. Every Codex task freezes applicable
   `AGENTS.md` and `FLOW.md` digests from its exact source revision.
+- `.github/review-agent/policy.json` MUST remain the sole machine-executable
+  authority for Review Agent check arguments, limits, and path selection.
+  Instructions, Skills, prompts, and Workflows MUST reference named checks
+  instead of copying their commands.
+- `.agents/skill-tests.json` MUST remain the sole catalog of focused
+  repository-Skill tests. Only its explicitly registered, contract-validated
+  commands may run; automation MUST NOT discover and execute arbitrary files
+  from Skill directories.
+- Changes under `.agents/skills/` MUST pass the `agent-artifact-contracts` and
+  `skill-focused-contracts` named checks.
 
 ## GitHub Actions tools
 
@@ -176,8 +186,9 @@ authorization, Review Agent evidence, retry, and monitoring contracts.
 | `.github/` | CI workflows and cloud-simulation support. |
 | `cmd/wukongim/` | Product entrypoint that loads configuration and starts `internal/app`. |
 | `cmd/wkbench/` | Black-box benchmark CLI. |
+| `cmd/wkchatlifecycle/` | Fixed Run Plan materialization, Lease selector, and rehearsal-report validation. |
 | `cmd/wkcli/`, `cmd/wkdb/` | Operations and local read-only storage diagnostics. |
-| `cmd/wkcloud*/`, `cmd/wkanalysis/` | Cloud simulation, deployment, validation, viewing, and analysis tools. |
+| `cmd/wkcloud*/`, `cmd/wkanalysis/` | Cloud lease identity/lifecycle, simulation, deployment, validation, viewing, and analysis tools. |
 | `cmd/wkissueagent/` | JSON-only GitHub Actions entrypoint for the stateless Issue Agent. |
 | `cmd/wkreviewcheck/` | Frozen selector-only helper for composite Review Agent checks. |
 | `internal/access/` | HTTP, gateway, node RPC, manager, plugin, and cloud-analysis entry adapters. |

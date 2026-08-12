@@ -108,6 +108,13 @@ type ChannelRuntimeMeta struct {
 	WriteFenceUntilMS int64
 }
 
+// ChannelRuntimeMetaCreateResult is populated by Batch.Commit.
+// Created is meaningful only after Commit returns nil and remains false before Commit.
+type ChannelRuntimeMetaCreateResult struct {
+	// Created reports whether Commit inserted the row instead of finding it already present.
+	Created bool
+}
+
 // MonotonicResult describes how a runtime metadata upsert resolved.
 type MonotonicResult uint8
 

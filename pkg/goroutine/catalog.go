@@ -17,9 +17,9 @@ const (
 	ModuleChannel       Module = "channel"
 	ModuleDatabase      Module = "database"
 	ModulePresence      Module = "presence"
+	ModuleMessage       Module = "message"
 	ModuleChannelAppend Module = "channelappend"
 	ModuleDelivery      Module = "delivery"
-	ModuleConversation  Module = "conversation"
 	ModuleWebhook       Module = "webhook"
 	ModulePlugin        Module = "plugin"
 	ModuleBackup        Module = "backup"
@@ -67,97 +67,91 @@ type TaskSpec struct {
 }
 
 const (
-	TaskAppDetachedWorkqueue               TaskID = "app/detached_workqueue"
-	TaskAppTopCollector                    TaskID = "app/top_collector"
-	TaskAppPresenceTouch                   TaskID = "app/presence_touch"
-	TaskAppSeedJoin                        TaskID = "app/seed_join"
-	TaskAppConversationFlush               TaskID = "app/conversation_flush"
-	TaskAppConversationRoute               TaskID = "app/conversation_route"
-	TaskAppConversationDrain               TaskID = "app/conversation_drain"
-	TaskAppTaskAudit                       TaskID = "app/task_audit"
-	TaskAppPrometheusWait                  TaskID = "app/prometheus_wait"
-	TaskAppDeliveryMetadata                TaskID = "app/delivery_metadata"
-	TaskAPIHTTPServe                       TaskID = "api/http_serve"
-	TaskManagerHTTPServe                   TaskID = "manager/http_serve"
-	TaskManagerSnapshotFanout              TaskID = "manager/goroutine_snapshot_fanout"
-	TaskManagerDiagnosticsFanout           TaskID = "manager/diagnostics_fanout"
-	TaskManagerLatestMessagesFanout        TaskID = "manager/latest_messages_fanout"
-	TaskManagerOpsMCPAuditFanout           TaskID = "manager/ops_mcp_audit_fanout"
-	TaskGatewayAsyncDispatch               TaskID = "gateway/async_dispatch"
-	TaskGatewayAsyncAuth                   TaskID = "gateway/async_auth"
-	TaskGatewayIdleMonitor                 TaskID = "gateway/idle_monitor"
-	TaskGatewayTransportActor              TaskID = "gateway/transport_actor"
-	TaskGatewayTransportServe              TaskID = "gateway/transport_serve"
-	TaskDeliveryManagerAsync               TaskID = "delivery/manager_async"
-	TaskWebhookNotify                      TaskID = "webhook/notify"
-	TaskWebhookOnline                      TaskID = "webhook/online"
-	TaskWebhookOffline                     TaskID = "webhook/offline"
-	TaskTransportConnRead                  TaskID = "transport/conn_read"
-	TaskTransportConnWrite                 TaskID = "transport/conn_write"
-	TaskTransportRPCService                TaskID = "transport/rpc_service"
-	TaskTransportRPCExecutor               TaskID = "transport/rpc_executor"
-	TaskTransportRPCExecutorRelease        TaskID = "transport/rpc_executor_release"
-	TaskTransportClientObserver            TaskID = "transport/client_observer"
-	TaskTransportServerObserver            TaskID = "transport/server_observer"
-	TaskTransportAccept                    TaskID = "transport/accept"
-	TaskTransportConnectionCleanup         TaskID = "transport/connection_cleanup"
-	TaskClusterNodeControlWatch            TaskID = "cluster/node_control_watch"
-	TaskClusterRuntimeControlWatch         TaskID = "cluster/runtime_control_watch"
-	TaskClusterHealthReport                TaskID = "cluster/health_report"
-	TaskClusterTaskReconcile               TaskID = "cluster/task_reconcile"
-	TaskClusterPreferredLeader             TaskID = "cluster/preferred_leader"
-	TaskClusterChannelTick                 TaskID = "cluster/channel_tick"
-	TaskClusterChannelRetention            TaskID = "cluster/channel_retention"
-	TaskClusterChannelMigration            TaskID = "cluster/channel_migration"
-	TaskClusterSlotLeaderRefresh           TaskID = "cluster/slot_leader_refresh"
-	TaskClusterConversationTouch           TaskID = "cluster/conversation_touch"
-	TaskClusterRaftTransport               TaskID = "cluster/raft_transport"
-	TaskClusterObserveLoop                 TaskID = "cluster/observe_loop"
-	TaskControllerRaftRun                  TaskID = "controller/raft_run"
-	TaskControllerRaftApply                TaskID = "controller/raft_apply_scheduler"
-	TaskControllerRefresh                  TaskID = "controller/refresh_loop"
-	TaskSlotRaftWorker                     TaskID = "slot/raft_worker"
-	TaskSlotRaftTicker                     TaskID = "slot/raft_ticker"
-	TaskSlotRaftApplyWorker                TaskID = "slot/raft_apply_worker"
-	TaskSlotConditionWaiter                TaskID = "slot/condition_waiter"
-	TaskChannelReactor                     TaskID = "channel/reactor"
-	TaskChannelReactorClose                TaskID = "channel/reactor_close"
-	TaskChannelStoreClose                  TaskID = "channel/store_close"
-	TaskChannelTaskCancellation            TaskID = "channel/task_cancellation"
-	TaskChannelWorkerPool                  TaskID = "channel/worker_pool"
-	TaskDatabaseRaftWriteWorker            TaskID = "database/raft_write_worker"
-	TaskDatabaseRaftSnapshotGC             TaskID = "database/raft_snapshot_gc"
-	TaskDatabaseLatestMigration            TaskID = "database/latest_migration"
-	TaskDatabaseBackupStream               TaskID = "database/backup_stream"
-	TaskDatabaseCommitCoordinator          TaskID = "database/commit_coordinator"
-	TaskPresenceBatchResolve               TaskID = "presence/batch_resolve"
-	TaskConversationBatchRead              TaskID = "conversation/batch_read"
-	TaskChannelAppendRouter                TaskID = "channelappend/router"
-	TaskChannelAppendPoolRelease           TaskID = "channelappend/pool_release"
-	TaskChannelAppendRecipientResolve      TaskID = "channelappend/recipient_resolve"
-	TaskChannelAppendAdvanceScheduler      TaskID = "channelappend/advance_scheduler"
-	TaskChannelAppendDeliveryFanout        TaskID = "channelappend/delivery_fanout"
-	TaskChannelAppendMetrics               TaskID = "channelappend/metrics"
-	TaskChannelAppendWriterAdvance         TaskID = "channelappend/writer_advance"
-	TaskChannelAppendWorkerPool            TaskID = "channelappend/worker_pool"
-	TaskChannelAppendStopDrain             TaskID = "channelappend/stop_drain"
-	TaskChannelAppendPostCommitRetry       TaskID = "channelappend/post_commit_retry"
-	TaskDeliveryRetryWorker                TaskID = "delivery/retry_worker"
-	TaskDeliveryRetryDoneWait              TaskID = "delivery/retry_done_wait"
-	TaskChannelAppendDeliveryWorker        TaskID = "channelappend/delivery_worker"
-	TaskChannelAppendDeliveryDoneWait      TaskID = "channelappend/delivery_done_wait"
-	TaskChannelAppendDeliveryAdmissionWait TaskID = "channelappend/delivery_admission_wait"
-	TaskPluginHookWorker                   TaskID = "plugin/hook_worker"
-	TaskPluginHookFinalize                 TaskID = "plugin/hook_finalize"
-	TaskPluginLifecycleClose               TaskID = "plugin/lifecycle_close"
-	TaskPluginWatcher                      TaskID = "plugin/watcher"
-	TaskPluginProcessWait                  TaskID = "plugin/process_wait"
-	TaskPluginStopCallback                 TaskID = "plugin/stop_callback"
-	TaskBackupScheduledCoordinator         TaskID = "backup/scheduled_coordinator"
-	TaskBackupCoordinatorFenceMonitor      TaskID = "backup/coordinator_fence_monitor"
-	TaskBackupScheduledSlotExport          TaskID = "backup/scheduled_slot_export"
-	TaskObservabilityDashboard             TaskID = "observability/dashboard"
-	TaskObservabilityOpsMCPMetricsFanout   TaskID = "observability/ops_mcp_metrics_fanout"
+	TaskAppDetachedWorkqueue             TaskID = "app/detached_workqueue"
+	TaskAppTopCollector                  TaskID = "app/top_collector"
+	TaskAppPresenceTouch                 TaskID = "app/presence_touch"
+	TaskAppSeedJoin                      TaskID = "app/seed_join"
+	TaskAppTaskAudit                     TaskID = "app/task_audit"
+	TaskAppPrometheusWait                TaskID = "app/prometheus_wait"
+	TaskAppDeliveryMetadata              TaskID = "app/delivery_metadata"
+	TaskAPIHTTPServe                     TaskID = "api/http_serve"
+	TaskManagerHTTPServe                 TaskID = "manager/http_serve"
+	TaskManagerSnapshotFanout            TaskID = "manager/goroutine_snapshot_fanout"
+	TaskManagerDiagnosticsFanout         TaskID = "manager/diagnostics_fanout"
+	TaskManagerLatestMessagesFanout      TaskID = "manager/latest_messages_fanout"
+	TaskManagerOpsMCPAuditFanout         TaskID = "manager/ops_mcp_audit_fanout"
+	TaskGatewayAsyncDispatch             TaskID = "gateway/async_dispatch"
+	TaskGatewayAsyncAuth                 TaskID = "gateway/async_auth"
+	TaskGatewayIdleMonitor               TaskID = "gateway/idle_monitor"
+	TaskGatewayTransportActor            TaskID = "gateway/transport_actor"
+	TaskGatewayTransportServe            TaskID = "gateway/transport_serve"
+	TaskDeliveryManagerAsync             TaskID = "delivery/manager_async"
+	TaskOnlineDeliveryWorker             TaskID = "delivery/worker"
+	TaskOnlineDeliveryLifecycle          TaskID = "delivery/lifecycle"
+	TaskOnlineDeliveryOwnerPush          TaskID = "delivery/owner_push"
+	TaskWebhookNotify                    TaskID = "webhook/notify"
+	TaskWebhookOnline                    TaskID = "webhook/online"
+	TaskWebhookOffline                   TaskID = "webhook/offline"
+	TaskTransportConnRead                TaskID = "transport/conn_read"
+	TaskTransportConnWrite               TaskID = "transport/conn_write"
+	TaskTransportRPCService              TaskID = "transport/rpc_service"
+	TaskTransportRPCExecutor             TaskID = "transport/rpc_executor"
+	TaskTransportRPCExecutorRelease      TaskID = "transport/rpc_executor_release"
+	TaskTransportClientObserver          TaskID = "transport/client_observer"
+	TaskTransportServerObserver          TaskID = "transport/server_observer"
+	TaskTransportAccept                  TaskID = "transport/accept"
+	TaskTransportConnectionCleanup       TaskID = "transport/connection_cleanup"
+	TaskClusterNodeControlWatch          TaskID = "cluster/node_control_watch"
+	TaskClusterRuntimeControlWatch       TaskID = "cluster/runtime_control_watch"
+	TaskClusterHealthReport              TaskID = "cluster/health_report"
+	TaskClusterTaskReconcile             TaskID = "cluster/task_reconcile"
+	TaskClusterPreferredLeader           TaskID = "cluster/preferred_leader"
+	TaskClusterChannelTick               TaskID = "cluster/channel_tick"
+	TaskClusterChannelRetention          TaskID = "cluster/channel_retention"
+	TaskClusterChannelMigration          TaskID = "cluster/channel_migration"
+	TaskClusterSlotLeaderRefresh         TaskID = "cluster/slot_leader_refresh"
+	TaskClusterRaftTransport             TaskID = "cluster/raft_transport"
+	TaskClusterObserveLoop               TaskID = "cluster/observe_loop"
+	TaskControllerRaftRun                TaskID = "controller/raft_run"
+	TaskControllerRaftApply              TaskID = "controller/raft_apply_scheduler"
+	TaskControllerRefresh                TaskID = "controller/refresh_loop"
+	TaskSlotRaftWorker                   TaskID = "slot/raft_worker"
+	TaskSlotRaftTicker                   TaskID = "slot/raft_ticker"
+	TaskSlotRaftApplyWorker              TaskID = "slot/raft_apply_worker"
+	TaskSlotConditionWaiter              TaskID = "slot/condition_waiter"
+	TaskSlotPermissionBatch              TaskID = "slot/permission_batch"
+	TaskChannelReactor                   TaskID = "channel/reactor"
+	TaskChannelReactorClose              TaskID = "channel/reactor_close"
+	TaskChannelStoreClose                TaskID = "channel/store_close"
+	TaskChannelTaskCancellation          TaskID = "channel/task_cancellation"
+	TaskChannelWorkerPool                TaskID = "channel/worker_pool"
+	TaskDatabaseRaftWriteWorker          TaskID = "database/raft_write_worker"
+	TaskDatabaseRaftSnapshotGC           TaskID = "database/raft_snapshot_gc"
+	TaskDatabaseLatestMigration          TaskID = "database/latest_migration"
+	TaskDatabaseBackupStream             TaskID = "database/backup_stream"
+	TaskDatabaseCommitCoordinator        TaskID = "database/commit_coordinator"
+	TaskPresenceBatchResolve             TaskID = "presence/batch_resolve"
+	TaskMessagePermissionBatch           TaskID = "message/permission_batch"
+	TaskMessageDirectoryBatch            TaskID = "message/directory_batch"
+	TaskChannelAppendRouter              TaskID = "channelappend/router"
+	TaskChannelAppendPoolRelease         TaskID = "channelappend/pool_release"
+	TaskChannelAppendAdvanceScheduler    TaskID = "channelappend/advance_scheduler"
+	TaskChannelAppendMetrics             TaskID = "channelappend/metrics"
+	TaskChannelAppendWriterAdvance       TaskID = "channelappend/writer_advance"
+	TaskChannelAppendWorkerPool          TaskID = "channelappend/worker_pool"
+	TaskChannelAppendStopDrain           TaskID = "channelappend/stop_drain"
+	TaskChannelAppendPostCommitRetry     TaskID = "channelappend/post_commit_retry"
+	TaskPluginHookWorker                 TaskID = "plugin/hook_worker"
+	TaskPluginHookFinalize               TaskID = "plugin/hook_finalize"
+	TaskPluginLifecycleClose             TaskID = "plugin/lifecycle_close"
+	TaskPluginWatcher                    TaskID = "plugin/watcher"
+	TaskPluginProcessWait                TaskID = "plugin/process_wait"
+	TaskPluginStopCallback               TaskID = "plugin/stop_callback"
+	TaskBackupScheduledCoordinator       TaskID = "backup/scheduled_coordinator"
+	TaskBackupCoordinatorFenceMonitor    TaskID = "backup/coordinator_fence_monitor"
+	TaskBackupScheduledSlotExport        TaskID = "backup/scheduled_slot_export"
+	TaskObservabilityDashboard           TaskID = "observability/dashboard"
+	TaskObservabilityOpsMCPMetricsFanout TaskID = "observability/ops_mcp_metrics_fanout"
 )
 
 var defaultTaskCatalog = []TaskSpec{
@@ -165,9 +159,6 @@ var defaultTaskCatalog = []TaskSpec{
 	{ID: TaskAppTopCollector, Module: ModuleApp, Name: "top_collector", Kind: TaskKindSingleton, PanicPolicy: PanicPolicyRepanic, Expected: 1},
 	{ID: TaskAppPresenceTouch, Module: ModuleApp, Name: "presence_touch", Kind: TaskKindFixed, PanicPolicy: PanicPolicyRepanic, Expected: 2},
 	{ID: TaskAppSeedJoin, Module: ModuleApp, Name: "seed_join", Kind: TaskKindSingleton, PanicPolicy: PanicPolicyRepanic, Expected: 1},
-	{ID: TaskAppConversationFlush, Module: ModuleApp, Name: "conversation_flush", Kind: TaskKindSingleton, PanicPolicy: PanicPolicyRepanic, Expected: 1},
-	{ID: TaskAppConversationRoute, Module: ModuleApp, Name: "conversation_route", Kind: TaskKindDynamic, PanicPolicy: PanicPolicyRepanic},
-	{ID: TaskAppConversationDrain, Module: ModuleApp, Name: "conversation_drain", Kind: TaskKindBurst, PanicPolicy: PanicPolicyRecover},
 	{ID: TaskAppTaskAudit, Module: ModuleApp, Name: "task_audit", Kind: TaskKindSingleton, PanicPolicy: PanicPolicyRepanic, Expected: 1},
 	{ID: TaskAppPrometheusWait, Module: ModuleApp, Name: "prometheus_wait", Kind: TaskKindSingleton, PanicPolicy: PanicPolicyRecover, Expected: 1},
 	{ID: TaskAppDeliveryMetadata, Module: ModuleApp, Name: "delivery_metadata", Kind: TaskKindBurst, PanicPolicy: PanicPolicyRecover},
@@ -183,6 +174,9 @@ var defaultTaskCatalog = []TaskSpec{
 	{ID: TaskGatewayTransportActor, Module: ModuleGateway, Name: "transport_actor", Kind: TaskKindDynamic, PanicPolicy: PanicPolicyRepanic},
 	{ID: TaskGatewayTransportServe, Module: ModuleGateway, Name: "transport_serve", Kind: TaskKindDynamic, PanicPolicy: PanicPolicyRepanic},
 	{ID: TaskDeliveryManagerAsync, Module: ModuleDelivery, Name: "manager_async", Kind: TaskKindPool, PanicPolicy: PanicPolicyRepanic},
+	{ID: TaskOnlineDeliveryWorker, Module: ModuleDelivery, Name: "worker", Kind: TaskKindPool, PanicPolicy: PanicPolicyRepanic},
+	{ID: TaskOnlineDeliveryLifecycle, Module: ModuleDelivery, Name: "lifecycle", Kind: TaskKindBurst, PanicPolicy: PanicPolicyRepanic},
+	{ID: TaskOnlineDeliveryOwnerPush, Module: ModuleDelivery, Name: "owner_push", Kind: TaskKindBurst, PanicPolicy: PanicPolicyRepanic},
 	{ID: TaskWebhookNotify, Module: ModuleWebhook, Name: "notify", Kind: TaskKindPool, PanicPolicy: PanicPolicyRecover},
 	{ID: TaskWebhookOnline, Module: ModuleWebhook, Name: "online", Kind: TaskKindPool, PanicPolicy: PanicPolicyRecover},
 	{ID: TaskWebhookOffline, Module: ModuleWebhook, Name: "offline", Kind: TaskKindPool, PanicPolicy: PanicPolicyRecover},
@@ -204,7 +198,6 @@ var defaultTaskCatalog = []TaskSpec{
 	{ID: TaskClusterChannelRetention, Module: ModuleCluster, Name: "channel_retention", Kind: TaskKindSingleton, PanicPolicy: PanicPolicyRepanic, Expected: 1},
 	{ID: TaskClusterChannelMigration, Module: ModuleCluster, Name: "channel_migration", Kind: TaskKindSingleton, PanicPolicy: PanicPolicyRepanic, Expected: 1},
 	{ID: TaskClusterSlotLeaderRefresh, Module: ModuleCluster, Name: "slot_leader_refresh", Kind: TaskKindSingleton, PanicPolicy: PanicPolicyRepanic, Expected: 1},
-	{ID: TaskClusterConversationTouch, Module: ModuleCluster, Name: "conversation_touch", Kind: TaskKindBurst, PanicPolicy: PanicPolicyRecover},
 	{ID: TaskClusterRaftTransport, Module: ModuleCluster, Name: "raft_transport", Kind: TaskKindDynamic, PanicPolicy: PanicPolicyRepanic},
 	{ID: TaskClusterObserveLoop, Module: ModuleCluster, Name: "observe_loop", Kind: TaskKindSingleton, PanicPolicy: PanicPolicyRepanic, Expected: 1},
 	{ID: TaskControllerRaftRun, Module: ModuleController, Name: "raft_run", Kind: TaskKindSingleton, PanicPolicy: PanicPolicyRepanic, Expected: 1},
@@ -214,6 +207,7 @@ var defaultTaskCatalog = []TaskSpec{
 	{ID: TaskSlotRaftTicker, Module: ModuleSlot, Name: "raft_ticker", Kind: TaskKindSingleton, PanicPolicy: PanicPolicyRepanic, Expected: 1},
 	{ID: TaskSlotRaftApplyWorker, Module: ModuleSlot, Name: "raft_apply_worker", Kind: TaskKindDynamic, PanicPolicy: PanicPolicyRepanic},
 	{ID: TaskSlotConditionWaiter, Module: ModuleSlot, Name: "condition_waiter", Kind: TaskKindDynamic, PanicPolicy: PanicPolicyRecover},
+	{ID: TaskSlotPermissionBatch, Module: ModuleSlot, Name: "permission_batch", Kind: TaskKindBurst, PanicPolicy: PanicPolicyRepanic},
 	{ID: TaskChannelReactor, Module: ModuleChannel, Name: "reactor", Kind: TaskKindDynamic, PanicPolicy: PanicPolicyRepanic},
 	{ID: TaskChannelReactorClose, Module: ModuleChannel, Name: "reactor_close", Kind: TaskKindBurst, PanicPolicy: PanicPolicyRecover},
 	{ID: TaskChannelStoreClose, Module: ModuleChannel, Name: "store_close", Kind: TaskKindBurst, PanicPolicy: PanicPolicyRecover},
@@ -225,22 +219,16 @@ var defaultTaskCatalog = []TaskSpec{
 	{ID: TaskDatabaseBackupStream, Module: ModuleDatabase, Name: "backup_stream", Kind: TaskKindDynamic, PanicPolicy: PanicPolicyRecover},
 	{ID: TaskDatabaseCommitCoordinator, Module: ModuleDatabase, Name: "commit_coordinator", Kind: TaskKindDynamic, PanicPolicy: PanicPolicyRepanic},
 	{ID: TaskPresenceBatchResolve, Module: ModulePresence, Name: "batch_resolve", Kind: TaskKindBurst, PanicPolicy: PanicPolicyRecover},
-	{ID: TaskConversationBatchRead, Module: ModuleConversation, Name: "batch_read", Kind: TaskKindBurst, PanicPolicy: PanicPolicyRecover},
+	{ID: TaskMessagePermissionBatch, Module: ModuleMessage, Name: "permission_batch", Kind: TaskKindBurst, PanicPolicy: PanicPolicyRepanic},
+	{ID: TaskMessageDirectoryBatch, Module: ModuleMessage, Name: "directory_batch", Kind: TaskKindBurst, PanicPolicy: PanicPolicyRepanic},
 	{ID: TaskChannelAppendRouter, Module: ModuleChannelAppend, Name: "router", Kind: TaskKindBurst, PanicPolicy: PanicPolicyRepanic},
 	{ID: TaskChannelAppendPoolRelease, Module: ModuleChannelAppend, Name: "pool_release", Kind: TaskKindBurst, PanicPolicy: PanicPolicyRecover},
-	{ID: TaskChannelAppendRecipientResolve, Module: ModuleChannelAppend, Name: "recipient_resolve", Kind: TaskKindBurst, PanicPolicy: PanicPolicyRepanic},
 	{ID: TaskChannelAppendAdvanceScheduler, Module: ModuleChannelAppend, Name: "advance_scheduler", Kind: TaskKindSingleton, PanicPolicy: PanicPolicyRepanic, Expected: 1},
-	{ID: TaskChannelAppendDeliveryFanout, Module: ModuleChannelAppend, Name: "delivery_fanout", Kind: TaskKindBurst, PanicPolicy: PanicPolicyRepanic},
 	{ID: TaskChannelAppendMetrics, Module: ModuleChannelAppend, Name: "metrics", Kind: TaskKindSingleton, PanicPolicy: PanicPolicyRepanic, Expected: 1},
 	{ID: TaskChannelAppendWriterAdvance, Module: ModuleChannelAppend, Name: "writer_advance", Kind: TaskKindBurst, PanicPolicy: PanicPolicyRepanic},
 	{ID: TaskChannelAppendWorkerPool, Module: ModuleChannelAppend, Name: "worker_pool", Kind: TaskKindPool, PanicPolicy: PanicPolicyRepanic},
 	{ID: TaskChannelAppendStopDrain, Module: ModuleChannelAppend, Name: "stop_drain", Kind: TaskKindBurst, PanicPolicy: PanicPolicyRepanic},
 	{ID: TaskChannelAppendPostCommitRetry, Module: ModuleChannelAppend, Name: "post_commit_retry", Kind: TaskKindSingleton, PanicPolicy: PanicPolicyRepanic, Expected: 1},
-	{ID: TaskDeliveryRetryWorker, Module: ModuleDelivery, Name: "retry_worker", Kind: TaskKindDynamic, PanicPolicy: PanicPolicyRepanic},
-	{ID: TaskDeliveryRetryDoneWait, Module: ModuleDelivery, Name: "retry_done_wait", Kind: TaskKindSingleton, PanicPolicy: PanicPolicyRepanic, Expected: 1},
-	{ID: TaskChannelAppendDeliveryWorker, Module: ModuleChannelAppend, Name: "delivery_worker", Kind: TaskKindDynamic, PanicPolicy: PanicPolicyRepanic},
-	{ID: TaskChannelAppendDeliveryDoneWait, Module: ModuleChannelAppend, Name: "delivery_done_wait", Kind: TaskKindSingleton, PanicPolicy: PanicPolicyRepanic, Expected: 1},
-	{ID: TaskChannelAppendDeliveryAdmissionWait, Module: ModuleChannelAppend, Name: "delivery_admission_wait", Kind: TaskKindBurst, PanicPolicy: PanicPolicyRecover},
 	{ID: TaskPluginHookWorker, Module: ModulePlugin, Name: "hook_worker", Kind: TaskKindDynamic, PanicPolicy: PanicPolicyRepanic},
 	{ID: TaskPluginHookFinalize, Module: ModulePlugin, Name: "hook_finalize", Kind: TaskKindBurst, PanicPolicy: PanicPolicyRecover},
 	{ID: TaskPluginLifecycleClose, Module: ModulePlugin, Name: "lifecycle_close", Kind: TaskKindBurst, PanicPolicy: PanicPolicyRecover},

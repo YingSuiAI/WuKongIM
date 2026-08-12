@@ -68,8 +68,8 @@ Route: `/{lang}/server`
   - **网络与客户端接入 / Networking & Client Access** `/{lang}/server/configuration/networking` — TCP、WebSocket、HTTP、Manager 和节点通信监听配置。 / Listener settings for TCP, WebSocket, HTTP, Manager, and inter-node traffic.
   - **消息与存储 / Messages & Storage** `/{lang}/server/configuration/storage` — 消息保留、存储路径、队列、批处理和性能配置。 / Message retention, storage paths, queues, batching, and performance settings.
   - **安全与权限 / Security & Access** `/{lang}/server/configuration/security` — 认证、接口访问、Token、TLS 和敏感配置建议。 / Authentication, API access, tokens, TLS, and sensitive-setting guidance.
-  - **日志与可观测性 / Logs & Observability** `/{lang}/server/configuration/observability` — 日志、指标、Tracing 和诊断接口配置。 / Logging, metrics, tracing, and diagnostic endpoint settings.
-  - **配置参考 / Configuration Reference** `/{lang}/server/configuration/reference` — 列出 TOML 键、类型、默认值、环境变量和约束。 / Lists TOML keys, types, defaults, environment variables, and constraints.
+  - **日志与可观测性 / Logs & Observability** `/{lang}/server/configuration/observability` — 日志、指标、Prometheus、Top 和诊断接口配置。 / Logging, metrics, Prometheus, Top, and diagnostic endpoint settings.
+  - **配置参考 / Configuration Reference** `/{lang}/server/configuration/reference` — 列出 TOML 键、类型、环境变量、脱敏边界和约束。 / Lists TOML keys, types, environment variables, redaction boundaries, and constraints.
 
 - **运维 / Operations** `/{lang}/server/operations` — 管理、观察和安全变更生产集群。 / Manage, observe, and safely change production clusters.
 
@@ -85,7 +85,7 @@ Route: `/{lang}/server`
   - **wkcli / wkcli** `/{lang}/server/tools/wkcli` — 查看集群状态并执行受控运维操作。 / Inspects cluster state and performs controlled operations.
   - **wkdb / wkdb** `/{lang}/server/tools/wkdb` — 执行本地只读存储诊断和离线导入导出。 / Performs node-local read-only storage diagnostics and offline import/export.
   - **wkbench / wkbench** `/{lang}/server/tools/wkbench` — 执行黑盒压力测试、容量评估和回归验证。 / Runs black-box load tests, capacity evaluations, and regression checks.
-  - **诊断能力 / Diagnostics** `/{lang}/server/tools/diagnostics` — 汇总日志、指标、pprof 和只读 Operations MCP。 / Collects logs, metrics, pprof, and the read-only Operations MCP.
+  - **诊断能力 / Diagnostics** `/{lang}/server/tools/diagnostics` — 选择日志、指标、Top、pprof 和只读 Operations MCP。 / Selects among logs, metrics, Top, pprof, and the read-only Operations MCP.
 
 - **架构 / Architecture** `/{lang}/server/architecture` — 从控制、元数据、消息和网络层理解系统。 / Understand the system through control, metadata, messaging, and network layers.
 

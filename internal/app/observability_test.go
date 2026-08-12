@@ -10,18 +10,16 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
-	accessapi "github.com/WuKongIM/WuKongIM/internal/access/api"
 	"github.com/WuKongIM/WuKongIM/internal/observability/diagnostics"
 	"github.com/WuKongIM/WuKongIM/internal/runtime/channelappend"
-	"github.com/WuKongIM/WuKongIM/internal/runtime/conversationactive"
 	runtimedelivery "github.com/WuKongIM/WuKongIM/internal/runtime/delivery"
 	"github.com/WuKongIM/WuKongIM/internal/runtime/online"
 	authoritypresence "github.com/WuKongIM/WuKongIM/internal/runtime/presence"
-	conversationusecase "github.com/WuKongIM/WuKongIM/internal/usecase/conversation"
 	managementusecase "github.com/WuKongIM/WuKongIM/internal/usecase/management"
 	messageusecase "github.com/WuKongIM/WuKongIM/internal/usecase/message"
 	"github.com/WuKongIM/WuKongIM/internal/usecase/presence"
@@ -30,6 +28,7 @@ import (
 	channeltransport "github.com/WuKongIM/WuKongIM/pkg/channel/transport"
 	"github.com/WuKongIM/WuKongIM/pkg/channel/worker"
 	"github.com/WuKongIM/WuKongIM/pkg/cluster"
+	clusterchannels "github.com/WuKongIM/WuKongIM/pkg/cluster/channels"
 	"github.com/WuKongIM/WuKongIM/pkg/cluster/control"
 	clustertasks "github.com/WuKongIM/WuKongIM/pkg/cluster/tasks"
 	messagedb "github.com/WuKongIM/WuKongIM/pkg/db/message"
@@ -596,6 +595,63 @@ func TestMultiChannelObserverForwardsOptionalPullObservations(t *testing.T) {
 	}
 }
 
+func TestMultiChannelObserverForwardsMetaCreateOncePerChild(t *testing.T) {
+	reg := obsmetrics.New(1, "n1")
+	recorder := &recordingChannelMetaCreateObserver{}
+	observer := multiChannelObserver{channelMetricsObserver{metrics: reg}, recorder}
+
+	observer.ObserveChannelMetaCreate(3, clusterchannels.MetaCreateAlreadyExisting)
+
+	if recorder.calls != 1 || recorder.slotID != 3 || recorder.result != clusterchannels.MetaCreateAlreadyExisting {
+		t.Fatalf("recorder calls=%d slot=%d result=%q, want one forwarded observation", recorder.calls, recorder.slotID, recorder.result)
+	}
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("Gather() error = %v", err)
+	}
+	created := requireAppMetricFamily(t, families, "wukongim_channelv2_meta_created_total")
+	metric := findAppMetricByLabels(t, created, map[string]string{"slot_id": "3", "result": "already_existing"})
+	if got := metric.GetCounter().GetValue(); got != 1 {
+		t.Fatalf("meta create count = %v, want 1", got)
+	}
+}
+
+func TestComposedChannelObserverReheatExistingMetaDoesNotCountCreate(t *testing.T) {
+	reg := obsmetrics.New(1, "n1")
+	observer := multiChannelObserver{channelMetricsObserver{metrics: reg}}
+	id := ch.ChannelID{ID: "reheat-existing", Type: 1}
+	store := &existingRuntimeMetaStore{meta: metadb.ChannelRuntimeMeta{
+		ChannelID: id.ID, ChannelType: int64(id.Type), ChannelEpoch: 3, LeaderEpoch: 2,
+		Leader: 1, Replicas: []uint64{1}, ISR: []uint64{1}, MinISR: 1,
+		Status: uint8(ch.StatusActive),
+	}}
+	source := clusterchannels.NewSlotMetaSource(store, clusterchannels.SlotMetaSourceOptions{Observer: observer})
+
+	meta, err := source.EnsureChannelMeta(context.Background(), id)
+	if err != nil {
+		t.Fatalf("EnsureChannelMeta() error = %v", err)
+	}
+	if meta.ID != id || store.creates != 0 {
+		t.Fatalf("meta=%#v creates=%d, want existing reheat without create", meta, store.creates)
+	}
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("Gather() error = %v", err)
+	}
+	for _, name := range []string{"wukongim_channelv2_meta_created_total", "wukongim_channel_meta_created_total"} {
+		family := requireAppMetricFamily(t, families, name)
+		if got := len(family.GetMetric()); got != 3 {
+			t.Fatalf("metric family %q series = %d, want three closed zero baselines", name, got)
+		}
+		for _, result := range []string{"created", "already_existing", "error"} {
+			metric := findAppMetricByLabels(t, family, map[string]string{"slot_id": "1", "result": result})
+			if got := metric.GetCounter().GetValue(); got != 0 {
+				t.Fatalf("metric family %q result %q = %v, want zero create observations on reheat", name, result, got)
+			}
+		}
+	}
+}
+
 func TestMultiChannelObserverPreservesChildLeaderPullSampleRates(t *testing.T) {
 	first := &sampledLeaderPullObserver{every: 4}
 	second := &sampledLeaderPullObserver{every: 6}
@@ -620,6 +676,33 @@ type sampledLeaderPullObserver struct {
 	reactor.Observer
 	every uint64
 	opIDs []ch.OpID
+}
+
+type recordingChannelMetaCreateObserver struct {
+	reactor.Observer
+	calls  int
+	slotID uint32
+	result clusterchannels.MetaCreateResult
+}
+
+type existingRuntimeMetaStore struct {
+	meta    metadb.ChannelRuntimeMeta
+	creates int
+}
+
+func (s *existingRuntimeMetaStore) GetChannelRuntimeMeta(context.Context, string, int64) (metadb.ChannelRuntimeMeta, error) {
+	return s.meta, nil
+}
+
+func (s *existingRuntimeMetaStore) CreateChannelRuntimeMeta(context.Context, metadb.ChannelRuntimeMeta) (clusterchannels.RuntimeMetaCreateResult, error) {
+	s.creates++
+	return clusterchannels.RuntimeMetaCreateResult{Created: true}, nil
+}
+
+func (o *recordingChannelMetaCreateObserver) ObserveChannelMetaCreate(slotID uint32, result clusterchannels.MetaCreateResult) {
+	o.calls++
+	o.slotID = slotID
+	o.result = result
 }
 
 func (o *sampledLeaderPullObserver) LeaderPullObservationSampleEvery() uint64 {
@@ -1066,6 +1149,47 @@ func TestConfigureObservabilityWiresSlotReplicaMovePhaseObserver(t *testing.T) {
 	if clusterCfg.Slots.PreferredLeaderObserver == nil {
 		t.Fatal("Slot preferred leader observer was not wired")
 	}
+	if clusterCfg.MembershipObserver == nil {
+		t.Fatal("membership mutation observer was not wired")
+	}
+	clusterCfg.MembershipObserver.ObserveMembershipMutation(cluster.MembershipMutationObservation{
+		Directory: "ordinary", Operation: "upsert", Rows: 3,
+	})
+	families, err := app.metrics.Gather()
+	if err != nil {
+		t.Fatalf("Gather() error = %v", err)
+	}
+	metric := findAppMetricByLabels(t, requireAppMetricFamily(t, families, "wukongim_conversation_membership_mutation_rows_total"), map[string]string{
+		"directory": "ordinary", "operation": "upsert",
+	})
+	if got := metric.GetCounter().GetValue(); got != 3 {
+		t.Fatalf("membership mutation rows = %v, want 3", got)
+	}
+}
+
+func TestConfigureObservabilityMaterializesConfiguredLogicalSlotMetrics(t *testing.T) {
+	app := &App{cfg: Config{Observability: ObservabilityConfig{MetricsEnabled: true}}}
+	clusterCfg := cluster.Config{NodeID: 1}
+	clusterCfg.Slots.InitialSlotCount = 12
+
+	app.configureObservability(&clusterCfg)
+
+	families, err := app.metrics.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := requireAppMetricFamily(t, families, "wukongim_channelv2_meta_created_total")
+	if len(created.GetMetric()) != 36 {
+		t.Fatalf("metadata-create series = %d, want 36", len(created.GetMetric()))
+	}
+	for slotID := 1; slotID <= 12; slotID++ {
+		for _, result := range []string{"created", "already_existing", "error"} {
+			metric := findAppMetricByLabels(t, created, map[string]string{"slot_id": strconv.Itoa(slotID), "result": result})
+			if metric.GetCounter().GetValue() != 0 {
+				t.Fatalf("slot %d result %s was not a true zero", slotID, result)
+			}
+		}
+	}
 }
 
 func TestConfigureObservabilityWiresPreferredLeaderDiagnosticsWithoutMetrics(t *testing.T) {
@@ -1269,149 +1393,6 @@ func TestTransportMetricsObserverAggregatesConnectionLocalGauges(t *testing.T) {
 	})
 	if got := schedulerCapacity.GetGauge().GetValue(); got != 8 {
 		t.Fatalf("transport scheduler capacity after stopped = %v, want remaining source capacity 8", got)
-	}
-}
-
-func TestObservabilityConversationAuthorityMetricsObserverMapsCounters(t *testing.T) {
-	reg := obsmetrics.New(1, "n1")
-	observer := conversationAuthorityMetricsObserver{metrics: reg}
-
-	observer.ObserveConversationAuthorityAdmit(conversationAuthorityAdmitEvent{Result: "timeout"})
-	observer.ObserveConversationAuthorityCachePressure(conversationAuthorityCachePressureEvent{Phase: "admit", Result: "cache_pressure"})
-	observer.ObserveConversationAuthorityList(conversationAuthorityListEvent{Result: "route_not_ready"})
-	observer.ObserveConversationAuthorityHandoff(conversationAuthorityHandoffEvent{Result: "drained"})
-	observer.ObserveConversationActiveCache(conversationactive.CacheObservation{
-		Revision:         1,
-		Rows:             10,
-		DirtyRows:        4,
-		DirtyQueueRows:   4,
-		DirtyAgeBuckets:  3,
-		OldestDirtyAge:   3 * time.Second,
-		PressureDraining: true,
-		RowsByKind: map[metadb.ConversationKind]int{
-			metadb.ConversationKindNormal: 7,
-			metadb.ConversationKindCMD:    3,
-		},
-		DirtyRowsByKind: map[metadb.ConversationKind]int{
-			metadb.ConversationKindNormal: 1,
-			metadb.ConversationKindCMD:    3,
-		},
-	})
-	observer.ObserveConversationActiveMutation(conversationactive.MutationObservation{
-		Result: "ok", BecameDirty: 3, DirtyUpdated: 2, CooldownSuppressed: 4, Unchanged: 1,
-		LockWaitDuration: time.Millisecond, LockHoldDuration: 2 * time.Millisecond,
-		CacheObservationDuration: 3 * time.Millisecond,
-	})
-	observer.ObserveConversationActiveMutation(conversationactive.MutationObservation{
-		Result: "cache_pressure", LockWaitDuration: 4 * time.Millisecond, LockHoldDuration: 5 * time.Millisecond,
-	})
-	observer.ObserveConversationActiveFlush(conversationactive.FlushObservation{
-		Result:                "ok",
-		Selected:              7,
-		Persisted:             4,
-		Skipped:               1,
-		DeleteFenced:          2,
-		Cleared:               4,
-		VersionConflicts:      1,
-		Requeued:              1,
-		LaneWaitDuration:      time.Millisecond,
-		SelectDuration:        2 * time.Millisecond,
-		FilterDuration:        3 * time.Millisecond,
-		PersistDuration:       4 * time.Millisecond,
-		ClearDuration:         5 * time.Millisecond,
-		ClearLockWaitDuration: time.Millisecond,
-		ClearApplyDuration:    4 * time.Millisecond,
-		Duration:              6 * time.Millisecond,
-	})
-	observer.ObserveConversationActivePressure(conversationactive.PressureObservation{Event: "signal_received", WakeupWaitDuration: time.Millisecond})
-
-	families, err := reg.Gather()
-	if err != nil {
-		t.Fatalf("Gather() error = %v", err)
-	}
-	admit := requireAppMetricFamily(t, families, "wukongim_conversation_authority_admit_total")
-	if got := findAppMetricByLabels(t, admit, map[string]string{"result": "timeout"}).GetCounter().GetValue(); got != 1 {
-		t.Fatalf("authority admit metric = %v, want 1", got)
-	}
-	pressure := requireAppMetricFamily(t, families, "wukongim_conversation_authority_cache_pressure_total")
-	if got := findAppMetricByLabels(t, pressure, map[string]string{"phase": "admit", "result": "cache_pressure"}).GetCounter().GetValue(); got != 1 {
-		t.Fatalf("authority cache pressure metric = %v, want 1", got)
-	}
-	activeRows := requireAppMetricFamily(t, families, "wukongim_conversation_active_cache_rows")
-	if got := findAppMetricByLabels(t, activeRows, nil).GetGauge().GetValue(); got != 10 {
-		t.Fatalf("active cache rows metric = %v, want 10", got)
-	}
-	dirtyRows := requireAppMetricFamily(t, families, "wukongim_conversation_active_cache_dirty_rows")
-	if got := findAppMetricByLabels(t, dirtyRows, nil).GetGauge().GetValue(); got != 4 {
-		t.Fatalf("active cache dirty rows metric = %v, want 4", got)
-	}
-	dirtyQueueRows := requireAppMetricFamily(t, families, "wukongim_conversation_active_cache_dirty_queue_rows")
-	if got := findAppMetricByLabels(t, dirtyQueueRows, nil).GetGauge().GetValue(); got != 4 {
-		t.Fatalf("active cache dirty queue rows metric = %v, want 4", got)
-	}
-	dirtyAgeBuckets := requireAppMetricFamily(t, families, "wukongim_conversation_active_cache_dirty_age_buckets")
-	if got := findAppMetricByLabels(t, dirtyAgeBuckets, nil).GetGauge().GetValue(); got != 3 {
-		t.Fatalf("active cache dirty age buckets metric = %v, want 3", got)
-	}
-	kindRows := requireAppMetricFamily(t, families, "wukongim_conversation_active_cache_kind_rows")
-	if got := findAppMetricByLabels(t, kindRows, map[string]string{"kind": "normal"}).GetGauge().GetValue(); got != 7 {
-		t.Fatalf("normal active cache rows metric = %v, want 7", got)
-	}
-	if got := findAppMetricByLabels(t, kindRows, map[string]string{"kind": "cmd"}).GetGauge().GetValue(); got != 3 {
-		t.Fatalf("cmd active cache rows metric = %v, want 3", got)
-	}
-	kindDirtyRows := requireAppMetricFamily(t, families, "wukongim_conversation_active_cache_kind_dirty_rows")
-	if got := findAppMetricByLabels(t, kindDirtyRows, map[string]string{"kind": "normal"}).GetGauge().GetValue(); got != 1 {
-		t.Fatalf("normal active cache dirty rows metric = %v, want 1", got)
-	}
-	if got := findAppMetricByLabels(t, kindDirtyRows, map[string]string{"kind": "cmd"}).GetGauge().GetValue(); got != 3 {
-		t.Fatalf("cmd active cache dirty rows metric = %v, want 3", got)
-	}
-	flushRows := requireAppMetricFamily(t, families, "wukongim_conversation_active_flush_rows")
-	if got := findAppMetricByLabels(t, flushRows, map[string]string{"result": "ok", "kind": "persisted"}).GetHistogram().GetSampleSum(); got != 4 {
-		t.Fatalf("active flush persisted rows metric = %v, want 4", got)
-	}
-	flushRowsTotal := requireAppMetricFamily(t, families, "wukongim_conversation_active_flush_rows_total")
-	if got := findAppMetricByLabels(t, flushRowsTotal, map[string]string{"result": "ok", "stage": "requeued", "reason": "version_conflict"}).GetCounter().GetValue(); got != 1 {
-		t.Fatalf("active flush version-conflict rows metric = %v, want 1", got)
-	}
-	if got := findAppMetricByLabels(t, flushRowsTotal, map[string]string{"result": "ok", "stage": "skipped", "reason": "active_cooldown"}).GetCounter().GetValue(); got != 1 {
-		t.Fatalf("active flush cooldown rows metric = %v, want 1", got)
-	}
-	if got := findAppMetricByLabels(t, flushRowsTotal, map[string]string{"result": "ok", "stage": "skipped", "reason": "delete_barrier"}).GetCounter().GetValue(); got != 2 {
-		t.Fatalf("active flush delete-barrier rows metric = %v, want 2", got)
-	}
-	dirtyMutations := requireAppMetricFamily(t, families, "wukongim_conversation_active_dirty_mutations_total")
-	if got := findAppMetricByLabels(t, dirtyMutations, map[string]string{"event": "became_dirty"}).GetCounter().GetValue(); got != 3 {
-		t.Fatalf("active dirty became metric = %v, want 3", got)
-	}
-	if got := findAppMetricByLabels(t, dirtyMutations, map[string]string{"event": "cooldown_suppressed"}).GetCounter().GetValue(); got != 4 {
-		t.Fatalf("active cooldown suppressed metric = %v, want 4", got)
-	}
-	cacheLock := requireAppMetricFamily(t, families, "wukongim_conversation_active_cache_lock_duration_seconds")
-	if got := findAppMetricByLabels(t, cacheLock, map[string]string{"result": "ok", "phase": "wait"}).GetHistogram().GetSampleCount(); got != 1 {
-		t.Fatalf("active cache wait samples = %d, want 1", got)
-	}
-	if got := findAppMetricByLabels(t, cacheLock, map[string]string{"result": "cache_pressure", "phase": "wait"}).GetHistogram().GetSampleCount(); got != 1 {
-		t.Fatalf("active cache pressure wait samples = %d, want 1", got)
-	}
-	flushStages := requireAppMetricFamily(t, families, "wukongim_conversation_active_flush_stage_duration_seconds")
-	for _, stage := range []string{"clear_lock_wait", "clear_apply"} {
-		if got := findAppMetricByLabels(t, flushStages, map[string]string{"result": "ok", "stage": stage}).GetHistogram().GetSampleCount(); got != 1 {
-			t.Fatalf("active flush stage %s samples = %d, want 1", stage, got)
-		}
-	}
-	pressureEvents := requireAppMetricFamily(t, families, "wukongim_conversation_active_pressure_events_total")
-	if got := findAppMetricByLabels(t, pressureEvents, map[string]string{"event": "signal_received"}).GetCounter().GetValue(); got != 1 {
-		t.Fatalf("active pressure signal_received metric = %v, want 1", got)
-	}
-	list := requireAppMetricFamily(t, families, "wukongim_conversation_authority_list_total")
-	if got := findAppMetricByLabels(t, list, map[string]string{"result": "route_not_ready"}).GetCounter().GetValue(); got != 1 {
-		t.Fatalf("authority list metric = %v, want 1", got)
-	}
-	handoff := requireAppMetricFamily(t, families, "wukongim_conversation_authority_handoff_total")
-	if got := findAppMetricByLabels(t, handoff, map[string]string{"result": "drained"}).GetCounter().GetValue(); got != 1 {
-		t.Fatalf("authority handoff metric = %v, want 1", got)
 	}
 }
 
@@ -1791,65 +1772,6 @@ func TestObservabilityPresenceTouchFlushPreCanceledObservesOnceWithoutExpiry(t *
 	}
 }
 
-func TestObservabilityConversationSyncMetricsObserverMapsCounters(t *testing.T) {
-	reg := obsmetrics.New(1, "n1")
-	observer := conversationSyncMetricsObserver{metrics: reg}
-
-	observer.ObserveConversationSync(accessapi.ConversationSyncObservation{
-		Result:             "ok",
-		Duration:           15 * time.Millisecond,
-		OnlyUnread:         true,
-		WithRecents:        true,
-		ReturnedItems:      4,
-		OverlayItems:       2,
-		RecentLoadDuration: 3 * time.Millisecond,
-	})
-
-	families, err := reg.Gather()
-	if err != nil {
-		t.Fatalf("Gather() error = %v", err)
-	}
-	total := requireAppMetricFamily(t, families, "wukongim_conversation_sync_total")
-	if got := findAppMetricByLabels(t, total, map[string]string{
-		"result":       "ok",
-		"only_unread":  "true",
-		"with_recents": "true",
-	}).GetCounter().GetValue(); got != 1 {
-		t.Fatalf("conversation sync total metric = %v, want 1", got)
-	}
-	duration := requireAppMetricFamily(t, families, "wukongim_conversation_sync_duration_seconds")
-	if got := findAppMetricByLabels(t, duration, map[string]string{
-		"result":       "ok",
-		"only_unread":  "true",
-		"with_recents": "true",
-	}).GetHistogram().GetSampleSum(); math.Abs(got-0.015) > 0.000001 {
-		t.Fatalf("conversation sync duration metric = %v, want 0.015", got)
-	}
-	returned := requireAppMetricFamily(t, families, "wukongim_conversation_sync_returned_items")
-	if got := findAppMetricByLabels(t, returned, map[string]string{
-		"result":       "ok",
-		"only_unread":  "true",
-		"with_recents": "true",
-	}).GetHistogram().GetSampleSum(); got != 4 {
-		t.Fatalf("conversation sync returned items metric = %v, want 4", got)
-	}
-	overlay := requireAppMetricFamily(t, families, "wukongim_conversation_sync_overlay_items")
-	if got := findAppMetricByLabels(t, overlay, map[string]string{
-		"result":       "ok",
-		"only_unread":  "true",
-		"with_recents": "true",
-	}).GetHistogram().GetSampleSum(); got != 2 {
-		t.Fatalf("conversation sync overlay items metric = %v, want 2", got)
-	}
-	recentLoad := requireAppMetricFamily(t, families, "wukongim_conversation_sync_recent_load_duration_seconds")
-	if got := findAppMetricByLabels(t, recentLoad, map[string]string{
-		"result":      "ok",
-		"only_unread": "true",
-	}).GetHistogram().GetSampleSum(); math.Abs(got-0.003) > 0.000001 {
-		t.Fatalf("conversation sync recent load duration metric = %v, want 0.003", got)
-	}
-}
-
 func TestPluginHookMetricsObserverMapsPersistAfterCounters(t *testing.T) {
 	reg := obsmetrics.New(1, "n1")
 	observer := pluginHookMetricsObserver{metrics: reg}
@@ -2181,7 +2103,7 @@ func TestNewWiresDebugSnapshotAPI(t *testing.T) {
 			DebugAPIEnabled: true,
 		},
 	}
-	app, err := newTestApp(t, cfg, WithCluster(&fakeCluster{}))
+	app, err := newTestApp(t, cfg, WithCluster(&debugClusterRuntimeStub{control: control.Snapshot{Revision: 1}}))
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -2546,45 +2468,24 @@ func TestNewRejectsNegativeDeepDiagnosticsConfig(t *testing.T) {
 	}
 }
 
-func TestDeliveryObserverLogsAsyncErrorsWithoutMetrics(t *testing.T) {
-	logger := &recordingAppLogger{}
-	observer := deliveryMetricsObserver{logger: logger}
-
-	observer.ObserveRetry(runtimedelivery.RetryEvent{
-		Event:      runtimedelivery.DeliveryRetryEventDrop,
-		Result:     runtimedelivery.DeliveryResultMaxAttempts,
-		ErrorClass: runtimedelivery.DeliveryErrorClassRetryable,
-		Attempt:    3,
-		QueueDepth: 7,
-	})
-	observer.ObserveManagerTerminal(runtimedelivery.ManagerTerminalEvent{
-		Result:     runtimedelivery.DeliveryResultError,
-		ErrorClass: runtimedelivery.DeliveryErrorClassError,
-		QueueDepth: 1,
-	})
-
-	requireAppLogEvent(t, logger, "WARN", "internal.app.delivery.retry_failed")
-	requireAppLogEvent(t, logger, "WARN", "internal.app.delivery.manager_terminal_failed")
-}
-
-func TestDeliveryMessageObserverMapsRecipientDeliveryWorkerMetrics(t *testing.T) {
+func TestOnlineDeliveryObserverMapsRuntimeMetrics(t *testing.T) {
 	reg := obsmetrics.New(1, "n1")
-	observer := deliveryMessageObserver{app: &App{metrics: reg}}
+	observer := onlineDeliveryObserver{app: &App{metrics: reg}}
 
-	observer.SetChannelAppendRecipientDeliveryQueue(channelappend.RecipientDeliveryQueueObservation{
+	observer.ObservePlanAdmission(runtimedelivery.PlanAdmissionEvent{
+		Result:        runtimedelivery.ObservationResultTimeout,
 		QueueDepth:    3,
 		QueueCapacity: 8,
+		Duration:      2 * time.Millisecond,
 	})
-	observer.SetChannelAppendRecipientDeliveryWorkerPressure(channelappend.RecipientDeliveryWorkerPressureObservation{
-		Inflight: 2,
-		Capacity: 4,
+	observer.SetRuntimePressure(runtimedelivery.RuntimePressureEvent{
+		QueueDepth:    3,
+		QueueCapacity: 8,
+		Inflight:      2,
+		Workers:       4,
 	})
-	observer.ObserveChannelAppendRecipientDeliveryAdmission(channelappend.RecipientDeliveryAdmissionObservation{
-		Result:   "timeout",
-		Duration: 2 * time.Millisecond,
-	})
-	observer.ObserveChannelAppendRecipientDeliveryProcess(channelappend.RecipientDeliveryProcessObservation{
-		Result:     "ok",
+	observer.ObservePlanTerminal(runtimedelivery.PlanTerminalEvent{
+		Result:     runtimedelivery.ObservationResultOK,
 		Recipients: 4,
 		Duration:   5 * time.Millisecond,
 	})
@@ -2619,6 +2520,10 @@ func TestDeliveryMessageObserverMapsChannelAppendPostCommitPressure(t *testing.T
 	reg := obsmetrics.New(1, "n1")
 	observer := deliveryMessageObserver{app: &App{metrics: reg}}
 
+	observer.SetChannelAppendRouterGroupPressure(channelappend.RouterGroupPressureObservation{
+		Inflight: 13,
+		Capacity: 192,
+	})
 	observer.SetChannelAppendWriterPressure(channelappend.WriterPressureObservation{
 		PostCommitHandoffDepth:    11,
 		PostCommitHandoffCapacity: 17,
@@ -2641,6 +2546,8 @@ func TestDeliveryMessageObserverMapsChannelAppendPostCommitPressure(t *testing.T
 	assertGauge("wukongim_channelappend_post_commit_handoff_capacity", 17)
 	assertGauge("wukongim_channelappend_post_commit_retry_queue_depth", 3)
 	assertGauge("wukongim_channelappend_post_commit_retry_contended", 1)
+	assertGauge("wukongim_channelappend_router_group_inflight", 13)
+	assertGauge("wukongim_channelappend_router_group_capacity", 192)
 }
 
 func TestDeliveryMessageObserverLogsChannelAppendPostCommitFailure(t *testing.T) {
@@ -2685,99 +2592,6 @@ func TestDeliveryMessageObserverLogsChannelAppendPostCommitFailure(t *testing.T)
 	requireAppLogField(t, entry, "dispatchBatchSize", 3)
 	requireAppLogField(t, entry, "dispatchOwnerNodeID", uint64(7))
 	requireAppLogField(t, entry, "dispatchOwnerRouteNum", 2)
-}
-
-func TestDeliveryMessageObserverWarnsExpectedRoutePostCommitFailure(t *testing.T) {
-	logger := &recordingAppLogger{}
-	app := &App{logger: logger}
-	observer := deliveryMessageObserver{app: app}
-
-	observer.ObserveChannelAppendPostCommitFailure(channelappend.PostCommitFailureObservation{
-		ChannelID:   "room",
-		ChannelType: 2,
-		MessageID:   42,
-		MessageSeq:  7,
-		Attempt:     1,
-		Result:      "stale_route",
-		Phase:       "conversation_active",
-		Err:         fmt.Errorf("conversation active: %w", conversationusecase.ErrStaleRoute),
-	})
-
-	entry := requireAppLogEvent(t, logger, "WARN", "internal.app.channelappend.post_commit_failed")
-	requireAppLogField(t, entry, "phase", "conversation_active")
-	requireAppLogField(t, entry, "result", "stale_route")
-	for _, logged := range logger.entriesSnapshot() {
-		if logged.level == "ERROR" {
-			t.Fatalf("unexpected ERROR log for retryable post-commit route failure: %#v", logged)
-		}
-	}
-}
-
-func TestDeliveryMetricsObserverMapsAckEventToGauge(t *testing.T) {
-	reg := obsmetrics.New(1, "n1")
-	observer := deliveryMetricsObserver{metrics: reg}
-
-	observer.ObserveAck(runtimedelivery.AckEvent{PendingCount: 6})
-
-	families, err := reg.Gather()
-	if err != nil {
-		t.Fatalf("Gather() error = %v", err)
-	}
-	ackBindings := requireAppMetricFamily(t, families, "wukongim_delivery_ack_bindings")
-	if got := findAppMetricByLabels(t, ackBindings, nil).GetGauge().GetValue(); got != 6 {
-		t.Fatalf("delivery ack bindings = %v, want 6", got)
-	}
-}
-
-func TestCombinedDeliveryObserverFansOutAckEvents(t *testing.T) {
-	reg := obsmetrics.New(1, "n1")
-	collector := newTopCollector(topCollectorOptions{
-		ClusterSnapshot: func() cluster.Snapshot {
-			return cluster.Snapshot{RoutesReady: true, SlotsReady: true, ChannelsReady: true}
-		},
-	})
-	observer := combineDeliveryObservers(
-		deliveryMetricsObserver{metrics: reg},
-		topDeliveryObserver{top: collector},
-	)
-	ackObserver, ok := observer.(runtimedelivery.AckObserver)
-	if !ok {
-		t.Fatalf("combined observer does not implement AckObserver")
-	}
-	if _, ok := observer.(runtimedelivery.AckBatchObserver); ok {
-		t.Fatalf("combined observer unexpectedly implements AckBatchObserver; batch metrics must be enabled explicitly")
-	}
-
-	collector.recordSampleAt(time.Unix(100, 0))
-	ackObserver.ObserveAck(runtimedelivery.AckEvent{PendingCount: 9})
-	deliveryMetricsObserver{metrics: reg}.ObserveAckBatch(runtimedelivery.AckBatchEvent{
-		Phase: runtimedelivery.DeliveryAckBatchPhaseBind, Outcome: runtimedelivery.DeliveryAckBatchOutcomePartial,
-		Items: 3, Shards: 2, Rejected: 1, Duration: time.Millisecond,
-	})
-	collector.recordSampleAt(time.Unix(110, 0))
-
-	families, err := reg.Gather()
-	if err != nil {
-		t.Fatalf("Gather() error = %v", err)
-	}
-	ackBindings := requireAppMetricFamily(t, families, "wukongim_delivery_ack_bindings")
-	if got := findAppMetricByLabels(t, ackBindings, nil).GetGauge().GetValue(); got != 9 {
-		t.Fatalf("metrics ack bindings = %v, want 9", got)
-	}
-	ackBatch := requireAppMetricFamily(t, families, "wukongim_delivery_ack_batch_total")
-	if got := findAppMetricByLabels(t, ackBatch, map[string]string{"phase": "bind", "outcome": "partial"}).GetCounter().GetValue(); got != 1 {
-		t.Fatalf("metrics ack bind batch = %v, want 1", got)
-	}
-	snapshot, err := collector.SnapshotTop(context.Background(), accessapi.TopSnapshotQuery{
-		Window: 10 * time.Second,
-		View:   accessapi.TopViewDelivery,
-	})
-	if err != nil {
-		t.Fatalf("SnapshotTop() error = %v", err)
-	}
-	if snapshot.Delivery == nil || snapshot.Delivery.AckBindings != 9 {
-		t.Fatalf("top ack bindings = %#v, want 9", snapshot.Delivery)
-	}
 }
 
 type recordingInternalSendTraceSink struct {

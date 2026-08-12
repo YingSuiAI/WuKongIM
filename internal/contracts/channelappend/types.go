@@ -81,6 +81,9 @@ type AuthorityTarget struct {
 	LeaderEpoch uint64
 	// RouteGeneration versions the complete authoritative channel routing record.
 	RouteGeneration uint64
+	// WriteFenced reports that the resolved authority currently blocks new appends.
+	// The local writer may still recover an already committed idempotent retry.
+	WriteFenced bool
 	// Large reports whether the channel should use paged subscriber fanout.
 	Large bool
 	// SubscriberMutationVersion identifies the subscriber-list version used for recipient cache invalidation.
@@ -272,6 +275,9 @@ type AppendBatchRequest struct {
 	CommitMode CommitMode
 	// OmitResultPayload lets appenders skip payloads in successful item results when callers only need id and sequence.
 	OmitResultPayload bool
+	// ServerAllocatedMessageIDs proves every message ID in this request was issued by the node-scoped allocator.
+	// Storage may skip only its existing-message-ID lookup; idempotency-key validation remains strict.
+	ServerAllocatedMessageIDs bool
 }
 
 // Clone returns an independent copy of the append request.
@@ -343,7 +349,7 @@ type CommittedEnvelope struct {
 	Payload []byte
 	// RedDot carries the client red-dot flag for delivery side effects.
 	RedDot bool
-	// SyncOnce marks a one-shot sync command for post-commit conversation projection.
+	// SyncOnce marks a one-shot command that is persisted in the separate CMD Channel log.
 	SyncOnce bool
 	// MessageScopedUIDs are request-scoped one-shot delivery targets.
 	MessageScopedUIDs []string
@@ -362,21 +368,6 @@ type Recipient struct {
 	UID string
 	// JoinSeq is the first visible channel sequence for this recipient.
 	JoinSeq uint64
-}
-
-// RecipientBatch carries one committed envelope and the recipients to process together.
-type RecipientBatch struct {
-	// Event is the committed message being processed.
-	Event CommittedEnvelope
-	// Recipients are the selected recipients for this effect batch.
-	Recipients []Recipient
-}
-
-// Clone returns an independent copy of the recipient batch.
-func (b RecipientBatch) Clone() RecipientBatch {
-	b.Event = b.Event.Clone()
-	b.Recipients = append([]Recipient(nil), b.Recipients...)
-	return b
 }
 
 // SubscriberPageRequest describes one channel subscriber page scan.
@@ -403,61 +394,6 @@ type SubscriberPage struct {
 func (p SubscriberPage) Clone() SubscriberPage {
 	p.Recipients = append([]Recipient(nil), p.Recipients...)
 	return p
-}
-
-// Route describes one online recipient endpoint resolved by presence.
-type Route struct {
-	// UID is the recipient user ID for this endpoint.
-	UID string
-	// OwnerNodeID is the node that owns the recipient gateway session.
-	OwnerNodeID uint64
-	// OwnerBootID fences stale owner-node process incarnations.
-	OwnerBootID uint64
-	// OwnerSeq fences stale owner-session authority observations.
-	OwnerSeq uint64
-	// SessionID is the recipient owner-local gateway session identifier.
-	SessionID uint64
-	// DeviceID identifies the recipient client device.
-	DeviceID string
-	// DeviceFlag carries protocol device category metadata.
-	DeviceFlag uint8
-	// DeviceLevel carries protocol device priority metadata.
-	DeviceLevel uint8
-}
-
-// PushCommand groups recipient routes owned by the same node for one envelope.
-type PushCommand struct {
-	// OwnerNodeID is the recipient owner node that should accept the push.
-	OwnerNodeID uint64
-	// Envelope is the immutable committed message being pushed.
-	Envelope CommittedEnvelope
-	// Routes are the recipient endpoints owned by OwnerNodeID.
-	Routes []Route
-}
-
-// Clone returns an independent copy of the push command.
-func (c PushCommand) Clone() PushCommand {
-	c.Envelope = c.Envelope.Clone()
-	c.Routes = append([]Route(nil), c.Routes...)
-	return c
-}
-
-// PushResult reports how an owner node classified pushed recipient routes.
-type PushResult struct {
-	// Accepted routes were accepted for delivery by the owner node.
-	Accepted []Route
-	// Retryable routes should be retried by a later runtime stage.
-	Retryable []Route
-	// Dropped routes should not be retried.
-	Dropped []Route
-}
-
-// Clone returns an independent copy of the push result.
-func (r PushResult) Clone() PushResult {
-	r.Accepted = append([]Route(nil), r.Accepted...)
-	r.Retryable = append([]Route(nil), r.Retryable...)
-	r.Dropped = append([]Route(nil), r.Dropped...)
-	return r
 }
 
 func cloneMessages(in []Message) []Message {

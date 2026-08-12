@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,8 +22,27 @@ func TestRootTOMLExampleLoads(t *testing.T) {
 	if cfg.Cluster.Slots.InitialSlotCount != 10 {
 		t.Fatalf("InitialSlotCount = %d, want 10", cfg.Cluster.Slots.InitialSlotCount)
 	}
-	if cfg.Cluster.Channel.RPCBatchMaxItems != 8 {
-		t.Fatalf("RPCBatchMaxItems = %d, want 8", cfg.Cluster.Channel.RPCBatchMaxItems)
+	if cfg.Cluster.Channel.RPCWorkers != 160 || cfg.Cluster.Channel.RPCBatchMaxItems != 16 {
+		t.Fatalf("Channel RPC workers/batch = %d/%d, want 160/16", cfg.Cluster.Channel.RPCWorkers, cfg.Cluster.Channel.RPCBatchMaxItems)
+	}
+	if cfg.Cluster.Storage.CommitShards != 1 {
+		t.Fatalf("CommitShards = %d, want 1", cfg.Cluster.Storage.CommitShards)
+	}
+}
+
+func TestScriptThreeNodeClusterUsesQPSValidatedRPCDefaults(t *testing.T) {
+	for node := 1; node <= 3; node++ {
+		path := filepath.Join("..", "..", "scripts", "wukongim", fmt.Sprintf("wukongim-node%d.toml", node))
+		cfg, err := Load(Options{Args: []string{"-config", path}, Environ: cleanEnv()})
+		if err != nil {
+			t.Fatalf("Load(%s) error = %v", path, err)
+		}
+		if cfg.Cluster.Channel.RPCWorkers != 160 || cfg.Cluster.Channel.RPCBatchMaxItems != 16 {
+			t.Fatalf("%s Channel RPC workers/batch = %d/%d, want 160/16", path, cfg.Cluster.Channel.RPCWorkers, cfg.Cluster.Channel.RPCBatchMaxItems)
+		}
+		if cfg.Cluster.Storage.CommitShards != 1 {
+			t.Fatalf("%s CommitShards = %d, want 1", path, cfg.Cluster.Storage.CommitShards)
+		}
 	}
 }
 
@@ -37,21 +57,25 @@ func TestCommandTOMLExampleLoads(t *testing.T) {
 	if cfg.Cluster.Slots.InitialSlotCount != 10 || cfg.Cluster.Slots.HashSlotCount != 256 {
 		t.Fatalf("cmd topology = logical Slot Groups %d / physical hash slots %d, want 10 / 256", cfg.Cluster.Slots.InitialSlotCount, cfg.Cluster.Slots.HashSlotCount)
 	}
-	if cfg.Cluster.Channel.RPCBatchMaxItems != 8 {
-		t.Fatalf("RPCBatchMaxItems = %d, want 8", cfg.Cluster.Channel.RPCBatchMaxItems)
+	if cfg.Cluster.Channel.RPCBatchMaxItems != 16 {
+		t.Fatalf("RPCBatchMaxItems = %d, want 16", cfg.Cluster.Channel.RPCBatchMaxItems)
 	}
 }
 
 func TestScriptSingleNodeClusterUsesTenLogicalAndDefaultPhysicalSlots(t *testing.T) {
-	cfg, err := Load(Options{Args: []string{"-config", filepath.Join("..", "..", "scripts", "wukongim", "wukongim.toml")}, Environ: cleanEnv()})
+	path := filepath.Join("..", "..", "scripts", "wukongim", "wukongim.toml")
+	cfg, err := Load(Options{Args: []string{"-config", path}, Environ: cleanEnv()})
 	if err != nil {
 		t.Fatalf("Load(script example) error = %v", err)
 	}
 	if cfg.Cluster.Slots.InitialSlotCount != 10 || cfg.Cluster.Slots.HashSlotCount != 256 {
 		t.Fatalf("script topology = logical Slot Groups %d / physical hash slots %d, want 10 / 256", cfg.Cluster.Slots.InitialSlotCount, cfg.Cluster.Slots.HashSlotCount)
 	}
-	if cfg.Cluster.Channel.RPCBatchMaxItems != 8 {
-		t.Fatalf("RPCBatchMaxItems = %d, want 8", cfg.Cluster.Channel.RPCBatchMaxItems)
+	if cfg.Cluster.Channel.RPCBatchMaxItems != 16 {
+		t.Fatalf("RPCBatchMaxItems = %d, want 16", cfg.Cluster.Channel.RPCBatchMaxItems)
+	}
+	if cfg.Cluster.Storage.CommitShards != 1 {
+		t.Fatalf("%s CommitShards = %d, want 1", path, cfg.Cluster.Storage.CommitShards)
 	}
 }
 
@@ -71,6 +95,41 @@ func TestSingleNodeClusterPrometheusExamplesUseDedicatedDefaultPort(t *testing.T
 				t.Fatalf("%s must use the dedicated app-managed Prometheus port 9099", file)
 			}
 		})
+	}
+}
+
+func TestGatewayExamplesUseQualifiedAsyncSendBatchLimit(t *testing.T) {
+	files := []string{filepath.Join("..", "..", "wukongim.toml.example")}
+	for _, pattern := range []string{
+		filepath.Join("..", "..", "cmd", "wukongim", "*.toml.example"),
+		filepath.Join("..", "..", "scripts", "wukongim", "*.toml"),
+	} {
+		matches, err := filepath.Glob(pattern)
+		if err != nil {
+			t.Fatalf("Glob(%s) error = %v", pattern, err)
+		}
+		files = append(files, matches...)
+	}
+
+	want := "# Maximum SEND frames coalesced into one asynchronous gateway dispatch batch.\n" +
+		"# The 128-record limit is qualified for sustained high-QPS workloads.\n" +
+		"default_session_async_send_batch_max_records = 128"
+	foundGateway := 0
+	for _, file := range files {
+		content, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatalf("ReadFile(%s) error = %v", file, err)
+		}
+		if !strings.Contains(string(content), "[gateway]") {
+			continue
+		}
+		foundGateway++
+		if !strings.Contains(string(content), want) {
+			t.Errorf("%s must document the qualified gateway async SEND batch limit", file)
+		}
+	}
+	if foundGateway == 0 {
+		t.Fatal("no shipped [gateway] examples found")
 	}
 }
 
@@ -122,7 +181,8 @@ func TestDeliveryExamplesDocumentRecipientWorkerConcurrency(t *testing.T) {
 		files = append(files, matches...)
 	}
 
-	want := "# Maximum recipient-authority delivery batches processed concurrently by this node.\n" +
+	want := "# Number of stable Channel-order delivery shards processed concurrently by this node.\n" +
+		"# Plans for one Channel stay FIFO on one shard; different Channels may run in parallel.\n" +
 		"# This is independent from channel_append.recipient_authority_dispatch_concurrency.\n" +
 		"recipient_worker_concurrency = 100"
 	foundDelivery := 0

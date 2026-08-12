@@ -12,8 +12,9 @@ Shared wkbench schema, plan, report, and bench/v1 API DTOs live in `pkg/bench/mo
 - `devsim`: long-running development simulator supervisor used by `wkbench dev-sim`; it derives compact simulator config into normal wkbench target/scenario/plan inputs and runs an in-process worker.
 - `capacity`: maximum stable ingress QPS search used by `wkbench capacity send` and `wkbench capacity hot-channel`; it discovers target gateway addresses, generates attempt scenarios, runs a temporary local worker, and writes capacity summaries.
 - `messageevent`: fixed-shape `/message/event` stream pressure runner used by `wkbench capacity message-event`; it creates channels through public `/channel`, sends stream base messages through `/message/send`, sends cache-only `stream.delta` updates, completes each stream with `stream.finish`, captures `/metrics` before/after snapshots, and writes message event reports.
+- `chatlifecycle`: deterministic three-worker chat lifecycle planning, authenticated protocol-v2 worker control, coordinator-owned globally apportioned grant delivery, bounded verification/evidence, group setup, preflight, service observation, and an independent bounded natural hot-cold-reheat proof module. Coordinator assignment, start, grant, status, qualification, and final barriers use fixed concurrent worker rounds; observation spans readiness and the measured run. Empty-dataset bootstrap uses one fixed global 25-login/second stream until all 10,000 users are simultaneously online; each login still completes real WKProto CONNECT/CONNACK and a fresh version-zero full conversation sync, and each worker retains 256 concurrent starting slots. Missed or unused bootstrap credit is discarded rather than caught up in a burst. Coordinator-controlled workers remain all-new after reaching their local shares until the first global grant clears bootstrap credit and fractional remainder and begins the unchanged 250,000-new-user/day 80/20 steady stream. The first complete grant remains a pre-clock control round and uses the ordinary bounded control deadline; after it crosses all workers and fixes the measured-run start, each later fail-closed sequenced grant vector is capped to the one-second cadence. Assignments disable worker-local primary token release, and that one vector drives all three workers every logical second without resumable state. The lifecycle proof leases only current revisit timers from a fixed 12-by-100 primary owner index backed by per-Slot standby heaps whose aggregate index is bounded by Engine WorkCapacity; primary removal promotes the best valid same-Slot standby without expanding the at-most-1,200 lease scan. Each lease carries an exact generation-local timer token and post-activity version. The proof asynchronously probes three nodes without eviction, transiently merges every bounded batch before one atomic state transition, tolerates bounded staggered replica cooling, admits only that exact existing scheduled real SEND through a fenced worker call strictly before its deterministic due instant, proves sequence continuity from post-reheat probes, and reconciles fixed per-Slot metadata-create deltas against physical-hash-slot expected-unique growth. Product-transition failures use fixed identity-free reason counters whose saturating total equals the aggregate product-failure count even when an atomic observation batch rolls back. Later activity invalidates the lease and records harness evidence instead of silently approving or dropping a different timer. Its mapping boundary accepts a copied live 256-entry assignment, while current worker composition indexes against and requires the validated continuous no-migration profile. Production composition integrates lifecycle, resource, metadata-create, qualification/final report, and capacity evidence through one coordinator hook.
 - `workload`: reusable connection, person traffic, and group traffic executors.
-- `target`: black-box HTTP client for target health, readiness, bench capabilities, capacity target, setup snapshot, presence snapshot, token, channel, and subscriber APIs. Setup mutation calls use the first healthy target API address and fall back on failure; targets such as `cmd/wukongim` route real metadata writes through their cluster runtime.
+- `target`: black-box HTTP client for target health, readiness, bench capabilities, capacity target, setup snapshot, presence snapshot, conversation sync, token, channel, and subscriber APIs. Setup mutation calls use the first healthy target API address and fall back on failure; targets such as `cmd/wukongim` route real metadata writes through their cluster runtime.
 - `wkproto`: benchmark WKProto client implementation.
 - `metrics`: worker-local counters, histograms, bounded error samples, aggregation helpers, and low-cardinality Prometheus attribution parsing.
 - `report`: deterministic report construction and report directory writing.
@@ -50,12 +51,36 @@ owns CONNECT/CONNACK, optional payload encryption, socket decoding, SENDACK
 matching, RECV decryption, and the single writer/reader pumps. The bench adapter
 keeps the existing workload-facing `Send` / `ReadFrame` contract by converting
 `pkg/client` SEND futures back into local SENDACK frames and forwarding RECV
-frames from the shared reader into the same bounded queue. Worker clients are
-created from an optional worker-local `client` profile. Its send queue, maximum
-inflight SEND count, socket read buffer, and frame buffer capacities flow from
-the selected worker assignment through the default connection manager factory;
-the frame buffer capacity bounds both the adapter queue and the inner inbound
-RECV queue. Omitting the complete profile retains the tooling defaults. Worker
+frames through independent bounded RECV, SENDACK, and error queues. Asynchronous
+SEND errors preserve both `ClientSeq` and `ClientMsgNo`, so overlapping retries
+can affect only their exact attempt. A full RECV
+queue backpressures the shared reader and then the socket; neither layer evicts
+receive evidence. `ReadFrame` acquires a one-reader arbitration permit through
+the caller context and session stop signal, so a reader waiting behind another
+reader remains cancelable. The permit preserves one shared preference state:
+non-terminal errors precede SENDACKs, while at most four combined priority
+results precede an already queued RECV. Before `SendAsync` admission, each SEND
+also acquires one publication permit. `TrySend` instead returns
+`client.ErrSendQueueFull` unless that publication permit and the shared
+client's admission lock, writer queue, and inflight slot are all immediately
+available; it never adds a waiter to the deterministic chat-lifecycle owner
+loop. Its per-session cumulative rejection count is included in the numeric
+queue snapshot. The `frame_buffer_size` permits bound both
+publisher goroutines and pending SENDACKs; a caller waiting for a permit remains
+in its own workload goroutine and observes context cancellation or session
+stop. A future releases its permit only after its ACK/error enters a fixed queue
+or stop aborts publication. Published frames and SEND results drain before the
+original remote terminal error returns once. The numeric queue snapshot exposes
+the inner and adapter depths/capacities plus publication current, capacity,
+monotonic peak, and currently blocked Send callers. Worker clients are created
+from an optional worker-local `client`
+profile. Its send queue, maximum inflight SEND count, socket read buffer, and
+frame buffer capacities flow from the selected worker assignment through the
+default connection manager factory. `frame_buffer_size` independently bounds
+the shared client's inbound RECV queue and each of the adapter RECV, SENDACK,
+and error queues, for four fixed-size inbound queues per session; no hidden
+slice grows with backlog. Omitting the complete profile retains the tooling
+defaults. Worker
 clients may also receive an optional worker-local `tcp_source` pool. The pool
 contains explicit, unique, non-unspecified IPv4 addresses plus an inclusive
 port range. The planner requires its finite capacity to cover the worker's
@@ -72,6 +97,11 @@ spent performing the previous WKProto handshake is deducted from the next
 wait. An unconditional post-handshake sleep would accumulate handshake latency
 across large online pools and make the coordinator's deterministic connect
 schedule underestimate the real phase duration.
+For chat-lifecycle correctness projection, a first-attempt rejection at the
+non-waiting local SEND admission boundary is removed from the target-owned
+first-attempt failure numerator and remains visible in the cumulative worker
+transport-rejection evidence. Checked attribution prevents local simulator
+pressure from becoming a false product failure without hiding it.
 Scheduled traffic uses per-key pending queues plus a ready-key queue when a
 workload supplies a serialization key. That keeps one busy client or channel
 from forcing a linear scan across a large pending list. Person/group timed
@@ -79,6 +109,33 @@ traffic supplies the sender UID as the key in high-concurrency mode, preserving
 one in-flight `Send -> Sendack` operation per simulated TCP client. Wrapped
 clients allocate connection-local monotonic ClientSeq values so each waiter
 matches by ClientSeq plus ClientMsgNo.
+
+Adapter `Close` publishes the session stop signal before closing the shared
+client. This releases blocked publication admission, queue publishers, and
+`ReadFrame` calls. It does not itself promise to join the shared client's
+internal reader/writer loops; worker teardown and receive-drain joining remain
+the explicit lifecycle boundary completed in Phase 3 task 4.
+
+## Chat Lifecycle Production Flow
+
+The production commands are `wkbench soak chat-lifecycle` and `wkbench
+capacity chat-lifecycle`. They compose exactly three authenticated workers,
+three service/API observations, three host-filesystem observations, real
+WKProto clients, and real zero-coverage `/conversation/list` page walks with
+bounded `/conversation/retry` hydration. The
+coordinator writes a non-terminal qualification cut while traffic continues,
+then stops and joins all workers before the final metadata-create equality
+check and atomic final report. Capacity terminal failures also join continuous
+observation and run the same stop/finalize hook; they cannot return early with
+moving worker or lifecycle evidence. Preflight results retain only their closed
+reason code so failures such as `disk_free` remain distinguishable when no final
+report can be written.
+
+`wkbench host-metrics` is the small native helper used by local shakeouts and
+the four-host cloud deployment to serve one exact filesystem's
+`node_filesystem_size_bytes` and `node_filesystem_avail_bytes` series plus
+`/healthz`. A formal run may instead use an existing node exporter with the
+same exact device/mountpoint contract.
 
 ## Coordinator Run Flow
 
@@ -274,7 +331,13 @@ zero. Channel runtime high-level stage labels include `meta_resolve`,
 `meta_apply`, and `runtime_append`; runtime append sub-stages include
 `runtime_append_reserve_wait`, `runtime_append_submit`, and
 `runtime_append_wait`; append batch metrics include `append_batch_wait` and
-`append_batch_records`; admitted future wait metrics include
+`append_batch_records`; gateway attribution includes async dispatch wait,
+SEND batch handler duration, and batch records, while channelappend router
+attribution separates successful local/remote group duration from complete
+router-batch duration and retains item-weighted batch latency; message
+attribution uses item-weighted permission, pre-append, and submitter stages;
+admitted
+future wait metrics include
 `store_append_wait`, `post_store_commit_wait`,
 `quorum_follower_pull_wait`, `quorum_ack_offset_wait`,
 `quorum_hw_advance_wait`, and `quorum_final_complete_wait`; follower replication
@@ -536,11 +599,14 @@ teardown cancels drains, closes their owning connections to unblock reads, and
 waits for every drain before acknowledging stop.
 
 The shared `pkg/client` session owns WKProto CONNECT reads, socket decoding,
-crypto, pending SENDACK matching, and the bounded RECV queue. The benchmark
-adapter preserves the old workload-facing frame API by converting send futures
-back into local `SendackPacket` frames and forwarding decrypted RECV packets
-through the wrapper queue. The receive-ack drainer consumes that wrapper queue
-and briefly yields to foreground sendack/recv matchers when they are queued.
+crypto, pending SENDACK matching, and a bounded lossless RECV queue. The
+benchmark adapter preserves the old workload-facing frame API by converting
+send futures back into local `SendackPacket` frames and forwarding decrypted
+RECV packets through its independent bounded queue. The receive-ack drainer
+consumes the adapter queues through the fixed priority arbitration: errors
+precede SENDACKs, and their combined burst yields to a queued RECV after four
+results. It briefly yields to foreground sendack/recv matchers when they are
+queued.
 
 ### Warmup, Run, Cooldown
 
@@ -626,14 +692,55 @@ For split traffic, message indexes are partitioned by `TrafficPartitionCount` an
 
 - `GET /healthz`
 - `GET /readyz`
+- `GET /debug/config`
+- `GET /debug/cluster`
+- `GET /debug/pprof/heap?gc=1`
+- `GET /metrics`
 - `GET /bench/v1/capabilities`
 - `GET /bench/v1/snapshot`
+- `GET /bench/v1/channel-runtime/snapshot`
+- `POST /bench/v1/channel-runtime/probe`
+- `POST /bench/v1/channel-runtime/evict`
 - `POST /bench/v1/users/tokens`
 - `POST /bench/v1/channels`
 - `POST /bench/v1/channels/subscribers`
 - `POST /bench/v1/channels/subscribers/remove`
+- `POST /conversation/list`
+- `POST /conversation/retry`
 
 The server-side implementation lives outside this package. Keep request/response types in `pkg/bench/model` aligned with the bench API surface and avoid depending on internal server usecases from wkbench code.
+The observation calls use the same optional Bench bearer as the restricted
+Bench API. Debug/config responses, per-node live Slot snapshots, forced-GC
+responses, and Prometheus scrapes have independent byte, row, Slot, replica,
+line, and series bounds. Metrics decoding retains only the fixed Go/process,
+runtime queue/inflight, Channel queue/rejection, and metadata-create families;
+status failures and parse errors never include response bodies.
+Channel runtime probes preserve both selector modes from the shared DTO. The
+client sends concrete identities and bearer authentication unchanged to every
+configured target and decodes ordered detailed runtime evidence; it does not
+log request identities or credentials. Probe status errors omit server response
+bodies before aggregation so an echoed identity or bearer capability cannot
+enter client error strings. Successful probe bodies are read through a 32 MiB
+endpoint-specific cap. An all-missing response may repeat the current 10 MiB
+target request identity payload in both compatibility and detailed fields; the
+cap covers both copies plus fixed evidence overhead for 1,200 rows without
+permitting unbounded JSON allocation. Before transport, explicit selectors must
+contain between 1 and 1,200 identities. Their responses must contain exactly one
+detailed row per requested identity in the same order, with an exact matching
+channel ID and type at every index. Generated responses must not contain detailed
+rows. These validation errors contain no request or response identities.
+Eviction remains generated-range only.
+
+Conversation synchronization uses product routes, not Bench API routes, so the
+target client never attaches its Bench bearer token. Every login starts with
+empty cursor and `completed_coverage=0`, follows opaque `/conversation/list`
+cursors with the product's 200-candidate page bound until `done=true`, and
+hydrates bounded unresolved keys through `/conversation/retry`. It deduplicates
+cross-page moves, never retains coverage for a later login, and decodes each
+address attempt into fresh storage so a malformed response cannot pollute a
+later fallback. Each successful page is bounded at 256 MiB. Status and decode
+errors omit request UIDs, channel IDs, payloads, credentials, and server error
+bodies.
 
 ## Failure Handling
 

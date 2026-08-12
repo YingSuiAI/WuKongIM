@@ -4,10 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
+	channelmembers "github.com/WuKongIM/WuKongIM/internal/contracts/channelmembers"
 	"github.com/WuKongIM/WuKongIM/internal/runtime/channelappend"
+	messageusecase "github.com/WuKongIM/WuKongIM/internal/usecase/message"
 	clusterpkg "github.com/WuKongIM/WuKongIM/pkg/cluster"
 	metadb "github.com/WuKongIM/WuKongIM/pkg/db/meta"
+	runtimechannelid "github.com/WuKongIM/WuKongIM/pkg/protocol/channelid"
+	slotproxy "github.com/WuKongIM/WuKongIM/pkg/slot/proxy"
 	"github.com/WuKongIM/WuKongIM/pkg/transport"
 )
 
@@ -28,6 +33,11 @@ type authoritativeChannelMetadataNode interface {
 	HasChannelSubscribersAuthoritative(context.Context, string, int64) (bool, error)
 }
 
+// AuthoritativePermissionBatchNode exposes Slot-grouped permission fact reads.
+type AuthoritativePermissionBatchNode interface {
+	ReadPermissionMetadataBatchAuthoritative(context.Context, []slotproxy.PermissionMetadataRead) []slotproxy.PermissionMetadataReadResult
+}
+
 type countedChannelSubscriberMutationNode interface {
 	AddChannelSubscribersCounted(context.Context, string, int64, []string, uint64) (metadb.SubscriberMutationResult, error)
 	RemoveChannelSubscribersCounted(context.Context, string, int64, []string, uint64) (metadb.SubscriberMutationResult, error)
@@ -44,8 +54,21 @@ type restoreChannelSubscriberNode interface {
 
 // ChannelMembershipNode exposes UID-owned reverse membership projection operations.
 type ChannelMembershipNode interface {
-	UpsertUserChannelMemberships(context.Context, string, int64, []string, uint64, int64) error
-	DeleteUserChannelMemberships(context.Context, string, int64, []string, int64) error
+	UpsertUserChannelMemberships(context.Context, string, int64, []string, uint64, uint64, int64) error
+	TombstoneUserChannelMemberships(context.Context, string, int64, []string, uint64, int64) error
+}
+
+type committedChannelTailNode interface {
+	CommittedChannelTail(context.Context, string, int64) (uint64, error)
+}
+
+// PersonDirectoryNode exposes cluster mutations needed to establish canonical
+// person-channel discovery before the first persistent ordinary append.
+type PersonDirectoryNode interface {
+	GetChannelMetadataAuthoritative(context.Context, string, int64) (metadb.Channel, error)
+	CommittedChannelTail(context.Context, string, int64) (uint64, error)
+	UpsertUserChannelMemberships(context.Context, string, int64, []string, uint64, uint64, int64) error
+	EnsureChannelDirectoryReady(context.Context, string, int64) error
 }
 
 // ChannelMetadataStore adapts cluster Slot metadata to the entry-agnostic channel usecase.
@@ -77,6 +100,12 @@ func (s *ChannelMetadataStore) GetChannel(ctx context.Context, channelID string,
 func (s *ChannelMetadataStore) GetChannelForPermission(ctx context.Context, channelID string, channelType int64) (metadb.Channel, error) {
 	channel, err := s.GetChannel(ctx, channelID, channelType)
 	return channel, mapChannelPermissionReadError(err)
+}
+
+// GetChannelForMessagePull reads terminal channel state without the send
+// permission cache so disband takes effect on the authoritative path.
+func (s *ChannelMetadataStore) GetChannelForMessagePull(ctx context.Context, channelID string, channelType int64) (metadb.Channel, error) {
+	return s.GetChannel(ctx, channelID, channelType)
 }
 
 // UpsertChannel persists channel metadata through Slot ownership.
@@ -237,20 +266,192 @@ func (s *ChannelMetadataStore) HasChannelSubscribers(ctx context.Context, channe
 	return hasSubscribers, mapChannelPermissionReadError(err)
 }
 
-// UpsertChannelMemberships projects normal channel subscribers into UID-owned memberships.
-func (s *ChannelMetadataStore) UpsertChannelMemberships(ctx context.Context, channelID string, channelType int64, uids []string, joinSeq uint64, updatedAt int64) error {
-	if s == nil || s.membershipNode == nil {
-		return metadb.ErrNotFound
+// ReadPermissionsBatch adapts one usecase-owned raw permission fact batch to
+// Slot-grouped authoritative metadata reads without moving policy into infra.
+func (s *ChannelMetadataStore) ReadPermissionsBatch(ctx context.Context, reads []messageusecase.PermissionRead) []messageusecase.PermissionReadResult {
+	results := make([]messageusecase.PermissionReadResult, len(reads))
+	if len(reads) == 0 {
+		return results
 	}
-	return s.membershipNode.UpsertUserChannelMemberships(ctx, channelID, channelType, append([]string(nil), uids...), joinSeq, updatedAt)
+	if s == nil || s.node == nil {
+		return permissionBatchErrorResults(results, clusterpkg.ErrRouteNotReady)
+	}
+	node, ok := s.node.(AuthoritativePermissionBatchNode)
+	if !ok {
+		return permissionBatchErrorResults(results, clusterpkg.ErrRouteNotReady)
+	}
+	proxyReads := make([]slotproxy.PermissionMetadataRead, len(reads))
+	for i, read := range reads {
+		kind, ok := permissionReadKindToProxy(read.Kind)
+		if !ok {
+			results[i].Err = metadb.ErrInvalidArgument
+			continue
+		}
+		proxyReads[i] = slotproxy.PermissionMetadataRead{
+			Kind: kind, ChannelID: read.ChannelID, ChannelType: read.ChannelType, UID: read.UID,
+		}
+	}
+	proxyResults := node.ReadPermissionMetadataBatchAuthoritative(ctx, proxyReads)
+	if len(proxyResults) != len(results) {
+		return permissionBatchErrorResults(results, fmt.Errorf("permission metadata batch returned %d results for %d reads", len(proxyResults), len(results)))
+	}
+	for i, result := range proxyResults {
+		results[i] = messageusecase.PermissionReadResult{
+			Channel: result.Channel,
+			Found:   result.Found,
+			Value:   result.Value,
+			Err:     mapChannelPermissionReadError(result.Err),
+		}
+	}
+	return results
 }
 
-// DeleteChannelMemberships removes UID-owned memberships for normal channel subscribers.
-func (s *ChannelMetadataStore) DeleteChannelMemberships(ctx context.Context, channelID string, channelType int64, uids []string, updatedAt int64) error {
+func permissionReadKindToProxy(kind messageusecase.PermissionReadKind) (slotproxy.PermissionMetadataReadKind, bool) {
+	switch kind {
+	case messageusecase.PermissionReadChannel:
+		return slotproxy.PermissionMetadataReadChannel, true
+	case messageusecase.PermissionReadSubscriberContains:
+		return slotproxy.PermissionMetadataReadSubscriberContains, true
+	case messageusecase.PermissionReadSubscriberHasAny:
+		return slotproxy.PermissionMetadataReadSubscriberHasAny, true
+	default:
+		return 0, false
+	}
+}
+
+func permissionBatchErrorResults(results []messageusecase.PermissionReadResult, err error) []messageusecase.PermissionReadResult {
+	mapped := mapChannelPermissionReadError(err)
+	for i := range results {
+		results[i].Err = mapped
+	}
+	return results
+}
+
+// AuthorizeLiveMemberships confirms UID-owned live candidates against one
+// uncached authoritative Channel/subscriber batch.
+func (s *ChannelMetadataStore) AuthorizeLiveMemberships(ctx context.Context, memberships []channelmembers.LiveMembership) []channelmembers.LiveMembershipAuthorityResult {
+	results := make([]channelmembers.LiveMembershipAuthorityResult, len(memberships))
+	if len(memberships) == 0 {
+		return results
+	}
+	reads := make([]messageusecase.PermissionRead, 0, len(memberships)*2)
+	for _, membership := range memberships {
+		reads = append(reads,
+			messageusecase.PermissionRead{Kind: messageusecase.PermissionReadChannel, ChannelID: membership.ChannelID, ChannelType: membership.ChannelType},
+			messageusecase.PermissionRead{Kind: messageusecase.PermissionReadSubscriberContains, ChannelID: membership.ChannelID, ChannelType: membership.ChannelType, UID: membership.UID},
+		)
+	}
+	facts := s.ReadPermissionsBatch(ctx, reads)
+	if len(facts) != len(reads) {
+		err := fmt.Errorf("membership authority returned %d facts for %d reads", len(facts), len(reads))
+		for index := range results {
+			results[index].Err = err
+		}
+		return results
+	}
+	for index := range memberships {
+		channelFact := facts[index*2]
+		subscriberFact := facts[index*2+1]
+		if channelFact.Err != nil {
+			results[index].Err = channelFact.Err
+			continue
+		}
+		if subscriberFact.Err != nil {
+			results[index].Err = subscriberFact.Err
+			continue
+		}
+		results[index] = channelmembers.LiveMembershipAuthorityResult{
+			ChannelFound:              channelFact.Found,
+			Subscriber:                subscriberFact.Value,
+			Disband:                   channelFact.Found && channelFact.Channel.Disband != 0,
+			SubscriberMutationVersion: channelFact.Channel.SubscriberMutationVersion,
+		}
+	}
+	return results
+}
+
+// TombstoneRevokedMembership repairs one stale UID-owned projection with the
+// exact authoritative subscriber mutation fence selected by the usecase.
+func (s *ChannelMetadataStore) TombstoneRevokedMembership(ctx context.Context, membership channelmembers.LiveMembership, sourceVersion uint64, updatedAt int64) error {
+	if s == nil || s.membershipNode == nil {
+		return clusterpkg.ErrRouteNotReady
+	}
+	return s.membershipNode.TombstoneUserChannelMemberships(
+		ctx, membership.ChannelID, membership.ChannelType, []string{membership.UID}, sourceVersion, updatedAt,
+	)
+}
+
+// UpsertChannelMemberships projects normal channel subscribers into UID-owned memberships.
+func (s *ChannelMetadataStore) UpsertChannelMemberships(ctx context.Context, channelID string, channelType int64, uids []string, committedTail, sourceVersion uint64, updatedAt int64) error {
 	if s == nil || s.membershipNode == nil {
 		return metadb.ErrNotFound
 	}
-	return s.membershipNode.DeleteUserChannelMemberships(ctx, channelID, channelType, append([]string(nil), uids...), updatedAt)
+	return s.membershipNode.UpsertUserChannelMemberships(ctx, channelID, channelType, append([]string(nil), uids...), committedTail, sourceVersion, updatedAt)
+}
+
+// TombstoneChannelMemberships records UID-owned removals for normal subscribers.
+func (s *ChannelMetadataStore) TombstoneChannelMemberships(ctx context.Context, channelID string, channelType int64, uids []string, sourceVersion uint64, updatedAt int64) error {
+	if s == nil || s.membershipNode == nil {
+		return metadb.ErrNotFound
+	}
+	return s.membershipNode.TombstoneUserChannelMemberships(ctx, channelID, channelType, append([]string(nil), uids...), sourceVersion, updatedAt)
+}
+
+// CommittedChannelTail captures the channel boundary used to initialize a
+// logical membership add.
+func (s *ChannelMetadataStore) CommittedChannelTail(ctx context.Context, channelID string, channelType int64) (uint64, error) {
+	if s == nil || s.node == nil {
+		return 0, metadb.ErrNotFound
+	}
+	node, ok := s.node.(committedChannelTailNode)
+	if !ok {
+		return 0, metadb.ErrInvalidArgument
+	}
+	return node.CommittedChannelTail(ctx, channelID, channelType)
+}
+
+// EnsurePersonChannelDirectory establishes both UID-owned memberships before
+// the first persistent ordinary person-channel append. The durable readiness
+// bit is monotonic; the node-local cache only skips redundant checks.
+func (s *ChannelMetadataStore) EnsurePersonChannelDirectory(ctx context.Context, channelID string, channelType int64) error {
+	if s == nil || s.node == nil || channelType != 1 {
+		return metadb.ErrInvalidArgument
+	}
+	id := channelappend.ChannelID{ID: channelID, Type: uint8(channelType)}
+	if metadata, ok := s.appendMetadataCache.Lookup(id); ok && metadata.DirectoryReady {
+		return nil
+	}
+	node, ok := s.node.(PersonDirectoryNode)
+	if !ok {
+		return metadb.ErrInvalidArgument
+	}
+	channel, err := node.GetChannelMetadataAuthoritative(ctx, channelID, channelType)
+	if err == nil && channel.DirectoryReady != 0 {
+		s.appendMetadataCache.storeChannel(channel)
+		return nil
+	}
+	if err != nil && !errors.Is(err, metadb.ErrNotFound) {
+		return mapChannelPermissionReadError(err)
+	}
+	left, right, err := runtimechannelid.DecodePersonChannel(channelID)
+	if err != nil {
+		return err
+	}
+	tail, err := node.CommittedChannelTail(ctx, channelID, channelType)
+	if err != nil {
+		return err
+	}
+	if err := node.UpsertUserChannelMemberships(ctx, channelID, channelType, []string{left, right}, tail, 1, time.Now().UnixNano()); err != nil {
+		return err
+	}
+	if err := node.EnsureChannelDirectoryReady(ctx, channelID, channelType); err != nil {
+		return err
+	}
+	channel.ChannelID = channelID
+	channel.ChannelType = channelType
+	channel.DirectoryReady = 1
+	s.appendMetadataCache.storeChannel(channel)
+	return nil
 }
 
 func firstSubscriberMutationVersion(values []uint64) uint64 {

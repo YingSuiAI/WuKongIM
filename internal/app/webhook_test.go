@@ -26,7 +26,8 @@ func TestNewWiresWebhookSubsystemWhenEnabled(t *testing.T) {
 	app, err := newTestApp(t, Config{
 		DataDir: t.TempDir(),
 		Webhook: WebhookConfig{
-			HTTPAddr: "http://127.0.0.1:8080/webhook",
+			HTTPAddr:      "http://127.0.0.1:8080/webhook",
+			SigningSecret: "test-signing-secret",
 		},
 	}, WithCluster(&fakeCluster{}))
 	require.NoError(t, err)
@@ -40,10 +41,11 @@ func TestWebhookConfigSnapshotUsesNormalizedStartupConfig(t *testing.T) {
 	app, err := newTestApp(t, Config{
 		DataDir: t.TempDir(),
 		Webhook: WebhookConfig{
-			HTTPAddr:    "http://127.0.0.1:8080/webhook",
-			FocusEvents: []string{runtimewebhook.EventMsgNotify},
-			QueueSize:   2048,
-			Workers:     8,
+			HTTPAddr:      "http://127.0.0.1:8080/webhook",
+			SigningSecret: "test-signing-secret",
+			FocusEvents:   []string{runtimewebhook.EventMsgNotify},
+			QueueSize:     2048,
+			Workers:       8,
 		},
 	}, WithCluster(&fakeCluster{}))
 	require.NoError(t, err)
@@ -142,22 +144,13 @@ func TestComposePersistAfterEnqueuersCallsBoth(t *testing.T) {
 func TestComposeOfflineRecipientObserversKeepsPluginSingleAndWebhookBatch(t *testing.T) {
 	plugin := &recordingOfflineRecipientObserverForWebhookTest{}
 	webhook := &recordingOfflineRecipientsObserverForWebhookTest{}
-	single, batch := composeOfflineRecipientObservers(plugin, webhook)
+	batch := composeOfflineRecipientObservers(plugin, webhook)
 
-	processor := channelappend.NewRecipientProcessor(channelappend.RecipientProcessorOptions{
-		PresenceResolver:            staticChannelAppendPresenceResolver{},
-		OfflineRecipientObserver:    single,
-		OfflineRecipientsObserver:   batch,
-		DeliveryRetryMaxAttempts:    1,
-		DeliveryRetryInitialBackoff: 1,
-		DeliveryRetryMaxBackoff:     1,
-	})
-	err := processor.ProcessRecipientBatch(context.Background(), channelappend.RecipientBatch{
-		Event:      channelappend.CommittedEnvelope{MessageID: 101, MessageSeq: 1, ChannelID: "g1", ChannelType: 2},
-		Recipients: []channelappend.Recipient{{UID: "u1"}, {UID: "u2"}},
+	batch.ObserveOfflineRecipients(context.Background(), channelappend.OfflineRecipientsEvent{
+		Event: channelappend.CommittedEnvelope{MessageID: 101, MessageSeq: 1, ChannelID: "g1", ChannelType: 2},
+		UIDs:  []string{"u1", "u2"},
 	})
 
-	require.NoError(t, err)
 	require.Equal(t, []string{"u1", "u2"}, plugin.uids)
 	require.Equal(t, [][]string{{"u1", "u2"}}, webhook.uidBatches)
 }
@@ -165,25 +158,43 @@ func TestComposeOfflineRecipientObserversKeepsPluginSingleAndWebhookBatch(t *tes
 func TestComposeOfflineRecipientObserversUsesPluginBatchWhenAvailable(t *testing.T) {
 	plugin := &recordingBatchOfflineRecipientObserverForWebhookTest{}
 	webhook := &recordingOfflineRecipientsObserverForWebhookTest{}
-	single, batch := composeOfflineRecipientObservers(plugin, webhook)
+	batch := composeOfflineRecipientObservers(plugin, webhook)
 
-	processor := channelappend.NewRecipientProcessor(channelappend.RecipientProcessorOptions{
-		PresenceResolver:            staticChannelAppendPresenceResolver{},
-		OfflineRecipientObserver:    single,
-		OfflineRecipientsObserver:   batch,
-		DeliveryRetryMaxAttempts:    1,
-		DeliveryRetryInitialBackoff: 1,
-		DeliveryRetryMaxBackoff:     1,
-	})
-	err := processor.ProcessRecipientBatch(context.Background(), channelappend.RecipientBatch{
-		Event:      channelappend.CommittedEnvelope{MessageID: 101, MessageSeq: 1, ChannelID: "g1", ChannelType: 2},
-		Recipients: []channelappend.Recipient{{UID: "u1"}, {UID: "u2"}},
+	batch.ObserveOfflineRecipients(context.Background(), channelappend.OfflineRecipientsEvent{
+		Event: channelappend.CommittedEnvelope{MessageID: 101, MessageSeq: 1, ChannelID: "g1", ChannelType: 2},
+		UIDs:  []string{"u1", "u2"},
 	})
 
-	require.NoError(t, err)
 	require.Empty(t, plugin.singleUIDs)
 	require.Equal(t, [][]string{{"u1", "u2"}}, plugin.uidBatches)
 	require.Equal(t, [][]string{{"u1", "u2"}}, webhook.uidBatches)
+}
+
+func TestComposeOfflineRecipientObserversKeepsPluginWithoutWebhook(t *testing.T) {
+	plugin := &recordingOfflineRecipientObserverForWebhookTest{}
+	batch := composeOfflineRecipientObservers(plugin, nil)
+
+	require.NotNil(t, batch)
+	batch.ObserveOfflineRecipients(context.Background(), channelappend.OfflineRecipientsEvent{
+		Event: channelappend.CommittedEnvelope{MessageID: 101},
+		UIDs:  []string{"u1", "u2"},
+	})
+
+	require.Equal(t, []string{"u1", "u2"}, plugin.uids)
+}
+
+func TestComposeOfflineRecipientObserversKeepsPluginBatchWithoutWebhook(t *testing.T) {
+	plugin := &recordingBatchOfflineRecipientObserverForWebhookTest{}
+	batch := composeOfflineRecipientObservers(plugin, nil)
+
+	require.NotNil(t, batch)
+	batch.ObserveOfflineRecipients(context.Background(), channelappend.OfflineRecipientsEvent{
+		Event: channelappend.CommittedEnvelope{MessageID: 101},
+		UIDs:  []string{"u1", "u2"},
+	})
+
+	require.Empty(t, plugin.singleUIDs)
+	require.Equal(t, [][]string{{"u1", "u2"}}, plugin.uidBatches)
 }
 
 func TestWebhookNotifyEnqueuerMapsCommittedEnvelopeAndCopiesSlices(t *testing.T) {
@@ -365,10 +376,4 @@ func (r *recordingBatchOfflineRecipientObserverForWebhookTest) ObserveOfflineRec
 
 func (r *recordingOfflineRecipientsObserverForWebhookTest) ObserveOfflineRecipients(_ context.Context, event channelappend.OfflineRecipientsEvent) {
 	r.uidBatches = append(r.uidBatches, append([]string(nil), event.UIDs...))
-}
-
-type staticChannelAppendPresenceResolver struct{}
-
-func (staticChannelAppendPresenceResolver) EndpointsByUIDs(context.Context, []string) ([]channelappend.Route, error) {
-	return nil, nil
 }

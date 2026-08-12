@@ -15,7 +15,8 @@ entry adapter
   -> channel authority router or local append runtime
   -> append contract
   -> committed envelope
-  -> recipient batch and owner push contracts
+  -> subscriber recipient selection
+  -> canonical Online Delivery plan contract
 ```
 
 The package only defines data, sentinel errors, and clone helpers. It does not
@@ -23,9 +24,9 @@ resolve routes, append messages, dispatch recipients, or push gateway frames.
 
 ## Ownership Rules
 
-- `SendCommand`, `Message`, `AppendBatchRequest`, `CommittedEnvelope`,
-  `RecipientBatch`, and push/result DTOs provide clone helpers when they own
-  slices.
+- `SendCommand`, `Message`, `AppendBatchRequest`, and `CommittedEnvelope`
+  provide clone helpers when they own slices. Recipient plans, routes, and
+  push/result DTOs belong to `internal/contracts/onlinedelivery`.
 - SEND hot-path implementations may pass payload and message-scoped UID slices
   by reference. Callers and callees must treat those slices as immutable until a
   concrete ownership boundary, such as durable storage, takes its own copy.
@@ -36,7 +37,12 @@ resolve routes, append messages, dispatch recipients, or push gateway frames.
 - `AuthorityTarget` identifies the fenced channel authority route used for
   write admission. `RouteGeneration` versions the complete projected route for
   cache invalidation; it is not a Channel machine or wire-protocol fence.
+  `WriteFenced` mirrors the resolved authority state so a local writer can
+  recover an already committed idempotent retry before the new-append fence.
 - `AppendBatchRequest` carries the expected authority epoch and leader epoch so
   append adapters can reject stale writes without re-resolving caller intent.
+- `AppendBatchRequest.ServerAllocatedMessageIDs` is an all-items proof created
+  by the local preparation runtime. It permits storage to omit only existing
+  message-ID reads; it never relaxes sender/client-message idempotency checks.
 - Reason constants and append/routing error sentinels remain stable so entry
   adapters can map SENDACK outcomes without depending on runtime packages.

@@ -9,21 +9,137 @@ import (
 	"time"
 
 	"github.com/WuKongIM/WuKongIM/internal/contracts/authority"
-	"github.com/WuKongIM/WuKongIM/internal/runtime/conversationactive"
+	"github.com/WuKongIM/WuKongIM/internal/contracts/onlinedelivery"
 	runtimechannelid "github.com/WuKongIM/WuKongIM/pkg/protocol/channelid"
 )
+
+func TestStaleCommitCompletionCannotReleaseNextReservation(t *testing.T) {
+	handoff := newPostCommitHandoff(2)
+	firstFuture := newFuture(1)
+	secondFuture := newFuture(1)
+	if !handoff.tryAcquire(firstFuture, 0) || !handoff.tryAcquire(secondFuture, 0) {
+		t.Fatal("failed to acquire two handoff reservations")
+	}
+
+	state := newChannelState(localTargetForAppendTest("room"), channelStateLimits{})
+	state.enqueueCommitted(CommittedEnvelope{MessageID: 1}, postCommitReservation{future: firstFuture, index: 0})
+	var firstEffect commitEffect
+	if !state.nextCommitEffect("room", &firstEffect) {
+		t.Fatal("first nextCommitEffect() = false, want true")
+	}
+	writer := &channelWriter{
+		state: state,
+		ports: writerPorts{handoff: handoff},
+	}
+	firstCompletion := commitCompletedEvent{
+		seq:       firstEffect.seq,
+		attempt:   firstEffect.attempt,
+		items:     []commitCompletedItem{{event: firstEffect.events[0].envelope}},
+		committed: firstEffect.events,
+	}
+	writer.applyCommitCompletion(firstCompletion)
+	if got := handoff.depth(); got != 1 {
+		t.Fatalf("handoff depth after first completion = %d, want 1", got)
+	}
+
+	state.enqueueCommitted(CommittedEnvelope{MessageID: 2}, postCommitReservation{future: secondFuture, index: 0})
+	var secondEffect commitEffect
+	if !state.nextCommitEffect("room", &secondEffect) {
+		t.Fatal("second nextCommitEffect() = false, want true")
+	}
+
+	writer.applyCommitCompletion(firstCompletion)
+	if got := handoff.depth(); got != 1 {
+		t.Fatalf("handoff depth after stale completion = %d, want 1", got)
+	}
+	if got := state.commitBacklog(); got != 1 {
+		t.Fatalf("commit backlog after stale completion = %d, want 1", got)
+	}
+	if !state.matchesCommitCompletion(secondEffect.seq, secondEffect.attempt) {
+		t.Fatal("stale completion displaced the current commit effect")
+	}
+
+	writer.applyCommitCompletion(commitCompletedEvent{
+		seq:       secondEffect.seq,
+		attempt:   secondEffect.attempt,
+		items:     []commitCompletedItem{{event: secondEffect.events[0].envelope}},
+		committed: secondEffect.events,
+	})
+	if got := handoff.depth(); got != 0 {
+		t.Fatalf("terminal handoff depth = %d, want 0", got)
+	}
+}
+
+func TestStaleCommitCompletionCannotStealConcurrentAppendReservation(t *testing.T) {
+	handoff := newPostCommitHandoff(2)
+	commitFuture := newFuture(1)
+	appendFuture := newFuture(1)
+	if !handoff.tryAcquire(commitFuture, 0) || !handoff.tryAcquire(appendFuture, 0) {
+		t.Fatal("failed to acquire two handoff reservations")
+	}
+
+	commitState := newChannelState(localTargetForAppendTest("commit-room"), channelStateLimits{})
+	commitState.enqueueCommitted(CommittedEnvelope{MessageID: 1}, postCommitReservation{future: commitFuture, index: 0})
+	var effect commitEffect
+	if !commitState.nextCommitEffect("commit-room", &effect) {
+		t.Fatal("nextCommitEffect() = false, want true")
+	}
+	commitWriter := &channelWriter{
+		state: commitState,
+		ports: writerPorts{handoff: handoff},
+	}
+	completion := commitCompletedEvent{
+		seq:       effect.seq,
+		attempt:   effect.attempt,
+		items:     []commitCompletedItem{{event: effect.events[0].envelope}},
+		committed: effect.events,
+	}
+	commitWriter.applyCommitCompletion(completion)
+	commitWriter.applyCommitCompletion(completion)
+	if got := handoff.depth(); got != 1 {
+		t.Fatalf("handoff depth after stale commit replay = %d, want 1", got)
+	}
+
+	appendState := newChannelState(localTargetForAppendTest("append-room"), channelStateLimits{})
+	appendState.enqueuePrepared([]preparedSend{{Index: 0, future: appendFuture}})
+	seq, inflight, ok := appendState.nextAppendBatch()
+	if !ok {
+		t.Fatal("nextAppendBatch() = false, want true")
+	}
+	appendWriter := &channelWriter{
+		state: appendState,
+		ports: writerPorts{
+			commit:  commitPorts{persistAfter: &recordingPersistAfterEnqueuerForCommitTest{}},
+			handoff: handoff,
+		},
+	}
+	appendErr := errors.New("append failed")
+	appendWriter.applyAppendCompletion(appendCompletedEvent{
+		seq: seq,
+		items: []appendItemCompletion{{
+			item:     inflight[0],
+			result:   SendBatchItemResult{Err: appendErr},
+			traceErr: appendErr,
+		}},
+	})
+	if got := handoff.depth(); got != 0 {
+		t.Fatalf("terminal handoff depth = %d, want 0", got)
+	}
+}
 
 func TestCommitEffectEnqueuesPersistAfterWithoutRecipientWork(t *testing.T) {
 	enqueuer := &recordingPersistAfterEnqueuerForCommitTest{}
 	effect := commitEffect{
 		key: "room",
 		seq: 1,
-		events: []CommittedEnvelope{{
-			MessageID:   10,
-			MessageSeq:  4,
-			ChannelID:   "room",
-			ChannelType: 2,
-			Payload:     []byte("hello"),
+		events: []committedPostCommit{{
+			envelope: CommittedEnvelope{
+				MessageID:   10,
+				MessageSeq:  4,
+				ChannelID:   "room",
+				ChannelType: 2,
+				Payload:     []byte("hello"),
+			},
 		}},
 	}
 
@@ -38,80 +154,12 @@ func TestCommitEffectEnqueuesPersistAfterWithoutRecipientWork(t *testing.T) {
 }
 
 func TestCommitEffectDoesNotRequirePersistAfterForNoPostCommitWork(t *testing.T) {
-	effect := commitEffect{events: []CommittedEnvelope{{MessageID: 10}}}
+	effect := commitEffect{events: []committedPostCommit{{envelope: CommittedEnvelope{MessageID: 10}}}}
 
 	completion := effect.run(context.Background(), commitPorts{})
 
 	if got := len(completion.items); got != 1 {
 		t.Fatalf("completion items = %d, want 1", got)
-	}
-}
-
-func TestCommitEffectSeparatesActiveProjectionFailureFromDeliveryCompletion(t *testing.T) {
-	activeErr := errors.New("active unavailable")
-	delivery := &scriptedRecipientDeliveryEnqueuerForCommitTest{}
-	effect := commitEffect{
-		key:    "room",
-		seq:    1,
-		target: localTargetForAppendTest("room"),
-		events: []CommittedEnvelope{{
-			MessageID:         10,
-			MessageSeq:        4,
-			ChannelID:         "room",
-			ChannelType:       2,
-			FromUID:           "sender",
-			MessageScopedUIDs: []string{"u2"},
-		}},
-	}
-
-	completion := effect.run(context.Background(), commitPorts{
-		activeAdmitter:             &recordingActiveAdmitterForRecipientTest{err: activeErr},
-		recipientAuthorityResolver: staticRecipientAuthorityResolverForCommitTest{nodeID: 1},
-		deliveryEnqueuer:           delivery,
-		recipientBatchSize:         16,
-	})
-
-	if got := delivery.callCount(); got != 1 {
-		t.Fatalf("recipient delivery calls = %d, want 1", got)
-	}
-	if len(completion.items) != 1 || completion.items[0].err != nil || completion.items[0].checkpointSeq != 4 {
-		t.Fatalf("delivery completion items = %#v, want successful checkpoint", completion.items)
-	}
-	if len(completion.failures) != 1 || !errors.Is(completion.failures[0].err, activeErr) {
-		t.Fatalf("independent active failures = %#v, want %v", completion.failures, activeErr)
-	}
-	if detail := completion.failures[0].detail; detail.Phase != "conversation_active" || detail.UID != "u2" {
-		t.Fatalf("active failure detail = %#v, want conversation_active for u2", detail)
-	}
-}
-
-func TestCommitEffectDoesNotLetActiveFailureReclassifyDeliveryFailure(t *testing.T) {
-	effect := commitEffect{
-		key:    "room",
-		seq:    1,
-		target: localTargetForAppendTest("room"),
-		events: []CommittedEnvelope{{
-			MessageID:         10,
-			MessageSeq:        4,
-			ChannelID:         "room",
-			ChannelType:       2,
-			FromUID:           "sender",
-			MessageScopedUIDs: []string{"u2"},
-		}},
-	}
-
-	completion := effect.run(context.Background(), commitPorts{
-		activeAdmitter:             &recordingActiveAdmitterForRecipientTest{err: context.DeadlineExceeded},
-		recipientAuthorityResolver: failingRecipientAuthorityResolverForRecipientTest{err: ErrRouteNotReady},
-		deliveryEnqueuer:           &scriptedRecipientDeliveryEnqueuerForCommitTest{},
-		recipientBatchSize:         16,
-	})
-
-	if len(completion.items) != 1 || completion.items[0].result != channelAppendResultRouteNotReady {
-		t.Fatalf("delivery completion = %#v, want route_not_ready", completion.items)
-	}
-	if len(completion.failures) != 1 || completion.failures[0].result != channelAppendResultTimeout {
-		t.Fatalf("active failures = %#v, want independent timeout", completion.failures)
 	}
 }
 
@@ -122,13 +170,15 @@ func TestCommitEffectPersistAfterPanicDoesNotEscapeOrBlockRecipients(t *testing.
 		key:    "room",
 		seq:    1,
 		target: localTargetForAppendTest("room"),
-		events: []CommittedEnvelope{{
-			MessageID:         10,
-			MessageSeq:        4,
-			ChannelID:         "room",
-			ChannelType:       2,
-			Payload:           []byte("hello"),
-			MessageScopedUIDs: []string{"u2"},
+		events: []committedPostCommit{{
+			envelope: CommittedEnvelope{
+				MessageID:         10,
+				MessageSeq:        4,
+				ChannelID:         "room",
+				ChannelType:       2,
+				Payload:           []byte("hello"),
+				MessageScopedUIDs: []string{"u2"},
+			},
 		}},
 	}
 
@@ -161,7 +211,7 @@ func TestAppendSuccessEnqueuesCommittedEventsAndSendackCompletesBeforeRecipientE
 		MessageID:                  newSequenceIDsForPrepare(900),
 		Appender:                   newRecordingAppenderForAppendTest(),
 		RecipientAuthorityResolver: staticRecipientAuthorityResolverForCommitTest{nodeID: 1},
-		RecipientDeliveryEnqueuer:  enqueuer,
+		OnlineDeliveryEnqueuer:     enqueuer,
 		RecipientBatchSize:         16,
 	})
 	target := localTargetForAppendTest("room")
@@ -223,7 +273,7 @@ func TestCommitEffectsBatchSameChannelBacklog(t *testing.T) {
 		MessageID:                  newSequenceIDsForPrepare(925),
 		Appender:                   newRecordingAppenderForAppendTest(),
 		RecipientAuthorityResolver: staticRecipientAuthorityResolverForCommitTest{nodeID: 1},
-		RecipientDeliveryEnqueuer:  enqueuer,
+		OnlineDeliveryEnqueuer:     enqueuer,
 		RecipientBatchSize:         16,
 		Observer:                   observer,
 	})
@@ -263,7 +313,7 @@ func TestAppendOmitResultPayloadStillDispatchesOriginalPayload(t *testing.T) {
 		MessageID:                  newSequenceIDsForPrepare(950),
 		Appender:                   appender,
 		RecipientAuthorityResolver: staticRecipientAuthorityResolverForCommitTest{nodeID: 1},
-		RecipientDeliveryEnqueuer:  enqueuer,
+		OnlineDeliveryEnqueuer:     enqueuer,
 		RecipientBatchSize:         16,
 	})
 	target := localTargetForAppendTest("room")
@@ -298,7 +348,7 @@ func TestCommitEffectFailureDropsAndAdvancesWithoutRetry(t *testing.T) {
 		MessageID:                  newSequenceIDsForPrepare(1000),
 		Appender:                   newRecordingAppenderForAppendTest(),
 		RecipientAuthorityResolver: staticRecipientAuthorityResolverForCommitTest{nodeID: 1},
-		RecipientDeliveryEnqueuer:  enqueuer,
+		OnlineDeliveryEnqueuer:     enqueuer,
 		RecipientBatchSize:         16,
 		Observer:                   observer,
 	})
@@ -322,93 +372,6 @@ func TestCommitEffectFailureDropsAndAdvancesWithoutRetry(t *testing.T) {
 	observer.waitFailures(t, 1)
 	if got := observer.failures[0]; got.MessageID != 1000 || got.MessageSeq != 1 || got.Result != channelAppendResultOther {
 		t.Fatalf("post-commit failure observation = %#v, want first message failure", got)
-	}
-	waitCommitBacklogForTest(t, group, target.ChannelID, 0)
-}
-
-func TestActiveProjectionFailureIsObservedWithoutStoppingRecipientDelivery(t *testing.T) {
-	activeErr := errors.New("active unavailable")
-	enqueuer := &scriptedRecipientDeliveryEnqueuerForCommitTest{}
-	observer := &recordingPostCommitFailureObserverForTest{}
-	group := newStartedTestGroup(t, Options{
-		LocalNodeID:                1,
-		MessageID:                  newSequenceIDsForPrepare(1005),
-		Appender:                   newRecordingAppenderForAppendTest(),
-		ConversationActiveAdmitter: &recordingActiveAdmitterForRecipientTest{err: activeErr},
-		RecipientAuthorityResolver: staticRecipientAuthorityResolverForCommitTest{nodeID: 1},
-		RecipientDeliveryEnqueuer:  enqueuer,
-		RecipientBatchSize:         16,
-		Observer:                   observer,
-	})
-	target := localTargetForAppendTest("room")
-	item := appendSendItemForTest("u1", "room", "payload")
-	item.Command.MessageScopedUIDs = []string{"u2"}
-
-	future, err := group.SubmitLocal(context.Background(), target, []SendBatchItem{item})
-	if err != nil {
-		t.Fatalf("SubmitLocal() error = %v", err)
-	}
-	requireAppendSuccess(t, waitFutureForTest(t, future), 0, 1005, 1)
-	enqueuer.waitCalls(t, 1)
-	observer.waitFailures(t, 1)
-	observer.mu.Lock()
-	failure := observer.failures[0]
-	observer.mu.Unlock()
-	if failure.MessageID != 1005 || failure.Phase != "conversation_active" || failure.Result != channelAppendResultOther {
-		t.Fatalf("active projection failure = %#v, want independent conversation_active observation", failure)
-	}
-	waitCommitBacklogForTest(t, group, target.ChannelID, 0)
-}
-
-func TestActiveProjectionFailureDoesNotGateLargeRecipientDelivery(t *testing.T) {
-	active := newBlockingActiveAdmitterForCommitTest(errors.New("active unavailable"))
-	t.Cleanup(active.releaseAdmission)
-	source := &recordingSubscriberSourceForRecipientTest{pages: []SubscriberPage{
-		{Recipients: []Recipient{{UID: "u2"}}, Cursor: "next"},
-		{Recipients: []Recipient{{UID: "u3"}}, Done: true},
-	}}
-	enqueuer := &scriptedRecipientDeliveryEnqueuerForCommitTest{}
-	observer := &recordingPostCommitFailureObserverForTest{}
-	group := newStartedTestGroup(t, Options{
-		LocalNodeID:                1,
-		MessageID:                  newSequenceIDsForPrepare(1006),
-		Appender:                   newRecordingAppenderForAppendTest(),
-		Subscribers:                source,
-		ConversationActiveAdmitter: active,
-		RecipientAuthorityResolver: staticRecipientAuthorityResolverForCommitTest{nodeID: 1},
-		RecipientDeliveryEnqueuer:  enqueuer,
-		RecipientBatchSize:         16,
-		SubscriberScanPageSize:     1,
-		Observer:                   observer,
-	})
-	target := localTargetForAppendTest("room")
-	target.Large = true
-
-	future, err := group.SubmitLocal(context.Background(), target, []SendBatchItem{
-		appendSendItemForTest("u1", "room", "payload"),
-	})
-	if err != nil {
-		t.Fatalf("SubmitLocal() error = %v", err)
-	}
-	requireAppendSuccess(t, waitFutureForTest(t, future), 0, 1006, 1)
-	enqueuer.waitCalls(t, 1)
-	select {
-	case <-active.started:
-	case <-time.After(time.Second):
-		t.Fatal("active projection did not start after first-page delivery")
-	}
-	if got := enqueuer.callCount(); got != 1 {
-		t.Fatalf("delivery calls before releasing active projection = %d, want first page only", got)
-	}
-
-	active.releaseAdmission()
-	enqueuer.waitCalls(t, 2)
-	observer.waitFailures(t, 1)
-	if source.calls != 2 {
-		t.Fatalf("subscriber page calls = %d, want both pages after active failure", source.calls)
-	}
-	if got := enqueuer.recipientUIDs(); !reflect.DeepEqual(got, []string{"u2", "u3"}) {
-		t.Fatalf("recipient delivery uids = %#v, want both pages", got)
 	}
 	waitCommitBacklogForTest(t, group, target.ChannelID, 0)
 }
@@ -445,7 +408,7 @@ func TestPersistAfterStillRunsWhenRecipientDeliveryFails(t *testing.T) {
 		Appender:                   newRecordingAppenderForAppendTest(),
 		PersistAfterEnqueuer:       persistAfter,
 		RecipientAuthorityResolver: staticRecipientAuthorityResolverForCommitTest{nodeID: 1},
-		RecipientDeliveryEnqueuer:  delivery,
+		OnlineDeliveryEnqueuer:     delivery,
 		RecipientBatchSize:         16,
 		Observer:                   observer,
 	})
@@ -474,7 +437,7 @@ func TestCommitEffectFailureDoesNotRetryLater(t *testing.T) {
 		MessageID:                  newSequenceIDsForPrepare(1050),
 		Appender:                   newRecordingAppenderForAppendTest(),
 		RecipientAuthorityResolver: staticRecipientAuthorityResolverForCommitTest{nodeID: 1},
-		RecipientDeliveryEnqueuer:  enqueuer,
+		OnlineDeliveryEnqueuer:     enqueuer,
 		RecipientBatchSize:         16,
 	})
 	target := localTargetForAppendTest("room")
@@ -502,7 +465,7 @@ func TestCommitEffectFailuresDropThenAdvance(t *testing.T) {
 		MessageID:                  newSequenceIDsForPrepare(1100),
 		Appender:                   newRecordingAppenderForAppendTest(),
 		RecipientAuthorityResolver: staticRecipientAuthorityResolverForCommitTest{nodeID: 1},
-		RecipientDeliveryEnqueuer:  enqueuer,
+		OnlineDeliveryEnqueuer:     enqueuer,
 		RecipientBatchSize:         16,
 	})
 	target := localTargetForAppendTest("room")
@@ -529,8 +492,6 @@ func TestCommitEffectFailuresDropThenAdvance(t *testing.T) {
 }
 
 func TestNonLargeGroupSubscriberSnapshotCachedInChannelState(t *testing.T) {
-	activeErr := errors.New("active unavailable")
-	observer := &recordingPostCommitFailureObserverForTest{}
 	source := &recordingSubscriberSourceForRecipientTest{
 		pages: []SubscriberPage{{Recipients: []Recipient{{UID: "u2"}, {UID: "u3"}}, Done: true}},
 	}
@@ -540,12 +501,10 @@ func TestNonLargeGroupSubscriberSnapshotCachedInChannelState(t *testing.T) {
 		MessageID:                  newSequenceIDsForPrepare(1150),
 		Appender:                   newRecordingAppenderForAppendTest(),
 		Subscribers:                source,
-		ConversationActiveAdmitter: &recordingActiveAdmitterForRecipientTest{err: activeErr},
 		RecipientAuthorityResolver: staticRecipientAuthorityResolverForCommitTest{nodeID: 1},
-		RecipientDeliveryEnqueuer:  enqueuer,
+		OnlineDeliveryEnqueuer:     enqueuer,
 		RecipientBatchSize:         16,
 		SubscriberScanPageSize:     1,
-		Observer:                   observer,
 	})
 	target := localTargetForAppendTest("room")
 	target.SubscriberMutationVersion = 7
@@ -561,9 +520,8 @@ func TestNonLargeGroupSubscriberSnapshotCachedInChannelState(t *testing.T) {
 	requireAppendSuccess(t, waitFutureForTest(t, future), 1, 1151, 2)
 
 	enqueuer.waitCalls(t, 2)
-	observer.waitFailures(t, 2)
 	if source.calls != 1 {
-		t.Fatalf("subscriber source calls = %d, want one cached snapshot load despite active failures", source.calls)
+		t.Fatalf("subscriber source calls = %d, want one cached snapshot load", source.calls)
 	}
 	if got := enqueuer.recipientUIDs(); !reflect.DeepEqual(got, []string{"u2", "u3", "u2", "u3"}) {
 		t.Fatalf("recipient uids = %#v, want cached subscribers dispatched for both messages", got)
@@ -584,7 +542,7 @@ func TestSubscriberMutationUpdatePatchesCachedSnapshot(t *testing.T) {
 		Appender:                   newRecordingAppenderForAppendTest(),
 		Subscribers:                source,
 		RecipientAuthorityResolver: staticRecipientAuthorityResolverForCommitTest{nodeID: 1},
-		RecipientDeliveryEnqueuer:  enqueuer,
+		OnlineDeliveryEnqueuer:     enqueuer,
 		RecipientBatchSize:         16,
 		SubscriberScanPageSize:     1,
 	})
@@ -643,7 +601,7 @@ func TestLargeGroupSubscribersRemainPagedPerCommittedMessage(t *testing.T) {
 		Appender:                   newRecordingAppenderForAppendTest(),
 		Subscribers:                source,
 		RecipientAuthorityResolver: staticRecipientAuthorityResolverForCommitTest{nodeID: 1},
-		RecipientDeliveryEnqueuer:  enqueuer,
+		OnlineDeliveryEnqueuer:     enqueuer,
 		RecipientBatchSize:         16,
 		SubscriberScanPageSize:     1,
 	})
@@ -683,7 +641,7 @@ func TestBlockedCommitBacklogRetainsDurableEnvelopeUntilDeliveryAdmission(t *tes
 		Appender:                    newRecordingAppenderForAppendTest(),
 		Observer:                    observer,
 		RecipientAuthorityResolver:  staticRecipientAuthorityResolverForCommitTest{nodeID: 1},
-		RecipientDeliveryEnqueuer:   enqueuer,
+		OnlineDeliveryEnqueuer:      enqueuer,
 		RecipientBatchSize:          16,
 		ChannelBacklogHighWatermark: 1,
 		PostCommitHandoffCapacity:   2,
@@ -730,7 +688,7 @@ func TestPostCommitHandoffRejectsBeforeAppendAndReturnsTokenAfterDrain(t *testin
 		MessageID:                  newSequenceIDsForPrepare(1500),
 		Appender:                   appender,
 		RecipientAuthorityResolver: staticRecipientAuthorityResolverForCommitTest{nodeID: 1},
-		RecipientDeliveryEnqueuer:  enqueuer,
+		OnlineDeliveryEnqueuer:     enqueuer,
 		RecipientBatchSize:         16,
 		PostCommitHandoffCapacity:  1,
 	})
@@ -863,7 +821,7 @@ func TestStopDeadlineRetainsCommitBacklogForNextDrain(t *testing.T) {
 		MessageID:                  newSequenceIDsForPrepare(1300),
 		Appender:                   newRecordingAppenderForAppendTest(),
 		RecipientAuthorityResolver: staticRecipientAuthorityResolverForCommitTest{nodeID: 1},
-		RecipientDeliveryEnqueuer:  enqueuer,
+		OnlineDeliveryEnqueuer:     enqueuer,
 		RecipientBatchSize:         16,
 	})
 	if err := group.Start(context.Background()); err != nil {
@@ -917,15 +875,13 @@ func TestStopDeadlineRetainsCommitBacklogForNextDrain(t *testing.T) {
 func TestNoPersistNonCommandReturnsSuccessWithoutAppendOrRealtime(t *testing.T) {
 	ids := newSequenceIDsForPrepare(1400)
 	appender := newRecordingAppenderForAppendTest()
-	active := &recordingActiveAdmitterForRecipientTest{}
 	enqueuer := &scriptedRecipientDeliveryEnqueuerForCommitTest{}
 	group := newStartedTestGroup(t, Options{
 		LocalNodeID:                1,
 		MessageID:                  ids,
 		Appender:                   appender,
-		ConversationActiveAdmitter: active,
 		RecipientAuthorityResolver: staticRecipientAuthorityResolverForCommitTest{nodeID: 1},
-		RecipientDeliveryEnqueuer:  enqueuer,
+		OnlineDeliveryEnqueuer:     enqueuer,
 	})
 	target := localTargetForAppendTest("room")
 	item := appendSendItemForTest("u1", "room", "payload")
@@ -950,16 +906,12 @@ func TestNoPersistNonCommandReturnsSuccessWithoutAppendOrRealtime(t *testing.T) 
 	if got := enqueuer.callCount(); got != 0 {
 		t.Fatalf("recipient delivery calls = %d, want 0", got)
 	}
-	if len(active.batches) != 0 {
-		t.Fatalf("active batches = %d, want 0", len(active.batches))
-	}
 }
 
-func TestNoPersistSyncOnceDispatchesRealtimeWithoutAppendOrActiveConversation(t *testing.T) {
+func TestNoPersistSyncOnceDispatchesRealtimeWithoutAppend(t *testing.T) {
 	ids := newSequenceIDsForPrepare(1500)
 	clock := fixedClockForPrepare{now: time.Unix(1700, 123_000_000)}
 	appender := newRecordingAppenderForAppendTest()
-	active := &recordingActiveAdmitterForRecipientTest{}
 	enqueuer := &scriptedRecipientDeliveryEnqueuerForCommitTest{}
 	commandChannelID := runtimechannelid.ToCommandChannel("room")
 	group := newStartedTestGroup(t, Options{
@@ -967,9 +919,8 @@ func TestNoPersistSyncOnceDispatchesRealtimeWithoutAppendOrActiveConversation(t 
 		MessageID:                  ids,
 		Appender:                   appender,
 		Clock:                      clock,
-		ConversationActiveAdmitter: active,
 		RecipientAuthorityResolver: staticRecipientAuthorityResolverForCommitTest{nodeID: 1},
-		RecipientDeliveryEnqueuer:  enqueuer,
+		OnlineDeliveryEnqueuer:     enqueuer,
 		RecipientBatchSize:         16,
 	})
 	target := localTargetForAppendTest(commandChannelID)
@@ -994,17 +945,14 @@ func TestNoPersistSyncOnceDispatchesRealtimeWithoutAppendOrActiveConversation(t 
 		t.Fatalf("append calls = %d, want 0", got)
 	}
 	enqueuer.waitCalls(t, 1)
-	if len(active.batches) != 0 {
-		t.Fatalf("active batches = %d, want 0 for transient realtime", len(active.batches))
-	}
 	if got := enqueuer.recipientUIDs(); !reflect.DeepEqual(got, []string{"u2", "u3"}) {
 		t.Fatalf("recipient delivery uids = %#v, want scoped u2,u3", got)
 	}
-	batches := enqueuer.batchesSnapshot()
-	if len(batches) != 1 {
-		t.Fatalf("recipient delivery batches = %d, want 1", len(batches))
+	plans := enqueuer.plansSnapshot()
+	if len(plans) != 1 {
+		t.Fatalf("recipient delivery plans = %d, want 1", len(plans))
 	}
-	event := batches[0].Event
+	event := plans[0].Event
 	if event.MessageID != 1500 || event.MessageSeq != 0 || event.ChannelID != commandChannelID || !event.SyncOnce {
 		t.Fatalf("realtime event metadata = %#v, want transient command-channel event", event)
 	}
@@ -1026,7 +974,7 @@ func TestRealtimeDoesNotOvertakeContendedDurableRetryFIFO(t *testing.T) {
 		Appender:                   newRecordingAppenderForAppendTest(),
 		EffectPoolSize:             1,
 		RecipientAuthorityResolver: staticRecipientAuthorityResolverForCommitTest{nodeID: 1},
-		RecipientDeliveryEnqueuer:  delivery,
+		OnlineDeliveryEnqueuer:     delivery,
 		RecipientBatchSize:         16,
 	})
 
@@ -1090,7 +1038,7 @@ func TestStopWaitsForAcceptedRealtimeEffectBeforeCancel(t *testing.T) {
 		MessageID:                  newSequenceIDsForPrepare(1800),
 		Appender:                   newRecordingAppenderForAppendTest(),
 		RecipientAuthorityResolver: staticRecipientAuthorityResolverForCommitTest{nodeID: 1},
-		RecipientDeliveryEnqueuer:  delivery,
+		OnlineDeliveryEnqueuer:     delivery,
 		RecipientBatchSize:         16,
 	})
 	if err := group.Start(context.Background()); err != nil {
@@ -1138,8 +1086,8 @@ func TestNoPersistRealtimeDoesNotEnqueuePersistAfter(t *testing.T) {
 		RecipientAuthorityResolver: staticRecipientAuthorityResolverForCommitTest{
 			nodeID: 1,
 		},
-		RecipientDeliveryEnqueuer: delivery,
-		PersistAfterEnqueuer:      persistAfter,
+		OnlineDeliveryEnqueuer: delivery,
+		PersistAfterEnqueuer:   persistAfter,
 	})
 	target := localTargetForAppendTest(runtimechannelid.ToCommandChannel("cmd"))
 	item := appendSendItemForTest("u1", "cmd", "x")
@@ -1173,7 +1121,7 @@ func TestNoPersistRequestScopedDispatchesRealtimeWithoutSubscriberScan(t *testin
 		Appender:                   newRecordingAppenderForAppendTest(),
 		Subscribers:                source,
 		RecipientAuthorityResolver: staticRecipientAuthorityResolverForCommitTest{nodeID: 1},
-		RecipientDeliveryEnqueuer:  enqueuer,
+		OnlineDeliveryEnqueuer:     enqueuer,
 		RecipientBatchSize:         16,
 	})
 	target := AuthorityTarget{
@@ -1210,32 +1158,6 @@ func TestNoPersistRequestScopedDispatchesRealtimeWithoutSubscriberScan(t *testin
 
 type staticRecipientAuthorityResolverForCommitTest struct {
 	nodeID uint64
-}
-
-type blockingActiveAdmitterForCommitTest struct {
-	started     chan struct{}
-	release     chan struct{}
-	startedOnce sync.Once
-	releaseOnce sync.Once
-	err         error
-}
-
-func newBlockingActiveAdmitterForCommitTest(err error) *blockingActiveAdmitterForCommitTest {
-	return &blockingActiveAdmitterForCommitTest{
-		started: make(chan struct{}),
-		release: make(chan struct{}),
-		err:     err,
-	}
-}
-
-func (a *blockingActiveAdmitterForCommitTest) AdmitActiveBatch(_ context.Context, _ conversationactive.ActiveBatch) error {
-	a.startedOnce.Do(func() { close(a.started) })
-	<-a.release
-	return a.err
-}
-
-func (a *blockingActiveAdmitterForCommitTest) releaseAdmission() {
-	a.releaseOnce.Do(func() { close(a.release) })
 }
 
 type recordingEffectObserverForCommitTest struct {
@@ -1333,7 +1255,7 @@ type blockingRecipientDeliveryEnqueuerForCommitTest struct {
 	once     sync.Once
 	releaseO sync.Once
 	mu       sync.Mutex
-	batches  []RecipientBatch
+	plans    []onlinedelivery.RecipientDeliveryPlan
 }
 
 func newBlockingRecipientDeliveryEnqueuerForCommitTest() *blockingRecipientDeliveryEnqueuerForCommitTest {
@@ -1343,12 +1265,12 @@ func newBlockingRecipientDeliveryEnqueuerForCommitTest() *blockingRecipientDeliv
 	}
 }
 
-func (r *blockingRecipientDeliveryEnqueuerForCommitTest) EnqueueRecipientBatch(ctx context.Context, _ RecipientAuthorityTarget, batch RecipientBatch) error {
+func (r *blockingRecipientDeliveryEnqueuerForCommitTest) EnqueueRecipientDeliveryPlan(ctx context.Context, plan onlinedelivery.RecipientDeliveryPlan) error {
 	r.once.Do(func() {
 		close(r.started)
 	})
 	r.mu.Lock()
-	r.batches = append(r.batches, batch.Clone())
+	r.plans = append(r.plans, plan.Clone())
 	r.mu.Unlock()
 	select {
 	case <-r.releaseC:
@@ -1376,7 +1298,7 @@ func (r *blockingRecipientDeliveryEnqueuerForCommitTest) release() {
 func (r *blockingRecipientDeliveryEnqueuerForCommitTest) callCount() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return len(r.batches)
+	return len(r.plans)
 }
 
 func (r *blockingRecipientDeliveryEnqueuerForCommitTest) waitCalls(t *testing.T, want int) {
@@ -1396,9 +1318,9 @@ func (r *blockingRecipientDeliveryEnqueuerForCommitTest) waitCalls(t *testing.T,
 func (r *blockingRecipientDeliveryEnqueuerForCommitTest) messageIDs() []uint64 {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	out := make([]uint64, 0, len(r.batches))
-	for _, batch := range r.batches {
-		out = append(out, batch.Event.MessageID)
+	out := make([]uint64, 0, len(r.plans))
+	for _, plan := range r.plans {
+		out = append(out, plan.Event.MessageID)
 	}
 	return out
 }
@@ -1418,10 +1340,10 @@ func waitHandoffDepthForTest(t *testing.T, group *Group, want int) {
 }
 
 type scriptedRecipientDeliveryEnqueuerForCommitTest struct {
-	mu      sync.Mutex
-	cond    *sync.Cond
-	errs    []error
-	batches []RecipientBatch
+	mu    sync.Mutex
+	cond  *sync.Cond
+	errs  []error
+	plans []onlinedelivery.RecipientDeliveryPlan
 }
 
 type recordingPostCommitFailureObserverForTest struct {
@@ -1508,15 +1430,15 @@ func (r *panicPersistAfterEnqueuerForCommitTest) callCount() int {
 	return r.calls
 }
 
-func (r *scriptedRecipientDeliveryEnqueuerForCommitTest) EnqueueRecipientBatch(_ context.Context, _ RecipientAuthorityTarget, batch RecipientBatch) error {
+func (r *scriptedRecipientDeliveryEnqueuerForCommitTest) EnqueueRecipientDeliveryPlan(_ context.Context, plan onlinedelivery.RecipientDeliveryPlan) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.cond == nil {
 		r.cond = sync.NewCond(&r.mu)
 	}
-	r.batches = append(r.batches, batch.Clone())
+	r.plans = append(r.plans, plan.Clone())
 	r.cond.Broadcast()
-	index := len(r.batches) - 1
+	index := len(r.plans) - 1
 	if index < len(r.errs) {
 		return r.errs[index]
 	}
@@ -1531,7 +1453,7 @@ func (r *scriptedRecipientDeliveryEnqueuerForCommitTest) waitCalls(t *testing.T,
 		if r.cond == nil {
 			r.cond = sync.NewCond(&r.mu)
 		}
-		got := len(r.batches)
+		got := len(r.plans)
 		r.mu.Unlock()
 		if got >= want {
 			return
@@ -1546,15 +1468,15 @@ func (r *scriptedRecipientDeliveryEnqueuerForCommitTest) waitCalls(t *testing.T,
 func (r *scriptedRecipientDeliveryEnqueuerForCommitTest) callCount() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return len(r.batches)
+	return len(r.plans)
 }
 
-func (r *scriptedRecipientDeliveryEnqueuerForCommitTest) batchesSnapshot() []RecipientBatch {
+func (r *scriptedRecipientDeliveryEnqueuerForCommitTest) plansSnapshot() []onlinedelivery.RecipientDeliveryPlan {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	out := make([]RecipientBatch, 0, len(r.batches))
-	for _, batch := range r.batches {
-		out = append(out, batch.Clone())
+	out := make([]onlinedelivery.RecipientDeliveryPlan, 0, len(r.plans))
+	for _, plan := range r.plans {
+		out = append(out, plan.Clone())
 	}
 	return out
 }
@@ -1562,9 +1484,9 @@ func (r *scriptedRecipientDeliveryEnqueuerForCommitTest) batchesSnapshot() []Rec
 func (r *scriptedRecipientDeliveryEnqueuerForCommitTest) messageIDs() []uint64 {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	out := make([]uint64, 0, len(r.batches))
-	for _, batch := range r.batches {
-		out = append(out, batch.Event.MessageID)
+	out := make([]uint64, 0, len(r.plans))
+	for _, plan := range r.plans {
+		out = append(out, plan.Event.MessageID)
 	}
 	return out
 }
@@ -1573,9 +1495,11 @@ func (r *scriptedRecipientDeliveryEnqueuerForCommitTest) recipientUIDs() []strin
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	var out []string
-	for _, batch := range r.batches {
-		for _, recipient := range batch.Recipients {
-			out = append(out, recipient.UID)
+	for _, plan := range r.plans {
+		for _, target := range plan.Targets {
+			for _, recipient := range target.Recipients {
+				out = append(out, recipient.UID)
+			}
 		}
 	}
 	return out
@@ -1584,9 +1508,9 @@ func (r *scriptedRecipientDeliveryEnqueuerForCommitTest) recipientUIDs() []strin
 func (r *scriptedRecipientDeliveryEnqueuerForCommitTest) payloads() [][]byte {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	out := make([][]byte, 0, len(r.batches))
-	for _, batch := range r.batches {
-		out = append(out, append([]byte(nil), batch.Event.Payload...))
+	out := make([][]byte, 0, len(r.plans))
+	for _, plan := range r.plans {
+		out = append(out, append([]byte(nil), plan.Event.Payload...))
 	}
 	return out
 }
