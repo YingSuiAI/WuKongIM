@@ -863,6 +863,14 @@ func (n *Node) appendMessageEventFinishLocal(ctx context.Context, event metadb.M
 		n.setMessageEventStreamCache(n.messageEventStreamCache.observation())
 		return metadb.MessageEventAppendResult{}, ErrMessageEventStreamCacheMiss
 	}
+	if len(openStates) == 0 && !hasDurableRun && event.MsgEventSeq == 0 {
+		// A self-contained terminal snapshot may be the first projection observed by
+		// a new leader after the volatile stream cache was lost. Preserve the
+		// Platform authority watermark so connected clients with an older transport
+		// watermark observe a gap and recover the terminal snapshot instead of
+		// discarding an incorrectly restarted seq=1 event.
+		event.MsgEventSeq = event.AuthoritySequence
+	}
 	stageStart = time.Now()
 	events := make([]metadb.MessageEventAppend, 0, len(openStates)+1)
 	for _, state := range openStates {

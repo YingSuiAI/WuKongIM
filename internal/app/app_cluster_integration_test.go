@@ -89,7 +89,11 @@ func TestStaticMultiNodeClusterStartsControllerVoters(t *testing.T) {
 
 func TestWKProtoTokenAuthReadsCurrentSlotLeaderFromNonLeaderGateway(t *testing.T) {
 	apps, nodes := startThreeNodeAuthApps(t)
-	const uid = "auth-rotation-user"
+	const (
+		uid           = "auth-rotation-user"
+		deviceID      = "device-web-1"
+		appInstanceID = "app-instance-web-1"
+	)
 	leader := waitAuthSlotLeader(t, nodes, uid)
 	var nonLeader *App
 	for i, node := range nodes {
@@ -106,24 +110,41 @@ func TestWKProtoTokenAuthReadsCurrentSlotLeaderFromNonLeaderGateway(t *testing.T
 	defer cancel()
 	writer := nodes[0]
 	if err := writer.UpsertDeviceMetadata(ctx, metadb.Device{
-		UID: uid, DeviceFlag: int64(frame.WEB), Token: "token-v1", DeviceLevel: int64(frame.DeviceLevelSlave),
+		UID: uid, DeviceFlag: int64(frame.WEB), DeviceID: deviceID, AppInstanceID: appInstanceID,
+		DeviceSessionID: "device-session-v1", IMSessionID: "im-session-v1",
+		InstallationGeneration: 7, SessionGeneration: 1, AuthorizationFence: 11,
+		Token: "token-v1", DeviceLevel: int64(frame.DeviceLevelSlave),
 	}); err != nil {
 		t.Fatalf("UpsertDeviceMetadata(v1) error = %v", err)
 	}
-	if level, err := nonLeader.verifyWKProtoToken(uid, frame.WEB, "token-v1"); err != nil || level != frame.DeviceLevelSlave {
-		t.Fatalf("verifyWKProtoToken(v1) level=%d error=%v", level, err)
+	credential, err := nonLeader.verifyWKProtoToken(uid, frame.WEB, deviceID, appInstanceID, 1, "token-v1")
+	if err != nil {
+		t.Fatalf("verifyWKProtoToken(v1) error=%v", err)
+	}
+	if credential.DeviceLevel != frame.DeviceLevelSlave || credential.DeviceSessionID != "device-session-v1" || credential.IMSessionID != "im-session-v1" || credential.InstallationGeneration != 7 || credential.AuthorizationFence != 11 {
+		t.Fatalf("verifyWKProtoToken(v1) credential=%#v, want exact v1 credential", credential)
 	}
 
 	if err := writer.UpsertDeviceMetadata(ctx, metadb.Device{
-		UID: uid, DeviceFlag: int64(frame.WEB), Token: "token-v2", DeviceLevel: int64(frame.DeviceLevelMaster),
+		UID: uid, DeviceFlag: int64(frame.WEB), DeviceID: deviceID, AppInstanceID: appInstanceID,
+		DeviceSessionID: "device-session-v2", IMSessionID: "im-session-v2",
+		InstallationGeneration: 7, SessionGeneration: 2, AuthorizationFence: 12,
+		Token: "token-v2", DeviceLevel: int64(frame.DeviceLevelMaster),
 	}); err != nil {
 		t.Fatalf("UpsertDeviceMetadata(v2) error = %v", err)
 	}
-	if _, err := nonLeader.verifyWKProtoToken(uid, frame.WEB, "token-v1"); err == nil {
+	if _, err := nonLeader.verifyWKProtoToken(uid, frame.WEB, deviceID, appInstanceID, 1, "token-v1"); err == nil {
 		t.Fatal("verifyWKProtoToken(old token) error = nil after rotation")
 	}
-	if level, err := nonLeader.verifyWKProtoToken(uid, frame.WEB, "token-v2"); err != nil || level != frame.DeviceLevelMaster {
-		t.Fatalf("verifyWKProtoToken(v2) level=%d error=%v", level, err)
+	if _, err := nonLeader.verifyWKProtoToken(uid, frame.WEB, deviceID, appInstanceID, 1, "token-v2"); err == nil {
+		t.Fatal("verifyWKProtoToken(old session generation) error = nil after rotation")
+	}
+	credential, err = nonLeader.verifyWKProtoToken(uid, frame.WEB, deviceID, appInstanceID, 2, "token-v2")
+	if err != nil {
+		t.Fatalf("verifyWKProtoToken(v2) error=%v", err)
+	}
+	if credential.DeviceLevel != frame.DeviceLevelMaster || credential.DeviceSessionID != "device-session-v2" || credential.IMSessionID != "im-session-v2" || credential.InstallationGeneration != 7 || credential.AuthorizationFence != 12 {
+		t.Fatalf("verifyWKProtoToken(v2) credential=%#v, want exact v2 credential", credential)
 	}
 }
 

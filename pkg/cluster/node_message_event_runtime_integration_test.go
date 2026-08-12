@@ -57,6 +57,50 @@ func TestClusterMessageEventFacadeAppendsTerminalThroughChannelHashSlot(t *testi
 	}
 }
 
+func TestClusterMessageEventCacheMissTerminalSnapshotPreservesAuthorityWatermark(t *testing.T) {
+	node := newDefaultSingleNode(t)
+	startNode(t, node)
+	t.Cleanup(func() { stopNodes(t, node) })
+
+	const (
+		channelID         = "message-event-terminal-after-failover"
+		clientMsgNo       = "cmn-terminal-after-failover"
+		authoritySequence = uint64(103)
+	)
+	route := waitRouteKeyLeaderReady(t, node, channelID)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	result, err := node.AppendMessageEvent(ctx, metadb.MessageEventAppend{
+		ChannelID:          channelID,
+		ChannelType:        2,
+		ClientMsgNo:        clientMsgNo,
+		RunID:              "run-1",
+		AuthorizationFence: "fence-1",
+		AuthoritySequence:  authoritySequence,
+		EventID:            "evt-terminal-after-failover",
+		EventKey:           "main",
+		EventType:          metadb.EventTypeFinish,
+		Visibility:         metadb.VisibilityPublic,
+		OccurredAt:         1000,
+		Payload:            messageEventFinishForIntegrationTest("complete", authoritySequence),
+		UpdatedAt:          1001,
+	})
+	if err != nil {
+		t.Fatalf("AppendMessageEvent(cache-miss terminal snapshot) error = %v", err)
+	}
+	if result.MsgEventSeq != authoritySequence || result.Status != metadb.EventStatusClosed {
+		t.Fatalf("append result = %#v, want seq=%d closed", result, authoritySequence)
+	}
+	cursor, found, err := node.defaultSlotMetaDB.ForHashSlot(route.HashSlot).GetMessageEventCursor(ctx, channelID, 2, clientMsgNo, "run-1")
+	if err != nil || !found {
+		t.Fatalf("GetMessageEventCursor() = (%#v, %t, %v), want found", cursor, found, err)
+	}
+	if cursor.LastMsgEventSeq != authoritySequence || cursor.LastAuthoritySequence != authoritySequence || !cursor.Terminal {
+		t.Fatalf("cursor = %#v, want terminal watermark %d", cursor, authoritySequence)
+	}
+}
+
 func TestClusterMessageEventFacadeCachesStreamUntilTerminalEvent(t *testing.T) {
 	node := newDefaultSingleNode(t)
 	startNode(t, node)
