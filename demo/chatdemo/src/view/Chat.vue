@@ -47,9 +47,7 @@ const placeholder = ref("请输入对方登录名")
 const pulldowning = ref(false) // 下拉中
 const pulldownFinished = ref(false) // 下拉完成
 
-const startStreamMessage = ref(false) // 开始流消息
 const msgInputPlaceholder = ref("请输入消息")
-const streamNo = ref<string>() // 流消息序号
 
 const messages = ref<Message[]>(new Array<Message>())
 
@@ -73,15 +71,15 @@ const messageAvatarURL = (message: MessageAvatarSource): string => {
 
 title.value = `${uid || ""}(未连接)`
 
-// renderStreamText 从 typed EVENT compact snapshot 提取正文
-const renderStreamText = (m: any) => {
+// Materialize the latest typed EVENT compact snapshot into message content.
+const renderEventSnapshot = (m: any) => {
     // 优先使用 event_meta 中的 snapshot
     const eventMeta = m.eventMeta
     if (eventMeta && eventMeta.events && eventMeta.events.length > 0) {
         for (const ek of eventMeta.events) {
             if (ek.event_key === "main" || eventMeta.events.length === 1) {
                 const snapshot = ek.snapshot
-                if (snapshot && snapshot.kind === "text" && snapshot.text) {
+                if (snapshot && typeof snapshot.text === "string" && snapshot.text) {
                     m.streamText = snapshot.text
                     return
                 }
@@ -257,14 +255,12 @@ const pullLast = async () => {
         pullMode: PullMode.Up
     })
 
-    // 渲染流消息
+    // Hydrate typed message-event snapshots returned with history.
     for (const m of msgs) {
-        if (m.setting.streamOn) {
-            renderStreamText(m)
-            if (m.streamText && m.streamText.length > 0) {
-                const htmlText = await marked.parse(m.streamText)
-                m.content = new MessageText(htmlText)
-            }
+        renderEventSnapshot(m)
+        if (m.streamText && m.streamText.length > 0) {
+            const htmlText = await marked.parse(m.streamText)
+            m.content = new MessageText(htmlText)
         }
     }
 
@@ -292,14 +288,12 @@ const pullDown = async () => {
         pullMode: PullMode.Down
     })
 
-    // 渲染流消息
+    // Hydrate typed message-event snapshots returned with history.
     for (const m of msgs) {
-        if (m.setting.streamOn) {
-            renderStreamText(m)
-            if (m.streamText && m.streamText.length > 0) {
-                const htmlText = await marked.parse(m.streamText)
-                m.content = new MessageText(htmlText)
-            }
+        renderEventSnapshot(m)
+        if (m.streamText && m.streamText.length > 0) {
+            const htmlText = await marked.parse(m.streamText)
+            m.content = new MessageText(htmlText)
         }
     }
 
@@ -496,8 +490,6 @@ const onKeydown = (e: any) => {
                     <input :placeholder="msgInputPlaceholder" v-model="text" style="height: 40px;"
                         @keyup.enter="onEnter" @keydown.enter="onKeydown" @compositionstart="isComposing = true"
                         @compositionend="isComposing = false" />
-                    <!-- <button class="message-stream" v-on:click="onMessageStream">{{ startStreamMessage ? '停止流消息' : '开启流消息'
-                    }}</button> -->
                     <button class="message-custom" v-on:click="onCustomMessageSend">自定义消息</button>
                     <button v-on:click="onSend">发送</button>
                 </div>
@@ -758,11 +750,6 @@ const onKeydown = (e: any) => {
 .fade-enter,
 .fade-leave-to {
     opacity: 0;
-}
-
-.message-stream {
-    width: 120px !important;
-    height: 40px;
 }
 
 .message-box {
