@@ -10,17 +10,22 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=${TARGETARCH:-$(go env GOARCH)} go build -o /out/wukongim ./cmd/wukongim \
- && CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=${TARGETARCH:-$(go env GOARCH)} go build -o /out/wkbench ./cmd/wkbench \
- && CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=${TARGETARCH:-$(go env GOARCH)} go build -o /out/wkanalysis ./cmd/wkanalysis \
- && CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=${TARGETARCH:-$(go env GOARCH)} go build -o /out/wkcloudsim ./cmd/wkcloudsim
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=${TARGETARCH:-$(go env GOARCH)} \
+    go build -trimpath -o /out/wukongim ./cmd/wukongim
 
-FROM ${RUNTIME_IMAGE}
+FROM ${RUNTIME_IMAGE} AS production
+ARG OCI_SOURCE
+ARG OCI_REVISION
+ARG OCI_VERSION
+ARG OCI_CREATED
+ARG OCI_LICENSES
+LABEL org.opencontainers.image.source="${OCI_SOURCE}" \
+      org.opencontainers.image.revision="${OCI_REVISION}" \
+      org.opencontainers.image.version="${OCI_VERSION}" \
+      org.opencontainers.image.created="${OCI_CREATED}" \
+      org.opencontainers.image.licenses="${OCI_LICENSES}"
 WORKDIR /app
 COPY --from=builder /out/wukongim /usr/local/bin/wukongim
-COPY --from=builder /out/wkbench /usr/local/bin/wkbench
-COPY --from=builder /out/wkanalysis /usr/local/bin/wkanalysis
-COPY --from=builder /out/wkcloudsim /usr/local/bin/wkcloudsim
 
 EXPOSE 5001 5100 5200 5301 7000 19092
 ENTRYPOINT ["/usr/local/bin/wukongim", "-config", "/etc/wukongim/wukongim.toml"]
