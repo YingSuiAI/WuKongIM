@@ -153,33 +153,98 @@ func TestMessageEventCacheRejectsSnapshotGrowthWithoutAdvancing(t *testing.T) {
 	}
 }
 
-func TestMessageEventCacheUsesRunGlobalAuthoritySequenceAcrossLanes(t *testing.T) {
+func TestMessageEventCacheAllowsAuthorityGapsAndRejectsNonIncreasingSequences(t *testing.T) {
 	cache := newMessageEventStreamCache(8)
 	base := metadb.MessageEventAppend{
 		ChannelID: "g1", ChannelType: 2, ClientMsgNo: "cmn-global", RunID: "run-1",
 		AuthorizationFence: "fence-1",
-		AuthoritySequence:  1, Visibility: metadb.VisibilityPublic,
-		EventType: metadb.EventTypeDelta, Payload: []byte(`{"kind":"text","delta":"x"}`),
+		AuthoritySequence:  3, Visibility: metadb.VisibilityPublic,
+		EventID: "evt-open-3", EventKey: "main", EventType: metadb.EventTypeOpen,
 	}
-	for index, lane := range []string{"main", "tool", "main"} {
-		event := base
-		event.EventID = fmt.Sprintf("evt-%d", index+1)
-		event.EventKey = lane
-		event.AuthoritySequence = uint64(index + 1)
-		result, err := cache.appendCached(event)
-		if err != nil {
-			t.Fatalf("appendCached(%s): %v", lane, err)
-		}
-		if result.MsgEventSeq != event.AuthoritySequence {
-			t.Fatalf("appendCached(%s) seq=%d, want %d", lane, result.MsgEventSeq, event.AuthoritySequence)
+	first, err := cache.appendCached(base)
+	if err != nil || first.MsgEventSeq != 1 {
+		t.Fatalf("appendCached(open=3) = %#v error=%v, want transport seq=1", first, err)
+	}
+	duplicate, err := cache.appendCached(base)
+	if err != nil || duplicate.Applied || duplicate.MsgEventSeq != first.MsgEventSeq {
+		t.Fatalf("appendCached(duplicate open=3) = %#v error=%v, want idempotent seq=%d", duplicate, err, first.MsgEventSeq)
+	}
+	for _, sequence := range []uint64{3, 2} {
+		rejected := base
+		rejected.AuthoritySequence = sequence
+		rejected.EventID = fmt.Sprintf("evt-rejected-%d", sequence)
+		rejected.EventType = metadb.EventTypeDelta
+		if _, err := cache.appendCached(rejected); !errors.Is(err, metadb.ErrStaleMeta) {
+			t.Fatalf("appendCached(sequence=%d after open=3) error=%v, want stale meta", sequence, err)
 		}
 	}
 	gap := base
-	gap.EventID = "evt-5"
+	gap.EventID = "evt-delta-8"
 	gap.EventKey = "tool"
-	gap.AuthoritySequence = 5
-	if _, err := cache.appendCached(gap); !errors.Is(err, metadb.ErrStaleMeta) {
-		t.Fatalf("appendCached(gap) error=%v, want stale meta", err)
+	gap.EventType = metadb.EventTypeDelta
+	gap.AuthoritySequence = 8
+	gap.Payload = []byte(`{"text_delta":"result"}`)
+	result, err := cache.appendCached(gap)
+	if err != nil || result.MsgEventSeq != 2 || result.State.LastAuthoritySequence != 8 {
+		t.Fatalf("appendCached(delta=8) = %#v error=%v, want transport seq=2 authority=8", result, err)
+	}
+	if got := cache.sessions[messageEventCacheKey(base)].runSequences[base.RunID]; got != 8 {
+		t.Fatalf("run authority watermark = %d, want 8", got)
+	}
+}
+
+func TestMessageEventCachePrepareFinishAllowsAuthorityGapWithContiguousTransportSequence(t *testing.T) {
+	cache := newMessageEventStreamCache(8)
+	open := metadb.MessageEventAppend{
+		ChannelID: "g1", ChannelType: 2, ClientMsgNo: "cmn-finish-gap", RunID: "run-1",
+		AuthorizationFence: "fence-1", AuthoritySequence: 3,
+		EventID: "evt-open-3", EventKey: "main", EventType: metadb.EventTypeOpen,
+		Visibility: metadb.VisibilityPublic,
+	}
+	if _, err := cache.appendCached(open); err != nil {
+		t.Fatalf("appendCached(open=3): %v", err)
+	}
+	finish := open
+	finish.AuthoritySequence = 8
+	finish.EventID = "evt-finish-8"
+	finish.EventType = metadb.EventTypeFinish
+	finish.Payload = []byte(`{"end_reason":1}`)
+	prepared, states, err := cache.prepareFinish(finish)
+	if err != nil || prepared.MsgEventSeq != 2 || len(states) != 1 {
+		t.Fatalf("prepareFinish(8) = event:%#v states:%#v error:%v, want transport seq=2 and one open lane", prepared, states, err)
+	}
+	retry, retryStates, err := cache.prepareFinish(finish)
+	if err != nil || retry.MsgEventSeq != prepared.MsgEventSeq || len(retryStates) != 1 {
+		t.Fatalf("prepareFinish(duplicate 8) = event:%#v states:%#v error:%v, want idempotent seq=%d", retry, retryStates, err, prepared.MsgEventSeq)
+	}
+	changed := finish
+	changed.Payload = []byte(`{"end_reason":2}`)
+	if _, _, err := cache.prepareFinish(changed); !errors.Is(err, metadb.ErrStaleMeta) {
+		t.Fatalf("prepareFinish(changed duplicate ID) error=%v, want stale meta", err)
+	}
+}
+
+func TestMessageEventCachePrepareFinishRejectsNonIncreasingAuthoritySequence(t *testing.T) {
+	for _, sequence := range []uint64{3, 2} {
+		t.Run(fmt.Sprintf("sequence_%d", sequence), func(t *testing.T) {
+			cache := newMessageEventStreamCache(8)
+			open := metadb.MessageEventAppend{
+				ChannelID: "g1", ChannelType: 2, ClientMsgNo: fmt.Sprintf("cmn-finish-%d", sequence), RunID: "run-1",
+				AuthorizationFence: "fence-1", AuthoritySequence: 3,
+				EventID: "evt-open-3", EventKey: "main", EventType: metadb.EventTypeOpen,
+				Visibility: metadb.VisibilityPublic,
+			}
+			if _, err := cache.appendCached(open); err != nil {
+				t.Fatalf("appendCached(open=3): %v", err)
+			}
+			finish := open
+			finish.AuthoritySequence = sequence
+			finish.EventID = fmt.Sprintf("evt-finish-%d", sequence)
+			finish.EventType = metadb.EventTypeFinish
+			if _, _, err := cache.prepareFinish(finish); !errors.Is(err, metadb.ErrStaleMeta) {
+				t.Fatalf("prepareFinish(sequence=%d after open=3) error=%v, want stale meta", sequence, err)
+			}
+		})
 	}
 }
 

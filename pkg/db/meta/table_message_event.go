@@ -636,7 +636,7 @@ func validMessageEventAuthoritySequence(cursor MessageEventCursor, exists bool, 
 	if !exists || cursor.LastAuthoritySequence == 0 {
 		return event.AuthoritySequence > 0
 	}
-	return event.AuthoritySequence == cursor.LastAuthoritySequence+1
+	return event.AuthoritySequence > cursor.LastAuthoritySequence
 }
 
 func messageEventAppliedFromResult(event MessageEventAppend, result MessageEventAppendResult) MessageEventApplied {

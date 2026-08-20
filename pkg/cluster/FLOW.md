@@ -448,6 +448,12 @@ Cache capacity pressure returns
 `ErrBackpressured` instead of evicting active streams. The append path decodes
 the returned `MessageEventAppendResult` so callers can expose the assigned
 message-level event sequence without issuing a second read.
+The cache treats Platform authority sequence as strictly increasing rather than
+contiguous because private ledger entries may consume intermediate values.
+Exact event-ID retries remain idempotent before monotonic validation, while the
+separate message-event transport sequence advances once per accepted public
+event (except self-contained recovery snapshots that intentionally preserve a
+larger recovery watermark).
 Before accepting an event, the current Channel leader applies the exact
 Slot-owned runtime metadata through the ordinary `ApplyMeta` activation seam.
 This cold-loads an evicted runtime and lets the committed-message lookup read

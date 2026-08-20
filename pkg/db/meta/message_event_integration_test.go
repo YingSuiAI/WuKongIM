@@ -98,6 +98,66 @@ func TestMessageEventSeparatesAuthorityAndTransportSequences(t *testing.T) {
 	}
 }
 
+func TestMessageEventAuthoritySequenceAllowsPublicOutputGaps(t *testing.T) {
+	store := openTestMetaStore(t)
+	defer store.close(t)
+	ctx := context.Background()
+	shard := store.db.HashSlot(4)
+
+	open := MessageEventAppend{
+		ChannelID: "g1", ChannelType: 2, ClientMsgNo: "cmn-authority-gap", RunID: "run-1",
+		AuthorizationFence: "7", AuthoritySequence: 3,
+		EventID: "evt-open-3", EventKey: "main", EventType: EventTypeOpen,
+	}
+	opened, err := shard.AppendMessageEvent(ctx, open)
+	if err != nil {
+		t.Fatalf("AppendMessageEvent(open=3): %v", err)
+	}
+	if opened.MsgEventSeq != 1 {
+		t.Fatalf("AppendMessageEvent(open=3) msg_event_seq = %d, want 1", opened.MsgEventSeq)
+	}
+
+	for _, sequence := range []uint64{3, 2} {
+		rejected := open
+		rejected.AuthoritySequence = sequence
+		rejected.EventID = fmt.Sprintf("evt-rejected-%d", sequence)
+		rejected.EventType = EventTypeDelta
+		rejected.Payload = messageEventDeltaPayloadForTest("late", sequence)
+		if _, err := shard.AppendMessageEvent(ctx, rejected); !errors.Is(err, dberrors.ErrConflict) {
+			t.Fatalf("AppendMessageEvent(sequence=%d after open=3) error = %v, want ErrConflict", sequence, err)
+		}
+	}
+
+	delta := open
+	delta.AuthoritySequence = 8
+	delta.EventID = "evt-delta-8"
+	delta.EventType = EventTypeDelta
+	delta.Payload = messageEventDeltaPayloadForTest("hello", 8)
+	appended, err := shard.AppendMessageEvent(ctx, delta)
+	if err != nil {
+		t.Fatalf("AppendMessageEvent(delta=8): %v", err)
+	}
+	if appended.MsgEventSeq != 2 || appended.State.LastAuthoritySequence != 8 {
+		t.Fatalf("AppendMessageEvent(delta=8) = %#v, want transport seq=2 authority=8", appended)
+	}
+
+	duplicate, err := shard.AppendMessageEvent(ctx, delta)
+	if err != nil {
+		t.Fatalf("AppendMessageEvent(duplicate delta=8): %v", err)
+	}
+	if duplicate.Applied || duplicate.MsgEventSeq != appended.MsgEventSeq {
+		t.Fatalf("AppendMessageEvent(duplicate delta=8) = %#v, want idempotent transport seq=%d", duplicate, appended.MsgEventSeq)
+	}
+
+	cursor, found, err := shard.GetMessageEventCursor(ctx, open.ChannelID, open.ChannelType, open.ClientMsgNo, open.RunID)
+	if err != nil || !found {
+		t.Fatalf("GetMessageEventCursor() found=%v err=%v", found, err)
+	}
+	if cursor.LastAuthoritySequence != 8 || cursor.LastMsgEventSeq != 2 {
+		t.Fatalf("GetMessageEventCursor() = %#v, want authority=8 transport=2", cursor)
+	}
+}
+
 func TestMessageEventAppendStreamOpenStartsDefaultLane(t *testing.T) {
 	store := openTestMetaStore(t)
 	defer store.close(t)

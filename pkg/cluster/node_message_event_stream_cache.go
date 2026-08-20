@@ -190,7 +190,7 @@ func (c *messageEventStreamCache) appendCachedObserved(event metadb.MessageEvent
 		return metadb.MessageEventAppendResult{}, c.observationLocked(), ErrMessageEventRunTerminal
 	}
 	lastSequence, sequenceKnown := session.runSequences[event.RunID]
-	if sequenceKnown && event.AuthoritySequence != lastSequence+1 {
+	if sequenceKnown && event.AuthoritySequence <= lastSequence {
 		return metadb.MessageEventAppendResult{}, c.observationLocked(), metadb.ErrStaleMeta
 	}
 	if !sequenceKnown && event.EventType == metadb.EventTypeDelta && event.AuthoritySequence > 1 {
@@ -309,7 +309,7 @@ func (c *messageEventStreamCache) prepareFinish(event metadb.MessageEventAppend)
 		}
 		event.MsgEventSeq = finishing.seq
 	} else {
-		if last := session.runSequences[event.RunID]; last > 0 && event.AuthoritySequence != last+1 {
+		if last := session.runSequences[event.RunID]; last > 0 && event.AuthoritySequence <= last {
 			return event, nil, metadb.ErrStaleMeta
 		}
 		if event.MsgEventSeq == 0 {

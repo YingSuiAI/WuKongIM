@@ -74,7 +74,9 @@ fields.
 - Channel latest rows are channel-owned projections whose sequence only
   advances; they are not a per-user conversation directory.
 - Message-event state, cursor, and applied-event tables preserve idempotent
-  event reduction without raw replay rows.
+  event reduction without raw replay rows. Platform authority sequences are
+  strictly increasing per run but may contain gaps consumed by non-public
+  ledger entries; the message-event transport sequence remains contiguous.
 - Migration tasks keep guarded runtime-meta updates and read-your-writes
   overlays inside the same deterministic batch.
 
