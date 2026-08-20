@@ -448,6 +448,12 @@ Cache capacity pressure returns
 `ErrBackpressured` instead of evicting active streams. The append path decodes
 the returned `MessageEventAppendResult` so callers can expose the assigned
 message-level event sequence without issuing a second read.
+Before accepting an event, the current Channel leader applies the exact
+Slot-owned runtime metadata through the ordinary `ApplyMeta` activation seam.
+This cold-loads an evicted runtime and lets the committed-message lookup read
+the durable anchor without replaying the message. Anchor authority is parsed
+from the standard `agent.run.anchor` v1 envelope's nested payload; flat or
+wrong-version payloads are rejected.
 `MessageEvent.Observer` receives bounded append, proposal, and stream-cache
 pressure observations from this path. Cache-only stream updates report the
 `cache` append path and do not emit proposal observations; terminal durable

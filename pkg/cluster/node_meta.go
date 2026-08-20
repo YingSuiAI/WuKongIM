@@ -10,6 +10,7 @@ import (
 	"time"
 
 	channelruntime "github.com/WuKongIM/WuKongIM/pkg/channel"
+	"github.com/WuKongIM/WuKongIM/pkg/cluster/channels"
 	metadb "github.com/WuKongIM/WuKongIM/pkg/db/meta"
 	metafsm "github.com/WuKongIM/WuKongIM/pkg/slot/fsm"
 )
@@ -503,26 +504,56 @@ func (n *Node) LookupMessageEventAnchor(ctx context.Context, channelID string, c
 	if meta.Leader != n.cfg.NodeID {
 		return n.forwardMessageEventAnchorLookup(ctx, meta.Leader, channelID, channelType, messageID)
 	}
-	return n.lookupMessageEventAnchorLocal(ctx, channelID, channelType, messageID)
+	return n.lookupMessageEventAnchorWithMeta(ctx, meta, messageID)
 }
 
 func (n *Node) lookupMessageEventAnchorLocal(ctx context.Context, channelID string, channelType int64, messageID uint64) (MessageEventAnchor, bool, error) {
 	if n == nil || n.channels == nil {
 		return MessageEventAnchor{}, false, ErrNotStarted
 	}
+	meta, err := n.GetChannelRuntimeMeta(ctx, channelID, channelType)
+	if errors.Is(err, metadb.ErrNotFound) {
+		return MessageEventAnchor{}, false, nil
+	}
+	if err != nil {
+		return MessageEventAnchor{}, false, err
+	}
+	if meta.Leader != n.cfg.NodeID {
+		return MessageEventAnchor{}, false, ErrNotLeader
+	}
+	return n.lookupMessageEventAnchorWithMeta(ctx, meta, messageID)
+}
+
+func (n *Node) lookupMessageEventAnchorWithMeta(ctx context.Context, meta metadb.ChannelRuntimeMeta, messageID uint64) (MessageEventAnchor, bool, error) {
+	if n == nil || n.channels == nil {
+		return MessageEventAnchor{}, false, ErrNotStarted
+	}
+	if err := ctxErr(ctx); err != nil {
+		return MessageEventAnchor{}, false, err
+	}
+	runtimeMeta := channels.ProjectRuntimeMeta(meta)
+	if runtimeMeta.ID.ID == "" || runtimeMeta.ID.Type == 0 || runtimeMeta.Leader != channelruntime.NodeID(n.cfg.NodeID) {
+		return MessageEventAnchor{}, false, metadb.ErrInvalidArgument
+	}
+	metaApplier, ok := n.channels.(interface {
+		ApplyMeta(channelruntime.Meta) error
+	})
+	if !ok {
+		return MessageEventAnchor{}, false, ErrNotStarted
+	}
+	if err := metaApplier.ApplyMeta(runtimeMeta); err != nil {
+		return MessageEventAnchor{}, false, err
+	}
 	lookup, ok := n.channels.(channelruntime.CommittedMessageLookup)
 	if !ok {
 		return MessageEventAnchor{}, false, ErrNotStarted
 	}
-	anchor, found, err := lookup.LookupCommittedMessage(ctx, channelruntime.ChannelID{ID: channelID, Type: uint8(channelType)}, messageID)
+	anchor, found, err := lookup.LookupCommittedMessage(ctx, runtimeMeta.ID, messageID)
 	if err != nil || !found {
 		return MessageEventAnchor{}, found, err
 	}
-	var identity struct {
-		RunID              string `json:"run_id"`
-		AuthorizationFence uint64 `json:"authorization_fence"`
-	}
-	if err := json.Unmarshal(anchor.Payload, &identity); err != nil || strings.TrimSpace(identity.RunID) == "" || identity.AuthorizationFence == 0 {
+	runID, authorizationFence, err := parseAgentRunAnchorIdentity(anchor.Payload)
+	if err != nil {
 		return MessageEventAnchor{}, false, metadb.ErrInvalidArgument
 	}
 	return MessageEventAnchor{
@@ -531,9 +562,28 @@ func (n *Node) lookupMessageEventAnchorLocal(ctx context.Context, channelID stri
 		FromUID:            anchor.FromUID,
 		MessageID:          anchor.MessageID,
 		ClientMsgNo:        anchor.ClientMsgNo,
-		RunID:              strings.TrimSpace(identity.RunID),
-		AuthorizationFence: strconv.FormatUint(identity.AuthorizationFence, 10),
+		RunID:              runID,
+		AuthorizationFence: strconv.FormatUint(authorizationFence, 10),
 	}, true, nil
+}
+
+func parseAgentRunAnchorIdentity(payload []byte) (string, uint64, error) {
+	var envelope struct {
+		Type    string `json:"type"`
+		Version uint8  `json:"version"`
+		Payload struct {
+			RunID              string `json:"run_id"`
+			AuthorizationFence uint64 `json:"authorization_fence"`
+		} `json:"payload"`
+	}
+	if err := json.Unmarshal(payload, &envelope); err != nil || envelope.Type != "agent.run.anchor" || envelope.Version != 1 {
+		return "", 0, metadb.ErrInvalidArgument
+	}
+	runID := strings.TrimSpace(envelope.Payload.RunID)
+	if runID == "" || envelope.Payload.AuthorizationFence == 0 {
+		return "", 0, metadb.ErrInvalidArgument
+	}
+	return runID, envelope.Payload.AuthorizationFence, nil
 }
 
 // GetMessageEventStatesBatch reads projected event lanes for message keys through each channel route.
