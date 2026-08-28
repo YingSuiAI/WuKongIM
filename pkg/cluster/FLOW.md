@@ -517,15 +517,19 @@ A failover task sets `WriteFenceReasonFailover` and uses the target replica's
 committed HW as the cutover proof; it does not drain the unavailable source
 leader.
 Foreground append routing does not wait for this bounded scanner to revisit a
-hot channel. When an exact cached authority version fails and a fresh
-authoritative Slot read still names the same leader, the Channel service keeps
-that version non-routable, checks the channel's create-only active-task index,
-probes only healthy ISR replicas, and submits the same deterministic
-`leader_failover` task through `MigrationStore`. The task carries the failed
-leader, channel epoch, leader epoch, and route-generation guard; retries reuse
-the same task ID, selected target, proof, and timestamps. Router retries remain
-bounded by the original SEND context and can resume only after a newer
-authoritative metadata version is observed.
+hot channel. A retryable append failure first invalidates only the exact cached
+authority version. Definitive pre-submit node unavailability additionally
+marks that version for recovery; timeout and lost-response outcomes remain on
+the idempotent retry path and do not imply a dead leader. When a fresh
+authoritative Slot read still names a marked leader, foreground recovery first
+uses the shared durable-replica probe against that current leader. A matching
+healthy proof, or a direct not-found response for a reachable empty leader,
+clears the marker and reuses the same authority. Otherwise the service checks
+the channel's create-only active-task index, probes healthy ISR candidates, and
+submits the same deterministic `leader_failover` task through `MigrationStore`.
+The task carries the failed leader, channel epoch, leader epoch, and route-
+generation guard; retries reuse the same task ID, selected target, proof, and
+timestamps. Router retries remain bounded by the original SEND context.
 After leader recovery is ruled out for a channel, the same scanner asks
 `ReplicaRepairPlanner` whether an unhealthy non-leader replica can be replaced.
 Follower repair only creates a `replica_replace` task when the remaining

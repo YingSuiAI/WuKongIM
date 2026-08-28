@@ -155,6 +155,9 @@ var (
 	ErrStaleRoute = contract.ErrStaleRoute
 	// ErrRouteNotReady reports that cluster routing is not ready for foreground writes.
 	ErrRouteNotReady = contract.ErrRouteNotReady
+	// ErrAppendAuthorityUnavailable reports definitive pre-submit evidence that
+	// the resolved authority node could not be reached.
+	ErrAppendAuthorityUnavailable = contract.ErrAppendAuthorityUnavailable
 	// ErrAppendOutcomeUnknown requires durable idempotency recovery before retry.
 	ErrAppendOutcomeUnknown = contract.ErrAppendOutcomeUnknown
 	// ErrNotLeader reports that the append target is no longer the leader.

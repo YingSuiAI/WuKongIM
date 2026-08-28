@@ -54,7 +54,8 @@ scheduled backup or restore
   appends outside local authority, or runs post-commit effects elsewhere.
 - The Channel append client bounds each remote transport attempt independently
   of the outer SEND deadline. Dial failure, node-not-found, and connection
-  refusal prove that submission did not begin and map to route-not-ready.
+  refusal prove that submission did not begin and map to the typed append-
+  authority-unavailable route error.
   Attempt timeout, EOF, reset, stopped transport, and broken pipe have an
   ambiguous commit outcome and map to `ErrAppendOutcomeUnknown`; the runtime
   Router may retry only through its durable idempotency-recovery admission.

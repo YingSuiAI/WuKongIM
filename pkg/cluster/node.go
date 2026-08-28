@@ -43,6 +43,7 @@ type channelService interface {
 	AppendBatch(context.Context, channelruntime.AppendBatchRequest) (channelruntime.AppendBatchResult, error)
 	ResolveAppendAuthority(context.Context, channelruntime.ChannelID) (channelruntime.Meta, error)
 	InvalidateAppendAuthority(channelruntime.ChannelID, channelruntime.NodeID, uint64, uint64, uint64)
+	MarkAppendAuthorityFailed(channelruntime.ChannelID, channelruntime.NodeID, uint64, uint64, uint64)
 	ReadChannelLastVisible(context.Context, channelruntime.ChannelID, uint64) (channelruntime.Message, bool, error)
 	RetentionView(context.Context, channelruntime.ChannelID) (channelruntime.RetentionView, error)
 	ApplyRetentionBoundary(context.Context, channelruntime.RetentionApplyRequest) (channelruntime.RetentionApplyResult, error)
@@ -827,6 +828,15 @@ func (n *Node) InvalidateChannelAppendAuthority(id channelruntime.ChannelID, lea
 		return
 	}
 	n.channels.InvalidateAppendAuthority(id, channelruntime.NodeID(leader), epoch, leaderEpoch, routeGeneration)
+}
+
+// MarkChannelAppendAuthorityFailed records definitive unavailability of one
+// exact Channel authority version for foreground failover recovery.
+func (n *Node) MarkChannelAppendAuthorityFailed(id channelruntime.ChannelID, leader uint64, epoch uint64, leaderEpoch uint64, routeGeneration uint64) {
+	if n == nil || n.channels == nil {
+		return
+	}
+	n.channels.MarkAppendAuthorityFailed(id, channelruntime.NodeID(leader), epoch, leaderEpoch, routeGeneration)
 }
 
 // ReadChannelCommitted reads locally committed channel messages from the Node-created Channel store.

@@ -654,10 +654,12 @@ SEND while still seeing low-churn fanout metadata changes. The adapter maps
 `channel.Meta` and recipient fanout metadata to `channelappend.AuthorityTarget`
 with the canonical `ChannelID`, `ChannelKey`, `LeaderNodeID`, `Epoch`,
 `LeaderEpoch`, `RouteGeneration`, `Large`, and `SubscriberMutationVersion`.
-It also exposes conditional authority invalidation to the router. Invalidation
-delegates the generation through `cluster.Node` and removes only the exact
-failed authority version; zero generation retains static/legacy tuple
-compatibility. Subscriber/fanout metadata caching remains independent.
+It also exposes exact-version authority invalidation and definitive authority-
+failure marking to the router. Every retryable route failure refreshes only
+the matching cached version; only the typed pre-submit unavailable error marks
+that version for foreground failover. Ambiguous timeout or lost-response
+outcomes never declare the leader dead. Subscriber/fanout metadata caching
+remains independent.
 
 ```text
 channelappend.Router

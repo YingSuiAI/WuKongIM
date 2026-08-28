@@ -38,6 +38,8 @@ func (noopChannelService) ResolveAppendAuthority(context.Context, channelruntime
 
 func (noopChannelService) InvalidateAppendAuthority(channelruntime.ChannelID, channelruntime.NodeID, uint64, uint64, uint64) {
 }
+func (noopChannelService) MarkAppendAuthorityFailed(channelruntime.ChannelID, channelruntime.NodeID, uint64, uint64, uint64) {
+}
 
 func (noopChannelService) ReadChannelLastVisible(context.Context, channelruntime.ChannelID, uint64) (channelruntime.Message, bool, error) {
 	return channelruntime.Message{}, false, nil

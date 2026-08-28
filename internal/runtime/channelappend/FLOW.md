@@ -49,6 +49,10 @@ sends terminate successfully before routing.
   one.
 - Expected Channel and leader epochs fence every durable write. A canonical
   target mismatch is stale routing and creates no state.
+- Every retryable route failure invalidates only its exact cached authority.
+  Only definitive pre-submit node unavailability marks that authority for
+  failover; timeout and lost-response outcomes remain ambiguous and use the
+  existing sender/client/payload-hash idempotency recovery before retry.
 - Accepted work is not canceled by later caller cancellation. A timed-out Stop
   bounds only that caller's wait and never discards admitted work.
 - Per-item result order and cardinality are preserved across routing, append,

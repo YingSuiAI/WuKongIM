@@ -62,50 +62,81 @@ func NewForegroundAppendAuthorityRecovery(source AppendAuthorityRecoverySource, 
 
 // EnsureAppendAuthorityRecovery joins an active migration or creates one
 // guarded by the exact authoritative runtime version observed by the caller.
-func (r *ForegroundAppendAuthorityRecovery) EnsureAppendAuthorityRecovery(ctx context.Context, meta ch.Meta) error {
+func (r *ForegroundAppendAuthorityRecovery) EnsureAppendAuthorityRecovery(ctx context.Context, meta ch.Meta) (AppendAuthorityRecoveryDisposition, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if err := ctxErr(ctx); err != nil {
-		return err
+		return AppendAuthorityRecoveryPending, err
 	}
 	if r == nil || r.source == nil || r.store == nil {
-		return fmt.Errorf("%w: append recovery is not configured", ch.ErrInvalidConfig)
+		return AppendAuthorityRecoveryPending, fmt.Errorf("%w: append recovery is not configured", ch.ErrInvalidConfig)
 	}
 	if !cacheableAppendMeta(meta.ID, meta) {
-		return ch.ErrNotReady
+		return AppendAuthorityRecoveryPending, ch.ErrNotReady
 	}
 
 	recoveryCtx, cancel := context.WithTimeout(ctx, foregroundAppendRecoveryTimeout)
 	defer cancel()
 	if _, active, err := r.store.GetActive(recoveryCtx, meta.ID); err != nil {
-		return err
+		return AppendAuthorityRecoveryPending, err
 	} else if active {
-		return nil
+		return AppendAuthorityRecoveryPending, nil
 	}
 
 	key := appendRecoveryKey(meta)
 	req, planned := r.loadPlan(key)
 	if !planned {
-		var err error
-		req, err = r.plan(recoveryCtx, meta)
+		snapshot, err := r.source.ControlSnapshot(recoveryCtx)
 		if err != nil {
-			return err
+			return AppendAuthorityRecoveryPending, err
+		}
+		if r.currentLeaderUsable(recoveryCtx, snapshot, meta) {
+			return AppendAuthorityRecoveryCurrent, nil
+		}
+		req, err = r.plan(recoveryCtx, snapshot, meta)
+		if err != nil {
+			return AppendAuthorityRecoveryPending, err
 		}
 		req = r.storePlan(key, req)
 	}
 	_, err := r.store.CreateLeaderFailover(recoveryCtx, req)
 	if errors.Is(err, metadb.ErrAlreadyExists) {
-		return nil
+		return AppendAuthorityRecoveryPending, nil
 	}
-	return err
+	return AppendAuthorityRecoveryPending, err
 }
 
-func (r *ForegroundAppendAuthorityRecovery) plan(ctx context.Context, meta ch.Meta) (CreateLeaderFailoverRequest, error) {
-	snapshot, err := r.source.ControlSnapshot(ctx)
-	if err != nil {
-		return CreateLeaderFailoverRequest{}, err
+func (r *ForegroundAppendAuthorityRecovery) currentLeaderUsable(ctx context.Context, snapshot control.Snapshot, meta ch.Meta) bool {
+	if !appendRecoveryNodeSchedulable(snapshot.Nodes, uint64(meta.Leader)) {
+		return false
 	}
+	probeCtx, cancel := context.WithTimeout(ctx, foregroundCandidateProbeTimeout)
+	probe, err := r.source.ProbeChannelReplica(probeCtx, uint64(meta.Leader), runtimeMetaFromAppendMeta(meta))
+	cancel()
+	if err != nil {
+		// An empty new Channel has no durable authority identity yet. A direct
+		// not-found response from its current, schedulable leader still proves
+		// that the authority node is reachable and can perform first install.
+		return ch.ErrorMatches(err, ch.ErrChannelNotFound)
+	}
+	return probe.ChannelID == meta.ID &&
+		probe.ChannelEpoch == meta.Epoch &&
+		probe.LeaderEpoch == meta.LeaderEpoch &&
+		probe.Role == ch.RoleLeader &&
+		probe.Status == ch.StatusActive
+}
+
+func appendRecoveryNodeSchedulable(nodes []control.Node, nodeID uint64) bool {
+	for _, node := range nodes {
+		if node.NodeID == nodeID {
+			return control.NodeSchedulableForPlacement(node)
+		}
+	}
+	return false
+}
+
+func (r *ForegroundAppendAuthorityRecovery) plan(ctx context.Context, snapshot control.Snapshot, meta ch.Meta) (CreateLeaderFailoverRequest, error) {
 	probes := make([]FailoverCandidateProbe, 0, len(meta.ISR))
 	for _, nodeID := range meta.ISR {
 		if nodeID == 0 || nodeID == meta.Leader {

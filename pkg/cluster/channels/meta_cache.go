@@ -162,8 +162,26 @@ func (c *channelMetaCache) invalidateUsedMeta(id ch.ChannelID, used ch.Meta) boo
 }
 
 // invalidateAuthority marks a cached version stale only when every supplied
-// authority fence matches the installed metadata.
+// authority fence matches the installed metadata. It does not infer that the
+// authority leader is unavailable.
 func (c *channelMetaCache) invalidateAuthority(id ch.ChannelID, leader ch.NodeID, epoch uint64, leaderEpoch uint64, routeGeneration uint64) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.items == nil {
+		return false
+	}
+	meta, ok := c.items[id]
+	if !ok || meta.Leader != leader || meta.Epoch != epoch || meta.LeaderEpoch != leaderEpoch ||
+		(routeGeneration == 0 && meta.RouteGeneration != 0) ||
+		(routeGeneration != 0 && meta.RouteGeneration != routeGeneration) {
+		return false
+	}
+	return c.markStaleLocked(id)
+}
+
+// markAuthorityFailed records definitive leader unavailability for one exact
+// cached authority version and keeps that version out of the hot cache.
+func (c *channelMetaCache) markAuthorityFailed(id ch.ChannelID, leader ch.NodeID, epoch uint64, leaderEpoch uint64, routeGeneration uint64) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.items == nil {
@@ -180,6 +198,17 @@ func (c *channelMetaCache) invalidateAuthority(id ch.ChannelID, leader ch.NodeID
 	}
 	c.failed[id] = appendAuthorityVersion{leader: leader, epoch: epoch, leaderEpoch: leaderEpoch, routeGeneration: routeGeneration}
 	return c.markStaleLocked(id)
+}
+
+func (c *channelMetaCache) clearFailedAuthority(id ch.ChannelID, meta ch.Meta) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	failed, ok := c.failed[id]
+	if !ok || !failed.matches(meta) {
+		return false
+	}
+	delete(c.failed, id)
+	return true
 }
 
 // failedAuthorityMatches reports whether meta is the same authority version

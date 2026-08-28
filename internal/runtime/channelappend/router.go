@@ -38,6 +38,12 @@ type AuthorityInvalidator interface {
 	InvalidateAppendAuthority(ChannelID, AuthorityTarget)
 }
 
+// AuthorityFailureMarker optionally records definitive authority
+// unavailability after the ordinary exact-version cache invalidation.
+type AuthorityFailureMarker interface {
+	MarkAppendAuthorityFailed(ChannelID, AuthorityTarget)
+}
+
 // LocalSubmitter submits sends to the local channel authority runtime.
 // Implementations must be safe for concurrent calls from SendBatch.
 type LocalSubmitter interface {
@@ -236,10 +242,12 @@ func (r *Router) SendBatchEach(items []SendBatchItem, emit func(int, SendBatchIt
 		r.submitResolvedGroupsEach(groups, func(groupIndex int, groupResults []SendBatchItemResult) {
 			group := groups[groupIndex]
 			invalidate := false
+			markFailed := false
 			for i, result := range normalizeRouterGroupResults(len(group.indexes), groupResults) {
 				index := group.indexes[i]
 				outcomeUnknown[index] = outcomeUnknown[index] || errors.Is(result.Err, ErrAppendOutcomeUnknown)
 				invalidate = invalidate || shouldInvalidateRouterAuthority(result.Err)
+				markFailed = markFailed || shouldMarkRouterAuthorityFailed(result.Err)
 				if shouldRetryRouterError(result.Err) && canRetryRouterItem(items[index], attempts[index], r.maxRouteAttempts, time.Now()) {
 					nextPending = append(nextPending, index)
 					continue
@@ -248,6 +256,9 @@ func (r *Router) SendBatchEach(items []SendBatchItem, emit func(int, SendBatchIt
 			}
 			if invalidate {
 				r.invalidateAppendAuthority(group.target.ChannelID, group.target)
+			}
+			if markFailed {
+				r.markAppendAuthorityFailed(group.target.ChannelID, group.target)
 			}
 		})
 		if len(nextPending) == 0 {
@@ -297,6 +308,9 @@ func (r *Router) sendSingle(item SendBatchItem) SendBatchItemResult {
 		outcomeUnknown = outcomeUnknown || errors.Is(result.Err, ErrAppendOutcomeUnknown)
 		if shouldInvalidateRouterAuthority(result.Err) {
 			r.invalidateAppendAuthority(routeChannel, target)
+		}
+		if shouldMarkRouterAuthorityFailed(result.Err) {
+			r.markAppendAuthorityFailed(routeChannel, target)
 		}
 		if shouldRetryRouterError(result.Err) && canRetryRouterItem(prepared, attempts, r.maxRouteAttempts, time.Now()) {
 			r.waitBeforeRetry([]SendBatchItem{prepared}, []int{0})
@@ -791,6 +805,10 @@ func shouldInvalidateRouterAuthority(err error) bool {
 		errors.Is(err, ErrAppendOutcomeUnknown)
 }
 
+func shouldMarkRouterAuthorityFailed(err error) bool {
+	return errors.Is(err, ErrAppendAuthorityUnavailable)
+}
+
 func (r *Router) invalidateAppendAuthority(id ChannelID, target AuthorityTarget) {
 	if r == nil || r.resolver == nil {
 		return
@@ -800,6 +818,17 @@ func (r *Router) invalidateAppendAuthority(id ChannelID, target AuthorityTarget)
 		return
 	}
 	invalidator.InvalidateAppendAuthority(id, target)
+}
+
+func (r *Router) markAppendAuthorityFailed(id ChannelID, target AuthorityTarget) {
+	if r == nil || r.resolver == nil {
+		return
+	}
+	marker, ok := r.resolver.(AuthorityFailureMarker)
+	if !ok {
+		return
+	}
+	marker.MarkAppendAuthorityFailed(id, target)
 }
 
 func canRetryRouterItem(item SendBatchItem, attempts int, maxAttempts int, now time.Time) bool {

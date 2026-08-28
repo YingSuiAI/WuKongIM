@@ -48,10 +48,19 @@ type ConversationHydrationObserver interface {
 	ObserveConversationHydrationBatch(result string, items, remoteCalls, localReads int, duration time.Duration)
 }
 
+// AppendAuthorityRecoveryDisposition reports whether recovery retained the
+// current authority or is waiting for a durable migration.
+type AppendAuthorityRecoveryDisposition uint8
+
+const (
+	AppendAuthorityRecoveryPending AppendAuthorityRecoveryDisposition = iota
+	AppendAuthorityRecoveryCurrent
+)
+
 // AppendAuthorityRecovery starts or joins durable recovery for an exact
 // authoritative metadata version whose leader could not serve an append.
 type AppendAuthorityRecovery interface {
-	EnsureAppendAuthorityRecovery(context.Context, ch.Meta) error
+	EnsureAppendAuthorityRecovery(context.Context, ch.Meta) (AppendAuthorityRecoveryDisposition, error)
 }
 
 // ForwardClient forwards client append calls to the authoritative channel leader.
@@ -388,11 +397,16 @@ func (s *Service) ResolveAppendAuthority(ctx context.Context, id ch.ChannelID) (
 		// Keep the known-failed version out of the hot cache so every bounded
 		// Router retry can observe a newly committed migration result.
 		s.metaCache.invalidateAuthority(id, meta.Leader, meta.Epoch, meta.LeaderEpoch, meta.RouteGeneration)
-		if err := s.appendRecovery.EnsureAppendAuthorityRecovery(ctx, meta); err != nil {
+		disposition, err := s.appendRecovery.EnsureAppendAuthorityRecovery(ctx, meta)
+		if err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return ch.Meta{}, ctxErr
 			}
 			return ch.Meta{}, fmt.Errorf("%w: append authority recovery: %v", ch.ErrNotReady, err)
+		}
+		if disposition == AppendAuthorityRecoveryCurrent {
+			s.metaCache.clearFailedAuthority(id, meta)
+			return meta, nil
 		}
 		// The current metadata still names the failed leader. Existing Router
 		// retry deadlines bound this wait; only a newer authoritative meta may
@@ -409,6 +423,17 @@ func (s *Service) InvalidateAppendAuthority(id ch.ChannelID, leader ch.NodeID, e
 		return
 	}
 	if s.metaCache.invalidateAuthority(id, leader, epoch, leaderEpoch, routeGeneration) {
+		s.observeMetaCache("invalidate")
+	}
+}
+
+// MarkAppendAuthorityFailed records definitive leader unavailability for one
+// exact cached authority version.
+func (s *Service) MarkAppendAuthorityFailed(id ch.ChannelID, leader ch.NodeID, epoch uint64, leaderEpoch uint64, routeGeneration uint64) {
+	if s == nil {
+		return
+	}
+	if s.metaCache.markAuthorityFailed(id, leader, epoch, leaderEpoch, routeGeneration) {
 		s.observeMetaCache("invalidate")
 	}
 }

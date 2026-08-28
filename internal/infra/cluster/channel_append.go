@@ -30,6 +30,12 @@ type channelAppendAuthorityInvalidator interface {
 	InvalidateChannelAppendAuthority(channelruntime.ChannelID, uint64, uint64, uint64, uint64)
 }
 
+type channelAppendAuthorityFailureMarker interface {
+	// MarkChannelAppendAuthorityFailed records definitive unavailability of the
+	// exact authority version after ordinary cache invalidation.
+	MarkChannelAppendAuthorityFailed(channelruntime.ChannelID, uint64, uint64, uint64, uint64)
+}
+
 // ChannelAppendRemoteForwarder forwards sends to a remote channel authority.
 type ChannelAppendRemoteForwarder interface {
 	// ForwardSendBatch forwards items to the resolved channel authority target.
@@ -45,6 +51,7 @@ type ChannelAppendClient struct {
 
 var _ channelappend.AuthorityResolver = (*ChannelAppendClient)(nil)
 var _ channelappend.AuthorityInvalidator = (*ChannelAppendClient)(nil)
+var _ channelappend.AuthorityFailureMarker = (*ChannelAppendClient)(nil)
 var _ channelappend.RemoteForwarder = (*ChannelAppendClient)(nil)
 
 // NewChannelAppendClient creates a cluster-backed channel append client.
@@ -103,6 +110,26 @@ func (c *ChannelAppendClient) InvalidateAppendAuthority(id channelappend.Channel
 		return
 	}
 	invalidator.InvalidateChannelAppendAuthority(
+		channelruntime.ChannelID{ID: id.ID, Type: id.Type},
+		target.LeaderNodeID,
+		target.Epoch,
+		target.LeaderEpoch,
+		target.RouteGeneration,
+	)
+}
+
+// MarkAppendAuthorityFailed records only definitive pre-submit authority
+// unavailability. Ambiguous outcomes remain cache refreshes and recover through
+// the existing idempotent retry path.
+func (c *ChannelAppendClient) MarkAppendAuthorityFailed(id channelappend.ChannelID, target channelappend.AuthorityTarget) {
+	if c == nil || c.node == nil {
+		return
+	}
+	marker, ok := c.node.(channelAppendAuthorityFailureMarker)
+	if !ok {
+		return
+	}
+	marker.MarkChannelAppendAuthorityFailed(
 		channelruntime.ChannelID{ID: id.ID, Type: id.Type},
 		target.LeaderNodeID,
 		target.Epoch,

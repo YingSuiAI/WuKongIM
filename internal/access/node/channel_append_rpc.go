@@ -157,7 +157,7 @@ func channelAppendRPCError(err error, attemptTimedOut bool) error {
 	case errors.Is(err, transport.ErrTimeout):
 		return context.DeadlineExceeded
 	case channelAppendTransportUnavailableBeforeSubmit(err):
-		return fmt.Errorf("%w: %w", channelappend.ErrRouteNotReady, err)
+		return fmt.Errorf("%w: %w", channelappend.ErrAppendAuthorityUnavailable, err)
 	case channelAppendTransportOutcomeUnknown(err):
 		return fmt.Errorf("%w: %w", channelappend.ErrAppendOutcomeUnknown, err)
 	default:

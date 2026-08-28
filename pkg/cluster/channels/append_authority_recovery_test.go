@@ -28,7 +28,7 @@ func TestServiceFailedAuthorityStartsRecoveryAndWaitsForNewAuthoritativeMeta(t *
 	require.NoError(t, err)
 	require.Equal(t, failed.Leader, got.Leader)
 
-	svc.InvalidateAppendAuthority(id, failed.Leader, failed.Epoch, failed.LeaderEpoch, failed.RouteGeneration)
+	svc.MarkAppendAuthorityFailed(id, failed.Leader, failed.Epoch, failed.LeaderEpoch, failed.RouteGeneration)
 	_, err = svc.ResolveAppendAuthority(context.Background(), id)
 	require.ErrorIs(t, err, ch.ErrNotReady)
 	require.Equal(t, []ch.Meta{failed}, recovery.metas)
@@ -38,6 +38,45 @@ func TestServiceFailedAuthorityStartsRecoveryAndWaitsForNewAuthoritativeMeta(t *
 	require.Equal(t, fresh.Leader, got.Leader)
 	require.Equal(t, fresh.LeaderEpoch, got.LeaderEpoch)
 	require.Equal(t, 1, len(recovery.metas), "new authority must clear the failed-version recovery marker")
+}
+
+func TestServiceTransientInvalidationReusesSameHealthyAuthorityWithoutRecovery(t *testing.T) {
+	id := ch.ChannelID{ID: "transient-authority", Type: 2}
+	meta := ch.Meta{Key: ch.ChannelKeyForID(id), ID: id, Epoch: 1, LeaderEpoch: 1, RouteGeneration: 1, Leader: 4, Replicas: []ch.NodeID{1, 3, 4}, ISR: []ch.NodeID{1, 3, 4}, MinISR: 2, Status: ch.StatusActive}
+	source := &countingMetaSource{meta: meta}
+	recovery := &recordingAppendAuthorityRecovery{}
+	svc, err := NewService(Config{Runtime: &fakeRuntime{}, LocalNode: 4, MetaSource: source, AppendAuthorityRecovery: recovery})
+	require.NoError(t, err)
+
+	_, err = svc.ResolveAppendAuthority(context.Background(), id)
+	require.NoError(t, err)
+	svc.InvalidateAppendAuthority(id, meta.Leader, meta.Epoch, meta.LeaderEpoch, meta.RouteGeneration)
+	got, err := svc.ResolveAppendAuthority(context.Background(), id)
+
+	require.NoError(t, err)
+	require.Equal(t, meta, got)
+	require.Empty(t, recovery.metas)
+	require.Equal(t, 2, source.ensureCalls)
+}
+
+func TestServiceHealthyFailedMarkerClearsAndReusesCurrentAuthority(t *testing.T) {
+	id := ch.ChannelID{ID: "healthy-marked-authority", Type: 2}
+	meta := ch.Meta{Key: ch.ChannelKeyForID(id), ID: id, Epoch: 1, LeaderEpoch: 1, RouteGeneration: 1, Leader: 4, Replicas: []ch.NodeID{1, 3, 4}, ISR: []ch.NodeID{1, 3, 4}, MinISR: 2, Status: ch.StatusActive}
+	source := &countingMetaSource{meta: meta}
+	recovery := &recordingAppendAuthorityRecovery{disposition: AppendAuthorityRecoveryCurrent}
+	svc, err := NewService(Config{Runtime: &fakeRuntime{}, LocalNode: 4, MetaSource: source, AppendAuthorityRecovery: recovery})
+	require.NoError(t, err)
+
+	_, err = svc.ResolveAppendAuthority(context.Background(), id)
+	require.NoError(t, err)
+	svc.MarkAppendAuthorityFailed(id, meta.Leader, meta.Epoch, meta.LeaderEpoch, meta.RouteGeneration)
+	got, err := svc.ResolveAppendAuthority(context.Background(), id)
+	require.NoError(t, err)
+	require.Equal(t, meta, got)
+	got, err = svc.ResolveAppendAuthority(context.Background(), id)
+	require.NoError(t, err)
+	require.Equal(t, meta, got)
+	require.Len(t, recovery.metas, 1, "confirmed current authority must clear the exact failed marker")
 }
 
 func TestForegroundAppendAuthorityRecoveryReusesExactCreateCommandAfterUncertainResult(t *testing.T) {
@@ -53,8 +92,10 @@ func TestForegroundAppendAuthorityRecoveryReusesExactCreateCommandAfterUncertain
 	store := &foregroundRecoveryStoreFake{createErrs: []error{errors.New("uncertain proposal"), nil}}
 	recovery := &ForegroundAppendAuthorityRecovery{source: source, store: store, now: func() time.Time { return time.UnixMilli(1234) }}
 
-	require.Error(t, recovery.EnsureAppendAuthorityRecovery(context.Background(), meta))
-	require.NoError(t, recovery.EnsureAppendAuthorityRecovery(context.Background(), meta))
+	_, err := recovery.EnsureAppendAuthorityRecovery(context.Background(), meta)
+	require.Error(t, err)
+	_, err = recovery.EnsureAppendAuthorityRecovery(context.Background(), meta)
+	require.NoError(t, err)
 	require.Len(t, store.requests, 2)
 	require.Equal(t, store.requests[0], store.requests[1], "uncertain create retries must reuse the exact task identity and command fields")
 	require.NotEmpty(t, store.requests[0].TaskID)
@@ -71,7 +112,8 @@ func TestForegroundAppendAuthorityRecoveryJoinsActiveChannelTask(t *testing.T) {
 	store := &foregroundRecoveryStoreFake{active: true}
 	recovery := &ForegroundAppendAuthorityRecovery{source: source, store: store, now: time.Now}
 
-	require.NoError(t, recovery.EnsureAppendAuthorityRecovery(context.Background(), meta))
+	_, err := recovery.EnsureAppendAuthorityRecovery(context.Background(), meta)
+	require.NoError(t, err)
 	require.Empty(t, store.requests)
 	require.Zero(t, source.snapshotCalls)
 }
@@ -89,19 +131,59 @@ func TestForegroundAppendAuthorityRecoveryUsesDurableReplicaWhenFollowerRuntimeI
 	store := &foregroundRecoveryStoreFake{}
 	recovery := &ForegroundAppendAuthorityRecovery{source: source, store: store, now: time.Now}
 
-	require.NoError(t, recovery.EnsureAppendAuthorityRecovery(context.Background(), meta))
+	_, err := recovery.EnsureAppendAuthorityRecovery(context.Background(), meta)
+	require.NoError(t, err)
 	require.Zero(t, source.runtimeProbeCalls, "failover must not require a loaded follower reactor")
 	require.Equal(t, []uint64{2, 3}, source.probeCalls)
 	require.Len(t, store.requests, 1)
 }
 
-type recordingAppendAuthorityRecovery struct {
-	metas []ch.Meta
+func TestForegroundAppendAuthorityRecoveryKeepsHealthyCurrentLeader(t *testing.T) {
+	id := ch.ChannelID{ID: "healthy-current-leader", Type: 2}
+	meta := ch.Meta{Key: ch.ChannelKeyForID(id), ID: id, Epoch: 11, LeaderEpoch: 20, RouteGeneration: 30, Leader: 4, Replicas: []ch.NodeID{1, 3, 4}, ISR: []ch.NodeID{1, 3, 4}, MinISR: 2, Status: ch.StatusActive}
+	leaderProbe := failoverProbe(id, 4, 11, 20, 10, 10).Probe
+	leaderProbe.Role = ch.RoleLeader
+	source := &foregroundRecoverySourceFake{
+		snapshot: control.Snapshot{Nodes: failoverHealthyNodes(1, 3, 4)},
+		probes:   map[uint64]ch.RuntimeProbeChannel{4: leaderProbe},
+	}
+	store := &foregroundRecoveryStoreFake{}
+	recovery := &ForegroundAppendAuthorityRecovery{source: source, store: store, now: time.Now}
+
+	disposition, err := recovery.EnsureAppendAuthorityRecovery(context.Background(), meta)
+
+	require.NoError(t, err)
+	require.Equal(t, AppendAuthorityRecoveryCurrent, disposition)
+	require.Equal(t, []uint64{4}, source.probeCalls)
+	require.Empty(t, store.requests)
 }
 
-func (r *recordingAppendAuthorityRecovery) EnsureAppendAuthorityRecovery(_ context.Context, meta ch.Meta) error {
+func TestForegroundAppendAuthorityRecoveryKeepsReachableEmptyCurrentLeader(t *testing.T) {
+	id := ch.ChannelID{ID: "healthy-empty-current-leader", Type: 1}
+	meta := ch.Meta{Key: ch.ChannelKeyForID(id), ID: id, Epoch: 1, LeaderEpoch: 1, RouteGeneration: 1, Leader: 4, Replicas: []ch.NodeID{1, 3, 4}, ISR: []ch.NodeID{1, 3, 4}, MinISR: 2, Status: ch.StatusActive}
+	source := &foregroundRecoverySourceFake{
+		snapshot: control.Snapshot{Nodes: failoverHealthyNodes(1, 3, 4)},
+		probes:   map[uint64]ch.RuntimeProbeChannel{},
+	}
+	store := &foregroundRecoveryStoreFake{}
+	recovery := &ForegroundAppendAuthorityRecovery{source: source, store: store, now: time.Now}
+
+	disposition, err := recovery.EnsureAppendAuthorityRecovery(context.Background(), meta)
+
+	require.NoError(t, err)
+	require.Equal(t, AppendAuthorityRecoveryCurrent, disposition)
+	require.Equal(t, []uint64{4}, source.probeCalls)
+	require.Empty(t, store.requests)
+}
+
+type recordingAppendAuthorityRecovery struct {
+	metas       []ch.Meta
+	disposition AppendAuthorityRecoveryDisposition
+}
+
+func (r *recordingAppendAuthorityRecovery) EnsureAppendAuthorityRecovery(_ context.Context, meta ch.Meta) (AppendAuthorityRecoveryDisposition, error) {
 	r.metas = append(r.metas, cloneMeta(meta))
-	return nil
+	return r.disposition, nil
 }
 
 type foregroundRecoverySourceFake struct {

@@ -696,6 +696,28 @@ func TestRouterUnknownRemoteOutcomeForcesDurableIdempotencyLookupBeforeRetry(t *
 	if len(resolver.invalidated) != 1 || resolver.invalidated[0] != remoteTarget {
 		t.Fatalf("invalidated = %#v, want exact ambiguous authority", resolver.invalidated)
 	}
+	if len(resolver.markedFailed) != 0 {
+		t.Fatalf("marked failed = %#v, ambiguous outcome must not declare the authority dead", resolver.markedFailed)
+	}
+}
+
+func TestRouterMarksOnlyDefinitiveAuthorityUnavailabilityFailed(t *testing.T) {
+	target := routerTarget("authority-unavailable", 2, 8)
+	resolver := &routerResolverForTest{targets: []AuthorityTarget{target}}
+	remote := &routerRemoteForTest{results: []SendBatchItemResult{{Err: ErrAppendAuthorityUnavailable}}}
+	router := NewRouter(RouterOptions{LocalNodeID: 7, Resolver: resolver, Remote: remote, MaxRouteAttempts: 1})
+
+	results := router.SendBatch([]SendBatchItem{routerItem("u1", "authority-unavailable", 2)})
+
+	if len(results) != 1 || !errors.Is(results[0].Err, ErrRouteNotReady) {
+		t.Fatalf("results = %#v, want route-not-ready authority failure", results)
+	}
+	if len(resolver.invalidated) != 1 || resolver.invalidated[0] != target {
+		t.Fatalf("invalidated = %#v, want exact failed authority cache refresh", resolver.invalidated)
+	}
+	if len(resolver.markedFailed) != 1 || resolver.markedFailed[0] != target {
+		t.Fatalf("marked failed = %#v, want definitive authority failure marker", resolver.markedFailed)
+	}
 }
 
 func TestRouterInvalidatesFailedAuthorityAfterRetryBudgetIsExhausted(t *testing.T) {
@@ -1130,6 +1152,7 @@ type routerResolverForTest struct {
 	lastID           ChannelID
 	calls            int
 	invalidated      []AuthorityTarget
+	markedFailed     []AuthorityTarget
 }
 
 type recordingRouterObserverForTest struct {
@@ -1223,6 +1246,14 @@ func (r *routerResolverForTest) InvalidateAppendAuthority(id ChannelID, target A
 	defer r.mu.Unlock()
 	if target.ChannelID == id {
 		r.invalidated = append(r.invalidated, target)
+	}
+}
+
+func (r *routerResolverForTest) MarkAppendAuthorityFailed(id ChannelID, target AuthorityTarget) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if target.ChannelID == id {
+		r.markedFailed = append(r.markedFailed, target)
 	}
 }
 
