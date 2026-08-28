@@ -97,10 +97,23 @@ func (n *Node) IsLocalSlotLeader(slotID multiraft.SlotID) bool {
 	return n.defaultSlotProposer.IsLocalLeader(uint32(slotID))
 }
 
-// LeaderOf returns the best-known Slot leader from the foreground router.
+// LeaderOf returns the strongest locally observed Slot leader before falling
+// back to the foreground router for a Slot this node does not host. A hosted
+// Multi-Raft group is the authority for its current election: leader zero must
+// not fall back to a stale route that can keep foreground reads dialing the
+// failed former leader.
 func (n *Node) LeaderOf(slotID multiraft.SlotID) (multiraft.NodeID, error) {
 	if err := n.ensureForeground(); err != nil {
 		return 0, err
+	}
+	if n.slotStatusRuntime != nil {
+		status, err := n.slotStatusRuntime.Status(slotID)
+		if err == nil && status.SlotID == slotID {
+			if status.LeaderID == 0 {
+				return 0, ErrNoSlotLeader
+			}
+			return status.LeaderID, nil
+		}
 	}
 	if n.router == nil {
 		return 0, ErrRouteNotReady

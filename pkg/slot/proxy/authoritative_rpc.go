@@ -3,9 +3,12 @@ package proxy
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/WuKongIM/WuKongIM/pkg/slot/multiraft"
 )
+
+const authoritativeReadRPCAttemptTimeout = time.Second
 
 const (
 	rpcStatusOK        = "ok"
@@ -43,7 +46,21 @@ func callAuthoritativeRPC[T authoritativeRPCResponse](
 	payload []byte,
 	decode func([]byte) (T, error),
 ) (T, error) {
-	return callAuthoritativeRPCWithStatuses(ctx, s, slotID, serviceID, payload, decode, defaultAuthoritativeRPCStatuses)
+	return callAuthoritativeRPCWithStatusesAndAttemptTimeout(ctx, s, slotID, serviceID, payload, decode, defaultAuthoritativeRPCStatuses, 0)
+}
+
+// callAuthoritativeReadRPC keeps an unavailable stale leader from consuming
+// the entire foreground read deadline. Reads are safe to retry against the
+// remaining Slot peers; mutation RPCs retain their existing outcome boundary.
+func callAuthoritativeReadRPC[T authoritativeRPCResponse](
+	ctx context.Context,
+	s *Store,
+	slotID multiraft.SlotID,
+	serviceID uint8,
+	payload []byte,
+	decode func([]byte) (T, error),
+) (T, error) {
+	return callAuthoritativeRPCWithStatusesAndAttemptTimeout(ctx, s, slotID, serviceID, payload, decode, defaultAuthoritativeRPCStatuses, authoritativeReadRPCAttemptTimeout)
 }
 
 func callAuthoritativeRPCWithStatuses[T authoritativeRPCResponse](
@@ -54,6 +71,19 @@ func callAuthoritativeRPCWithStatuses[T authoritativeRPCResponse](
 	payload []byte,
 	decode func([]byte) (T, error),
 	acceptedStatuses map[string]struct{},
+) (T, error) {
+	return callAuthoritativeRPCWithStatusesAndAttemptTimeout(ctx, s, slotID, serviceID, payload, decode, acceptedStatuses, 0)
+}
+
+func callAuthoritativeRPCWithStatusesAndAttemptTimeout[T authoritativeRPCResponse](
+	ctx context.Context,
+	s *Store,
+	slotID multiraft.SlotID,
+	serviceID uint8,
+	payload []byte,
+	decode func([]byte) (T, error),
+	acceptedStatuses map[string]struct{},
+	attemptTimeout time.Duration,
 ) (T, error) {
 	var zero T
 
@@ -88,8 +118,17 @@ func callAuthoritativeRPCWithStatuses[T authoritativeRPCResponse](
 		}
 		tried[peer] = struct{}{}
 
-		body, err := s.cluster.RPCService(ctx, peer, slotID, serviceID, payload)
+		attemptCtx := ctx
+		cancelAttempt := func() {}
+		if attemptTimeout > 0 {
+			attemptCtx, cancelAttempt = context.WithTimeout(ctx, attemptTimeout)
+		}
+		body, err := s.cluster.RPCService(attemptCtx, peer, slotID, serviceID, payload)
+		cancelAttempt()
 		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return zero, ctxErr
+			}
 			lastErr = err
 			continue
 		}

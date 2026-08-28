@@ -178,7 +178,7 @@ func (s *Store) readPermissionMetadataGroup(ctx context.Context, slotID multiraf
 	if err != nil {
 		return nil, err
 	}
-	resp, err := callAuthoritativeRPC(ctx, s, slotID, permissionBatchRPCServiceID, payload, decodePermissionBatchRPCResponse)
+	resp, err := callAuthoritativeReadRPC(ctx, s, slotID, permissionBatchRPCServiceID, payload, decodePermissionBatchRPCResponse)
 	if err != nil {
 		return nil, err
 	}

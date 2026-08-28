@@ -181,17 +181,18 @@ local `AuthorityEpoch` is not manufactured for already-published identities.
 Default Slot leader observation
 treats `Leader=0` as an unknown observation and keeps the last known non-zero
 Slot leader and term in the foreground router until a new non-zero leader is
-observed. This prevents transient Raft status gaps from briefly removing an
-otherwise valid route; stale leaders are still fenced by downstream Slot/Channel
-leadership checks. Nodes that are not replicas of a logical Slot also poll that
-Slot's desired peers at a lower frequency and install the highest-term observed
-leader. This applies to ordinary static members as well as activated seed-join
-members, so every ingress node can route UID-owned metadata without hosting a
-local replica. Route installation ignores lower-term observations so a delayed
-peer response cannot regress a newer leader. Remote observation runs in an
-independent managed loop, so snapshot application and the local 10ms readiness
-loop never wait for network I/O. Each remote round has a 250ms overall deadline
-and queries at most eight peers concurrently.
+observed. A node that hosts the Slot nevertheless resolves foreground authority
+from its local Multi-Raft status first: an observed election with `Leader=0`
+returns no-leader instead of reusing that routed former leader. Nodes that are
+not replicas of a logical Slot poll all of that Slot's desired peers at a lower
+frequency and install the highest-term observation collected during the complete
+bounded round. This applies to ordinary static members as well as activated
+seed-join members, so every ingress node can route UID-owned metadata without
+hosting a local replica. Route installation ignores lower-term observations so
+a delayed peer response cannot regress a newer leader. Remote observation runs
+in an independent managed loop, so snapshot application and the local 10ms
+readiness loop never wait for network I/O. Each remote round has a 250ms overall
+deadline and queries at most eight peers concurrently.
 
 ## Start Flow
 
@@ -426,10 +427,13 @@ Channel metadata, subscriber rows, and legacy `channel_latest` rows route by
 channel ID. Subscriber point lookups and subscriber-set non-emptiness reads use
 the same channel-owned Slot metadata route for message permission checks.
 `ReadPermissionMetadataBatchAuthoritative` groups raw permission facts by
-physical Slot, bounds concurrent Slot groups, and performs at most one
-authoritative `RPCSlotPermissionMetadataBatch` call per represented Slot while
-preserving input alignment. Policy remains outside `pkg/cluster` and
-`pkg/slot`.
+physical Slot, bounds concurrent Slot groups, and performs one aligned
+authoritative `RPCSlotPermissionMetadataBatch` operation per represented Slot
+while preserving input alignment. Each idempotent peer attempt has its own
+one-second bound, so a stale unreachable leader cannot consume the caller's
+complete deadline before the remaining Slot peers return the current authority.
+Mutation RPCs retain their single parent-context outcome boundary. Policy
+remains outside `pkg/cluster` and `pkg/slot`.
 Message event appends also route by channel ID. `open`, `delta`, and `snapshot`
 are forwarded to the current Slot leader's
 bounded node-local stream cache and return cache state without advancing the
