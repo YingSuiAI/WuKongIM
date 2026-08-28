@@ -94,24 +94,28 @@ func newAppendRequest(event Event, admittedAt time.Time) appendRequest {
 		future:     event.Future,
 		ctx:        event.Context,
 		enqueuedAt: admittedAt,
-		records:    appendRecordsFromMessages(event.Append.Messages, admittedAt),
+		records:    appendRecordsFromMessages(event.Append.Messages, admittedAt, event.Append.PayloadsImmutable),
 		commitMode: normalizedCommitMode(event.Append.CommitMode),
 	}
 }
 
-func appendRecordsFromMessages(messages []ch.Message, admittedAt time.Time) []ch.Record {
+func appendRecordsFromMessages(messages []ch.Message, admittedAt time.Time, payloadsImmutable bool) []ch.Record {
 	records := make([]ch.Record, len(messages))
 	for i, msg := range messages {
 		serverTimestampMS := msg.ServerTimestampMS
 		if serverTimestampMS == 0 {
 			serverTimestampMS = admittedAt.UnixMilli()
 		}
+		payload := msg.Payload
+		if !payloadsImmutable {
+			payload = append([]byte(nil), msg.Payload...)
+		}
 		records[i] = ch.Record{
 			ID:                msg.MessageID,
 			Setting:           msg.Setting,
 			FromUID:           msg.FromUID,
 			ClientMsgNo:       msg.ClientMsgNo,
-			Payload:           append([]byte(nil), msg.Payload...),
+			Payload:           payload,
 			SizeBytes:         len(msg.Payload),
 			ServerTimestampMS: serverTimestampMS,
 			SyncOnce:          msg.SyncOnce,
@@ -175,6 +179,59 @@ func (r *Reactor) handleStoreAppendResult(result worker.Result) {
 	}
 }
 
+func (r *Reactor) handleQuorumCommitResult(result worker.Result) {
+	rc, err := r.lookupLoadedChannel(result.Fence.ChannelKey)
+	if err != nil {
+		return
+	}
+	batch := rc.appendInflight
+	current := batch != nil && batch.batchOpID == result.Fence.OpID
+	if !current {
+		return
+	}
+	commitErr := result.Err
+	var committed machine.QuorumCommittedResult
+	committed.Fence = result.Fence
+	if commitErr == nil {
+		if result.QuorumCommit == nil {
+			commitErr = ch.ErrInvalidConfig
+		} else {
+			receipt := result.QuorumCommit.Receipt
+			recordCount := uint64(len(batch.records))
+			commandMatches := receipt.CommandID == batch.commandID
+			if receipt.RetryBinding != nil {
+				reboundCommand := appendProposalCommandID(rc.state.Key, batch.authority, receipt.RetryBinding.Records)
+				commandMatches = batch.serverAllocatedMessageIDs &&
+					receipt.RetryBinding.RequestedCommandID == batch.commandID &&
+					receipt.CommandID == reboundCommand &&
+					ch.SameServerAllocatedLogicalRecords(batch.records, receipt.RetryBinding.Records)
+			}
+			if receipt.Authority != batch.authority || !commandMatches || receipt.First == 0 ||
+				recordCount == 0 || receipt.Last < receipt.First || receipt.Last-receipt.First+1 != recordCount || receipt.HW != receipt.Last {
+				commitErr = ch.ErrLogConflict
+			} else {
+				committed.First = receipt.First
+				committed.Last = receipt.Last
+				committed.HW = receipt.HW
+				if receipt.RetryBinding != nil {
+					committed.Records = receipt.RetryBinding.Records
+				}
+			}
+		}
+	}
+	committed.Err = commitErr
+	now := time.Now()
+	r.observeAppendStoreCompleted(rc, *batch, now, committed.First, commitErr)
+	oldHW := rc.state.HW
+	decision := rc.state.ApplyQuorumCommitted(committed)
+	if commitErr == nil {
+		r.markAppendHWAdvanced(rc, oldHW, rc.state.HW, now)
+		r.afterSuccessfulQuorumCommit(rc, result.Fence.OpID, now)
+	}
+	r.completeReplies(rc, decision.Replies, nil)
+	r.finishAppendInflightBatch(rc, commitErr, now)
+}
+
 func appendStoredResultFromWorker(result worker.Result) machine.AppendStoredResult {
 	stored := machine.AppendStoredResult{Fence: result.Fence, Err: result.Err}
 	if result.StoreAppend == nil {
@@ -185,6 +242,7 @@ func appendStoredResultFromWorker(result worker.Result) machine.AppendStoredResu
 	}
 	stored.BaseOffset = result.StoreAppend.BaseOffset
 	stored.LastOffset = result.StoreAppend.LastOffset
+	stored.Outcome = result.StoreAppend.Outcome
 	return stored
 }
 
@@ -205,6 +263,13 @@ func (r *Reactor) afterSuccessfulLeaderAppendStored(rc *runtimeChannel, batchOpI
 	}
 	r.sendPullHintsForAppend(rc, now)
 	r.scheduleLaggingFollowerResumeHints(rc, now)
+}
+
+func (r *Reactor) afterSuccessfulQuorumCommit(rc *runtimeChannel, batchOpID ch.OpID, now time.Time) {
+	rc.recentRecords.append(rc.appendInflightRecords(batchOpID))
+	r.markAppendActivity(rc, now)
+	rc.lifecycle.version = rc.state.LEO
+	r.scheduleLifecycleFromState(rc, now)
 }
 
 func (r *Reactor) finishAppendInflightBatch(rc *runtimeChannel, appendErr error, now time.Time) {

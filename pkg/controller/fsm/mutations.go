@@ -50,6 +50,11 @@ const (
 	ReasonControllerVoterProofMissing = "controller_voter_proof_missing"
 	// ReasonControllerVoterSetMismatch marks a promotion fenced to a stale Controller voter set.
 	ReasonControllerVoterSetMismatch = "controller_voter_set_mismatch"
+	// ReasonSlotReplicaCountTransitionActive prevents irreversible Controller
+	// promotion before every Slot has proven the target voter count.
+	ReasonSlotReplicaCountTransitionActive = "slot_replica_count_transition_active"
+	// ReasonControllerVoterPromotionActive protects the reserved promotion identity.
+	ReasonControllerVoterPromotionActive = "controller_voter_promotion_active"
 	// ReasonOpsMCPOwnerChangeWhileEnabled rejects changing the executor without stopping MCP first.
 	ReasonOpsMCPOwnerChangeWhileEnabled = "ops_mcp_owner_change_while_enabled"
 	// ReasonInitConflict marks an init command that does not match existing state.
@@ -118,6 +123,8 @@ func (sm *StateMachine) applyMutation(next *state.ClusterState, raftIndex uint64
 		result = sm.applyUpdateControllerVoters(next, cmd)
 	case command.KindPromoteControllerVoter:
 		result = sm.applyPromoteControllerVoter(next, cmd)
+	case command.KindReserveControllerVoterPromotion:
+		result = sm.applyReserveControllerVoterPromotion(next, cmd)
 	case command.KindReplaceHashSlotTable:
 		result = sm.applyReplaceHashSlotTable(next, cmd)
 	case command.KindReplaceScheduledBackupState:

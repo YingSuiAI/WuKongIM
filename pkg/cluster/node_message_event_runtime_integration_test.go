@@ -209,6 +209,69 @@ func TestClusterMessageEventFacadeCachesStreamUntilTerminalEvent(t *testing.T) {
 	}
 }
 
+func TestClusterMessageEventCacheAllowsAuthorityGapsThroughFinish(t *testing.T) {
+	node := newDefaultSingleNode(t)
+	startNode(t, node)
+	t.Cleanup(func() { stopNodes(t, node) })
+
+	const (
+		channelID   = "message-event-authority-gap"
+		clientMsgNo = "cmn-authority-gap"
+		runID       = "run-1"
+	)
+	route := waitRouteKeyLeaderReady(t, node, channelID)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	open := metadb.MessageEventAppend{
+		ChannelID: channelID, ChannelType: 2, ClientMsgNo: clientMsgNo, RunID: runID,
+		AuthorizationFence: "fence-1", AuthoritySequence: 3,
+		EventID: "evt-open-3", EventKey: "main", EventType: metadb.EventTypeOpen,
+		Visibility: metadb.VisibilityPublic,
+	}
+	first, err := node.AppendMessageEvent(ctx, open)
+	if err != nil || first.MsgEventSeq != 1 {
+		t.Fatalf("AppendMessageEvent(open=3) = %#v error=%v, want transport seq=1", first, err)
+	}
+	duplicate, err := node.AppendMessageEvent(ctx, open)
+	if err != nil || duplicate.Applied || duplicate.MsgEventSeq != first.MsgEventSeq {
+		t.Fatalf("AppendMessageEvent(duplicate open=3) = %#v error=%v, want idempotent seq=%d", duplicate, err, first.MsgEventSeq)
+	}
+	for _, sequence := range []uint64{3, 2} {
+		rejected := open
+		rejected.AuthoritySequence = sequence
+		rejected.EventID = fmt.Sprintf("evt-rejected-%d", sequence)
+		rejected.EventType = metadb.EventTypeDelta
+		if _, err := node.AppendMessageEvent(ctx, rejected); !errors.Is(err, metadb.ErrStaleMeta) {
+			t.Fatalf("AppendMessageEvent(sequence=%d after open=3) error=%v, want stale meta", sequence, err)
+		}
+	}
+	delta := open
+	delta.AuthoritySequence = 8
+	delta.EventID = "evt-delta-8"
+	delta.EventType = metadb.EventTypeDelta
+	delta.Payload = messageEventDeltaForIntegrationTest("hello", 8)
+	second, err := node.AppendMessageEvent(ctx, delta)
+	if err != nil || second.MsgEventSeq != 2 || second.State.LastAuthoritySequence != 8 {
+		t.Fatalf("AppendMessageEvent(delta=8) = %#v error=%v, want transport seq=2 authority=8", second, err)
+	}
+	finish := open
+	finish.AuthoritySequence = 12
+	finish.EventID = "evt-finish-12"
+	finish.EventType = metadb.EventTypeFinish
+	finish.Payload = messageEventFinishForIntegrationTest("hello", 12)
+	closed, err := node.AppendMessageEvent(ctx, finish)
+	if err != nil || closed.MsgEventSeq != 3 || closed.State.LastAuthoritySequence != 12 || closed.Status != metadb.EventStatusClosed {
+		t.Fatalf("AppendMessageEvent(finish=12) = %#v error=%v, want transport seq=3 authority=12 closed", closed, err)
+	}
+	cursor, found, err := node.defaultSlotMetaDB.ForHashSlot(route.HashSlot).GetMessageEventCursor(ctx, channelID, 2, clientMsgNo, runID)
+	if err != nil || !found {
+		t.Fatalf("GetMessageEventCursor() found=%v error=%v", found, err)
+	}
+	if cursor.LastMsgEventSeq != 3 || cursor.LastAuthoritySequence != 12 || !cursor.Terminal {
+		t.Fatalf("GetMessageEventCursor() = %#v, want transport=3 authority=12 terminal", cursor)
+	}
+}
+
 func TestClusterMessageEventFacadeFinishFlushesCachedLanes(t *testing.T) {
 	node := newDefaultSingleNode(t)
 	startNode(t, node)

@@ -588,6 +588,12 @@ returned/deleted/unresolved counts, local read counts, remote batch-call counts,
 latency, and result labels. SEND never feeds this observer through a recipient
 membership projection path.
 
+Conversation composition wires both the uncached membership authority and the
+legacy-sync committed-message reader. Person-directory admission and projection
+share the node-owned goroutine registry, so shutdown drains accepted task waves
+before cluster and storage dependencies stop. Legacy responses expose current
+typed event metadata without restoring removed stream fields.
+
 ## Cloud Analysis Gateway Composition
 
 `NewCloudAnalysisGatewayHandler` is the composition root for the standalone

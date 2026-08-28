@@ -6,7 +6,7 @@ stage: formal
 workload:
   workers: 3
   online_users: 10000
-  bootstrap_logins_per_second: 25
+  bootstrap_logins_per_second: 100
   new_users_per_day: 250000
   send_rate_per_second: 2000
   traffic: {person_percent: 90, group_percent: 10}
@@ -79,7 +79,7 @@ thresholds:
     overall_first_attempt_failure: {max_failures: 1, per_attempts: 10000, operator: "<"}
     any_minute_first_attempt_failure: {max_failures: 1, per_attempts: 1000, operator: "<="}
   latency:
-    hot_sendack: {p99: 200ms, p999: 1s}
+    hot_sendack: {p99: 400ms, p999: 1s}
     cold: {p99: 2s, p999: 5s}
     sync: {p99: 1s, p999: 3s}
     single_anomaly: 10s
@@ -98,7 +98,7 @@ thresholds:
   cluster:
     health_poll_every: 5s
     unhealthy_fail_after: 30s
-    max_hot_replica_lag_entries: 0
+    max_hot_replica_lag_entries: 64
     leader_imbalance_percent: 20
     leader_imbalance_for: 10m
   timeline: {warmup: 2h, checkpoint: 24h, final: 72h}

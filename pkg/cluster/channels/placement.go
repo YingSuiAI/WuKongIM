@@ -8,6 +8,7 @@ import (
 	"sort"
 
 	ch "github.com/WuKongIM/WuKongIM/pkg/channel"
+	"github.com/WuKongIM/WuKongIM/pkg/cluster/routing"
 )
 
 // SlotPlacementResolver derives initial channel placement from Slot-routed data nodes.
@@ -37,20 +38,72 @@ func (r *SlotPlacementResolver) ResolveChannelPlacement(ctx context.Context, id 
 	if err != nil {
 		return ChannelPlacement{}, err
 	}
-	candidates := r.dataNodes.DataNodes()
-	selected, err := selectChannelReplicas(string(ch.ChannelKeyForID(id)), candidates, r.replicaCount)
+	candidates, err := r.dataNodes.PlacementDataNodes(ctx, route.Revision)
 	if err != nil {
 		return ChannelPlacement{}, err
 	}
-	replicas := make([]ch.NodeID, 0, len(selected))
-	for _, node := range selected {
-		replicas = append(replicas, ch.NodeID(node))
+	placements, err := r.resolveChannelPlacements([]ch.ChannelID{id}, []routing.Route{route}, candidates)
+	if err != nil {
+		return ChannelPlacement{}, err
 	}
-	leader := replicas[0]
-	if route.PreferredLeader != 0 && uint64NodeIn(selected, route.PreferredLeader) {
-		leader = ch.NodeID(route.PreferredLeader)
+	return placements[0], nil
+}
+
+// ResolveChannelPlacementBatch derives every placement in one submitted batch
+// from one current data-node snapshot and the batch's revalidated Slot routes.
+func (r *SlotPlacementResolver) ResolveChannelPlacementBatch(ctx context.Context, ids []ch.ChannelID, routes []routing.Route) ([]ChannelPlacement, error) {
+	if err := ctxErr(ctx); err != nil {
+		return nil, err
 	}
-	return ChannelPlacement{Leader: leader, Replicas: replicas, MinISR: len(replicas)/2 + 1}, nil
+	if r == nil || r.dataNodes == nil {
+		return nil, fmt.Errorf("%w: data node provider is nil", ch.ErrInvalidConfig)
+	}
+	if len(ids) != len(routes) {
+		return nil, fmt.Errorf("%w: aligned channel placement routes", ch.ErrInvalidConfig)
+	}
+	if len(routes) == 0 {
+		return []ChannelPlacement{}, nil
+	}
+	expectedRevision := routes[0].Revision
+	for _, route := range routes[1:] {
+		if route.Revision != expectedRevision {
+			return nil, fmt.Errorf("%w: mixed channel placement route revisions", ch.ErrStaleMeta)
+		}
+	}
+	candidates, err := r.dataNodes.PlacementDataNodes(ctx, expectedRevision)
+	if err != nil {
+		return nil, err
+	}
+	return r.resolveChannelPlacements(ids, routes, candidates)
+}
+
+func (r *SlotPlacementResolver) resolveChannelPlacements(ids []ch.ChannelID, routes []routing.Route, candidates PlacementDataNodeSet) ([]ChannelPlacement, error) {
+	if len(ids) != len(routes) {
+		return nil, fmt.Errorf("%w: aligned channel placement routes", ch.ErrInvalidConfig)
+	}
+	placements := make([]ChannelPlacement, len(ids))
+	for i, id := range ids {
+		selected, schedulable, err := selectChannelReplicas(
+			string(ch.ChannelKeyForID(id)), candidates.Active, candidates.Schedulable, r.replicaCount,
+		)
+		if err != nil {
+			return nil, err
+		}
+		replicas := make([]ch.NodeID, 0, len(selected))
+		for _, node := range selected {
+			replicas = append(replicas, ch.NodeID(node))
+		}
+		isr := make([]ch.NodeID, 0, len(schedulable))
+		for _, node := range schedulable {
+			isr = append(isr, ch.NodeID(node))
+		}
+		leader := isr[0]
+		if routes[i].PreferredLeader != 0 && uint64NodeIn(schedulable, routes[i].PreferredLeader) {
+			leader = ch.NodeID(routes[i].PreferredLeader)
+		}
+		placements[i] = ChannelPlacement{Leader: leader, Replicas: replicas, ISR: isr, MinISR: len(replicas)/2 + 1}
+	}
+	return placements, nil
 }
 
 type scoredNode struct {
@@ -58,29 +111,73 @@ type scoredNode struct {
 	score uint64
 }
 
-func selectChannelReplicas(channelID string, candidates []uint64, replicaCount int) ([]uint64, error) {
+func selectChannelReplicas(channelID string, active, schedulable []uint64, replicaCount int) ([]uint64, []uint64, error) {
 	if replicaCount <= 0 {
-		return nil, fmt.Errorf("%w: channel replica count must be positive", ch.ErrInvalidConfig)
+		return nil, nil, fmt.Errorf("%w: channel replica count must be positive", ch.ErrInvalidConfig)
 	}
-	uniq := uniqueSortedUint64(candidates)
-	if len(uniq) < replicaCount {
-		return nil, fmt.Errorf("%w: channel replica candidates %d below replica count %d", ch.ErrInvalidConfig, len(uniq), replicaCount)
+	active = uniqueSortedUint64(active)
+	if len(active) < replicaCount {
+		return nil, nil, fmt.Errorf("%w: active channel replica candidates %d below replica count %d", ch.ErrInvalidConfig, len(active), replicaCount)
 	}
-	scored := make([]scoredNode, 0, len(uniq))
-	for _, node := range uniq {
-		scored = append(scored, scoredNode{node: node, score: rendezvousScore(channelID, node)})
+	activeSet := make(map[uint64]struct{}, len(active))
+	for _, node := range active {
+		activeSet[node] = struct{}{}
 	}
-	sort.Slice(scored, func(i, j int) bool {
-		if scored[i].score == scored[j].score {
-			return scored[i].node < scored[j].node
+	schedulable = uniqueSortedUint64(schedulable)
+	eligible := schedulable[:0]
+	for _, node := range schedulable {
+		if _, ok := activeSet[node]; ok {
+			eligible = append(eligible, node)
 		}
-		return scored[i].score > scored[j].score
-	})
-	out := make([]uint64, 0, replicaCount)
-	for i := 0; i < replicaCount; i++ {
-		out = append(out, scored[i].node)
 	}
-	return out, nil
+	schedulable = eligible
+	minISR := replicaCount/2 + 1
+	if len(schedulable) < minISR {
+		return nil, nil, fmt.Errorf("%w: schedulable channel replica candidates %d below MinISR %d", ch.ErrInvalidConfig, len(schedulable), minISR)
+	}
+
+	rank := func(nodes []uint64) []scoredNode {
+		scored := make([]scoredNode, 0, len(nodes))
+		for _, node := range nodes {
+			scored = append(scored, scoredNode{node: node, score: rendezvousScore(channelID, node)})
+		}
+		sort.Slice(scored, func(i, j int) bool {
+			if scored[i].score == scored[j].score {
+				return scored[i].node < scored[j].node
+			}
+			return scored[i].score > scored[j].score
+		})
+		return scored
+	}
+	healthyRanked := rank(schedulable)
+	out := make([]uint64, 0, replicaCount)
+	selectedSchedulable := make([]uint64, 0, min(replicaCount, len(healthyRanked)))
+	for _, candidate := range healthyRanked {
+		if len(out) == replicaCount {
+			break
+		}
+		out = append(out, candidate.node)
+		selectedSchedulable = append(selectedSchedulable, candidate.node)
+	}
+	if len(out) < replicaCount {
+		healthySet := make(map[uint64]struct{}, len(schedulable))
+		for _, node := range schedulable {
+			healthySet[node] = struct{}{}
+		}
+		unavailable := make([]uint64, 0, len(active)-len(schedulable))
+		for _, node := range active {
+			if _, ok := healthySet[node]; !ok {
+				unavailable = append(unavailable, node)
+			}
+		}
+		for _, candidate := range rank(unavailable) {
+			if len(out) == replicaCount {
+				break
+			}
+			out = append(out, candidate.node)
+		}
+	}
+	return out, selectedSchedulable, nil
 }
 
 func rendezvousScore(channelID string, node uint64) uint64 {

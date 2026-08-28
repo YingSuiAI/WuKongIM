@@ -89,9 +89,11 @@ func (n *Node) applySnapshot(ctx context.Context, snapshot control.Snapshot) err
 			return err
 		}
 	}
-	if firstSnapshot || changes.nodes {
-		n.channelDataNodes.Update(activeDataNodeIDs(snapshot.Nodes))
-	}
+	// Placement candidates carry the accepted control revision even when the
+	// node set is unchanged, because foreground routes advance on every applied
+	// snapshot and must never be combined with an older candidate generation.
+	activeDataNodes, schedulableDataNodes := placementDataNodeIDs(snapshot.Nodes)
+	n.channelDataNodes.UpdateAtRevision(snapshot.Revision, activeDataNodes, schedulableDataNodes)
 	if n.router != nil {
 		_ = n.updateRouteAuthorityTable(func() error {
 			n.router.AdvanceRevision(snapshot.Revision)
@@ -197,16 +199,21 @@ func routeAuthorityFromTable(table *routing.Table, hashSlot uint16) (routeAuthor
 	return routeAuthorityKey{slotID: slotID, leaderNodeID: table.SlotLeaders[slotID], leaderTerm: table.SlotLeaderTerms[slotID], configEpoch: table.SlotConfigEpochs[slotID], revision: table.Revision}, true
 }
 
-func activeDataNodeIDs(nodes []control.Node) []uint64 {
-	out := make([]uint64, 0, len(nodes))
+func placementDataNodeIDs(nodes []control.Node) ([]uint64, []uint64) {
+	active := make([]uint64, 0, len(nodes))
+	schedulable := make([]uint64, 0, len(nodes))
 	for _, node := range nodes {
-		if !control.NodeSchedulableForPlacement(node) {
+		if !control.NodeActiveDataMember(node) {
 			continue
 		}
-		out = append(out, node.NodeID)
+		active = append(active, node.NodeID)
+		if control.NodeSchedulableForPlacement(node) {
+			schedulable = append(schedulable, node.NodeID)
+		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
-	return out
+	sort.Slice(active, func(i, j int) bool { return active[i] < active[j] })
+	sort.Slice(schedulable, func(i, j int) bool { return schedulable[i] < schedulable[j] })
+	return active, schedulable
 }
 
 func controlNodeJoinState(state control.NodeJoinState) control.NodeJoinState {

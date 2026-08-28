@@ -98,7 +98,15 @@ func (e *MigrationExecutor) runReplicaReplaceFinalTargetCatchUp(ctx context.Cont
 	if !taskHasCutoverProof(task) {
 		return e.advanceReplicaReplaceDrainProof(ctx, task, meta, id, metadb.ChannelMigrationPhaseFinalTargetCatchUp)
 	}
-	probe, err := e.runtime.ProbeChannel(ctx, task.TargetNode, id.ID, id.Type)
+	if task.CutoverLEO > 0 {
+		if err := e.runtime.CatchUpChannelReplica(ctx, meta.Leader, task.TargetNode, meta, task.CutoverLEO); err != nil {
+			return err
+		}
+	}
+	// Catch-up writes the learner's durable store directly; it deliberately
+	// does not require or mutate a reactor runtime. Verify the same durable
+	// evidence that will protect promotion, not a possibly stale loaded view.
+	probe, err := e.runtime.ProbeChannelReplica(ctx, task.TargetNode, meta)
 	if err != nil {
 		return err
 	}
@@ -159,11 +167,11 @@ func (e *MigrationExecutor) applyReplicaReplaceRuntimeMeta(ctx context.Context, 
 		return fmt.Errorf("%w: invalid source or target", ch.ErrInvalidConfig)
 	}
 	if err := e.runtime.ApplyChannelMeta(ctx, meta.Leader, meta); err != nil {
-		return err
+		return fmt.Errorf("apply replica replacement leader metadata on node %d: %w", meta.Leader, err)
 	}
 	if task.TargetNode != meta.Leader {
 		if err := e.runtime.ApplyChannelMeta(ctx, task.TargetNode, meta); err != nil {
-			return err
+			return fmt.Errorf("apply replica replacement target metadata on node %d: %w", task.TargetNode, err)
 		}
 	}
 	return nil

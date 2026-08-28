@@ -7,6 +7,7 @@ import { resetLocale } from "@/i18n/locale-store"
 import { I18nProvider } from "@/i18n/provider"
 import { getRealtimeMonitor, getNodes } from "@/lib/manager-api"
 import type { RealtimeMonitorResponse, ManagerNodesResponse } from "@/lib/manager-api.types"
+import { clusterMonitorMetricOperationalPriority } from "@/pages/cluster-monitor/metric-config"
 import { ClusterMonitorPage } from "@/pages/cluster-monitor/page"
 
 vi.mock("@/lib/manager-api", async () => {
@@ -42,6 +43,16 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.useRealTimers()
+})
+
+test("uses explicit health, error, pressure, latency, and throughput priorities", () => {
+  expect(clusterMonitorMetricOperationalPriority("nodeLifecycleState")).toBe(0)
+  expect(clusterMonitorMetricOperationalPriority("nodeLifecycleFailureRate")).toBe(1)
+  expect(clusterMonitorMetricOperationalPriority("nodeLifecycleBlockers")).toBe(1)
+  expect(clusterMonitorMetricOperationalPriority("runtimePoolQueueBytesUsage")).toBe(2)
+  expect(clusterMonitorMetricOperationalPriority("runtimePoolWaitP99")).toBe(3)
+  expect(clusterMonitorMetricOperationalPriority("gatewayTransportWriteLatencyP99")).toBe(3)
+  expect(clusterMonitorMetricOperationalPriority("gatewayDeliveryRate")).toBe(4)
 })
 
 function managerNodesResponse(): ManagerNodesResponse {
@@ -860,11 +871,13 @@ function channelOperatorMonitorResponse(): RealtimeMonitorResponse {
     snapshot: [],
     categories: [
       { key: "common", count: 3 },
-      { key: "channel", count: 12 },
+      { key: "channel", count: 14 },
     ],
     cards: [
       channelOperatorCard("channelAppendLatencyP99", "channelReplication", "warning", "ms", 42),
       channelOperatorCard("activeChannels", "channelReplication", "normal", "", 1024),
+      channelOperatorCard("channelRuntimeLoadRate", "channelReplication", "normal", "events/s", 18.5),
+      channelOperatorCard("channelRuntimeIdleEvictionRate", "channelReplication", "normal", "events/s", 12.25),
       channelOperatorCard("channelAppendBatchRecordsP95", "channelReplication", "normal", "records", 64),
       channelOperatorCard("channelAppendBatchBytesP95", "channelReplication", "normal", "B", 32768),
       channelOperatorCard("channelAppendErrorRate", "channelReplication", "critical", "%", 0.35),
@@ -1078,12 +1091,21 @@ function allNodeCpuClusterMonitorResponse(): RealtimeMonitorResponse {
           },
         ],
         stats: [
-          { key: "node", label: "node-1", value: 15, unit: "%" },
-          { key: "node", label: "node-2", value: 40, unit: "%" },
+          { key: "node", label: "node-1", series_key: "node_id=1", value: 15, unit: "%" },
+          { key: "node", label: "node-2", series_key: "node_id=2", value: 40, unit: "%" },
         ],
       },
     ],
   }
+}
+
+function duplicateNodeStatLabelsClusterMonitorResponse(): RealtimeMonitorResponse {
+  const response = allNodeCpuClusterMonitorResponse()
+  response.cards[0].stats = [
+    { key: "node", label: "node", series_key: "node_id=1", value: 40, unit: "%" },
+    { key: "node", label: "node", series_key: "node_id=2", value: 40, unit: "%" },
+  ]
+  return response
 }
 
 function nodeGCClusterMonitorResponse(): RealtimeMonitorResponse {
@@ -1387,19 +1409,115 @@ test("renders cluster monitor cards from realtime API data", async () => {
   })
 })
 
+test("initializes realtime charts with renderable dimensions", async () => {
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined)
+
+  try {
+    vi.mocked(getRealtimeMonitor).mockResolvedValueOnce(readyClusterMonitorResponse())
+    renderClusterMonitorPage()
+
+    expect(await screen.findAllByTestId("cluster-monitor-metric-card")).toHaveLength(2)
+    expect(warn.mock.calls.flatMap((call) => call.map(String)).join("\n")).not.toContain("The width(-1)")
+  } finally {
+    warn.mockRestore()
+  }
+})
+
+test("treats zero error, backlog, and apply-gap values as normal", async () => {
+  const response = readyClusterMonitorResponse()
+  response.snapshot = []
+  response.cards = [
+    {
+      ...response.cards[0],
+      key: "controllerApplyGap",
+      tone: "warning",
+      value: 0,
+      series: [{ timestamp: 1781767220000, value: 0 }],
+      stats: [],
+    },
+    {
+      ...response.cards[0],
+      key: "controllerOldestTaskAge",
+      stage: "incidentClosure",
+      tone: "critical",
+      unit: "s",
+      value: 0,
+      series: [{ timestamp: 1781767220000, value: 0 }],
+      stats: [],
+    },
+    {
+      ...response.cards[0],
+      key: "retryQueueDepth",
+      category: "message",
+      stage: "offlineRetry",
+      tone: "warning",
+      unit: "",
+      value: 0,
+      series: [{ timestamp: 1781767220000, value: 0 }],
+      stats: [],
+    },
+    {
+      ...response.cards[0],
+      key: "pathErrorRate",
+      category: "message",
+      stage: "errorClosure",
+      tone: "critical",
+      unit: "%",
+      value: 0,
+      series: [{ timestamp: 1781767220000, value: 0 }],
+      stats: [],
+    },
+  ]
+  vi.mocked(getRealtimeMonitor).mockResolvedValueOnce(response)
+
+  renderClusterMonitorPage()
+
+  const cards = await screen.findAllByTestId("cluster-monitor-metric-card")
+  expect(cards).toHaveLength(4)
+  for (const card of cards) {
+    expect(within(card).getByText("Normal")).toBeInTheDocument()
+  }
+  expect(screen.queryByText("Critical")).not.toBeInTheDocument()
+  expect(screen.queryByText("Watch")).not.toBeInTheDocument()
+})
+
+test("shows a localized no-samples reason without exposing raw Prometheus errors", async () => {
+  const response = readyClusterMonitorResponse()
+  response.snapshot = []
+  response.cards = [{
+    ...response.cards[0],
+    key: "deliveryLatencyP99",
+    category: "message",
+    stage: "onlineDelivery",
+    available: false,
+    unavailable_reason: "no_delivery_latency_samples",
+    error: "prometheus query_range returned 400: parse error: unclosed left parenthesis",
+    series: [],
+    stats: [],
+  }]
+  vi.mocked(getRealtimeMonitor).mockResolvedValueOnce(response)
+
+  renderClusterMonitorPage()
+
+  const card = await screen.findByTestId("cluster-monitor-metric-card")
+  expect(within(card).getByText("No samples")).toBeInTheDocument()
+  expect(within(card).getByText("No samples in the selected time range.")).toBeInTheDocument()
+  expect(screen.queryByText(/unclosed left parenthesis/i)).not.toBeInTheDocument()
+})
+
 test("renders former business realtime monitor cards in cluster monitor page", async () => {
   vi.mocked(getRealtimeMonitor).mockResolvedValueOnce(businessRealtimeMonitorResponse())
   renderClusterMonitorPage()
 
   const cards = await screen.findAllByTestId("cluster-monitor-metric-card")
   expect(cards).toHaveLength(3)
-  expect(within(cards[0]).getByText("Send Rate")).toBeInTheDocument()
-  expect(within(cards[0]).getByText("Send Entry")).toBeInTheDocument()
-  expect(within(cards[0]).getByText("128.4")).toBeInTheDocument()
-  expect(within(cards[0]).getByText("Total")).toBeInTheDocument()
-  expect(within(cards[0]).getByText("1,250 msg")).toBeInTheDocument()
-  expect(within(cards[1]).getByText("Delivery Latency P99")).toBeInTheDocument()
-  expect(within(cards[1]).getByText("Online Delivery")).toBeInTheDocument()
+  expect(within(cards[0]).getByText("Delivery Latency P99")).toBeInTheDocument()
+  expect(within(cards[0]).getByText("Online Delivery")).toBeInTheDocument()
+  expect(within(cards[1]).getByText("Send Rate")).toBeInTheDocument()
+  expect(within(cards[1]).getByText("Send Entry")).toBeInTheDocument()
+  expect(within(cards[1]).getByText("128.4")).toBeInTheDocument()
+  expect(within(cards[1]).getByText("Total")).toBeInTheDocument()
+  expect(within(cards[1]).getByText("1,250 msg")).toBeInTheDocument()
   expect(within(cards[2]).getByText("Conversation Directory Rate")).toBeInTheDocument()
   expect(within(cards[2]).getByText("Conversation Sync")).toBeInTheDocument()
 })
@@ -1410,23 +1528,23 @@ test("renders gateway operator cards from realtime API data", async () => {
 
   const cards = await screen.findAllByTestId("cluster-monitor-metric-card")
   expect(cards).toHaveLength(16)
-  expect(within(cards[0]).getByText("Gateway Send Queue")).toBeInTheDocument()
-  expect(within(cards[0]).getByText("62.5")).toBeInTheDocument()
-  expect(within(cards[1]).getByText("Connection Opens")).toBeInTheDocument()
-  expect(within(cards[2]).getByText("Connection Closes")).toBeInTheDocument()
-  expect(within(cards[3]).getByText("Close Reasons")).toBeInTheDocument()
-  expect(within(cards[4]).getByText("Auth Success Rate")).toBeInTheDocument()
+  expect(within(cards[0]).getByText("Sendack Error Rate")).toBeInTheDocument()
+  expect(within(cards[1]).getByText("Gateway Send Queue")).toBeInTheDocument()
+  expect(within(cards[1]).getByText("62.5")).toBeInTheDocument()
+  expect(within(cards[2]).getByText("Auth Queue Usage")).toBeInTheDocument()
+  expect(within(cards[3]).getByText("Transport Queue Usage")).toBeInTheDocument()
+  expect(within(cards[4]).getByText("Transport Bytes Usage")).toBeInTheDocument()
   expect(within(cards[5]).getByText("Auth Latency P99")).toBeInTheDocument()
-  expect(within(cards[6]).getByText("Sendack Error Rate")).toBeInTheDocument()
-  expect(within(cards[7]).getByText("Gateway Inbound Traffic")).toBeInTheDocument()
-  expect(within(cards[8]).getByText("Gateway Outbound Traffic")).toBeInTheDocument()
-  expect(within(cards[9]).getByText("Frame Latency P99")).toBeInTheDocument()
-  expect(within(cards[10]).getByText("Async Batch Wait P99")).toBeInTheDocument()
-  expect(within(cards[11]).getByText("Async Batch Records P95")).toBeInTheDocument()
-  expect(within(cards[12]).getByText("Async Batch Bytes P95")).toBeInTheDocument()
-  expect(within(cards[13]).getByText("Auth Queue Usage")).toBeInTheDocument()
-  expect(within(cards[14]).getByText("Transport Queue Usage")).toBeInTheDocument()
-  expect(within(cards[15]).getByText("Transport Bytes Usage")).toBeInTheDocument()
+  expect(within(cards[6]).getByText("Frame Latency P99")).toBeInTheDocument()
+  expect(within(cards[7]).getByText("Async Batch Wait P99")).toBeInTheDocument()
+  expect(within(cards[8]).getByText("Connection Opens")).toBeInTheDocument()
+  expect(within(cards[9]).getByText("Connection Closes")).toBeInTheDocument()
+  expect(within(cards[10]).getByText("Close Reasons")).toBeInTheDocument()
+  expect(within(cards[11]).getByText("Auth Success Rate")).toBeInTheDocument()
+  expect(within(cards[12]).getByText("Gateway Inbound Traffic")).toBeInTheDocument()
+  expect(within(cards[13]).getByText("Gateway Outbound Traffic")).toBeInTheDocument()
+  expect(within(cards[14]).getByText("Async Batch Records P95")).toBeInTheDocument()
+  expect(within(cards[15]).getByText("Async Batch Bytes P95")).toBeInTheDocument()
 })
 
 test("shows metric explanations from card help buttons", async () => {
@@ -1454,11 +1572,12 @@ test("keeps known unavailable cards visible during partial responses", async () 
   expect(cards).toHaveLength(2)
   expect(screen.queryByText("Cluster monitor data is partially available")).not.toBeInTheDocument()
   expect(screen.queryByText("query timed out for apply gap")).not.toBeInTheDocument()
-  expect(within(cards[1]).getByText("Controller Apply Gap")).toBeInTheDocument()
-  expect(within(cards[1]).getByText("Metric unavailable")).toBeInTheDocument()
-  expect(within(cards[1]).getByText("No series data")).toBeInTheDocument()
-  expect(within(cards[1]).queryByTestId("cluster-monitor-chart")).not.toBeInTheDocument()
-  expect(within(cards[1]).getByText("prometheus series unavailable")).toBeInTheDocument()
+  expect(within(cards[0]).getByText("Controller Apply Gap")).toBeInTheDocument()
+  expect(within(cards[0]).getByText("Query failed")).toBeInTheDocument()
+  expect(within(cards[0]).getByText("No series data")).toBeInTheDocument()
+  expect(within(cards[0]).queryByTestId("cluster-monitor-chart")).not.toBeInTheDocument()
+  expect(within(cards[0]).getByText("The metric query failed. Retry or check Prometheus health.")).toBeInTheDocument()
+  expect(within(cards[0]).queryByText("prometheus series unavailable")).not.toBeInTheDocument()
   expect(screen.queryByText("unknownMetric")).not.toBeInTheDocument()
 })
 
@@ -1481,16 +1600,16 @@ test("renders internal operator cards from realtime API data", async () => {
 
   const cards = await screen.findAllByTestId("cluster-monitor-metric-card")
   expect(cards).toHaveLength(10)
-  expect(within(cards[0]).getByText("Internal TX Traffic")).toBeInTheDocument()
-  expect(within(cards[1]).getByText("Internal RX Traffic")).toBeInTheDocument()
-  expect(within(cards[2]).getByText("RPC Rate")).toBeInTheDocument()
-  expect(within(cards[3]).getByText("RPC Error Rate")).toBeInTheDocument()
-  expect(within(cards[4]).getByText("RPC Inflight")).toBeInTheDocument()
-  expect(within(cards[5]).getByText("RPC Latency P99")).toBeInTheDocument()
-  expect(within(cards[6]).getByText("Dial Success Rate")).toBeInTheDocument()
-  expect(within(cards[7]).getByText("Dial Latency P95")).toBeInTheDocument()
-  expect(within(cards[8]).getByText("Transport Queue Usage")).toBeInTheDocument()
-  expect(within(cards[9]).getByText("Transport Admission Errors")).toBeInTheDocument()
+  expect(within(cards[0]).getByText("RPC Error Rate")).toBeInTheDocument()
+  expect(within(cards[1]).getByText("Transport Admission Errors")).toBeInTheDocument()
+  expect(within(cards[2]).getByText("RPC Inflight")).toBeInTheDocument()
+  expect(within(cards[3]).getByText("Transport Queue Usage")).toBeInTheDocument()
+  expect(within(cards[4]).getByText("RPC Latency P99")).toBeInTheDocument()
+  expect(within(cards[5]).getByText("Dial Latency P95")).toBeInTheDocument()
+  expect(within(cards[6]).getByText("Internal TX Traffic")).toBeInTheDocument()
+  expect(within(cards[7]).getByText("Internal RX Traffic")).toBeInTheDocument()
+  expect(within(cards[8]).getByText("RPC Rate")).toBeInTheDocument()
+  expect(within(cards[9]).getByText("Dial Success Rate")).toBeInTheDocument()
 })
 
 test("renders message operator cards from realtime API data", async () => {
@@ -1499,17 +1618,17 @@ test("renders message operator cards from realtime API data", async () => {
 
   const cards = await screen.findAllByTestId("cluster-monitor-metric-card")
   expect(cards).toHaveLength(11)
-  expect(within(cards[0]).getByText("Message Send Rate")).toBeInTheDocument()
-  expect(within(cards[1]).getByText("Message Sendack Error Rate")).toBeInTheDocument()
-  expect(within(cards[2]).getByText("Append Error Rate")).toBeInTheDocument()
-  expect(within(cards[3]).getByText("Append Latency P95")).toBeInTheDocument()
-  expect(within(cards[4]).getByText("Dispatch Enqueue Rate")).toBeInTheDocument()
-  expect(within(cards[5]).getByText("Dispatch Overflow Rate")).toBeInTheDocument()
-  expect(within(cards[6]).getByText("Delivery Enqueue Rate")).toBeInTheDocument()
-  expect(within(cards[7]).getByText("Delivery Queue Usage")).toBeInTheDocument()
-  expect(within(cards[8]).getByText("Delivery Retry Rate")).toBeInTheDocument()
-  expect(within(cards[9]).getByText("Delivery Admission Errors")).toBeInTheDocument()
-  expect(within(cards[10]).getByText("Delivery Route Expired")).toBeInTheDocument()
+  expect(within(cards[0]).getByText("Message Sendack Error Rate")).toBeInTheDocument()
+  expect(within(cards[1]).getByText("Append Error Rate")).toBeInTheDocument()
+  expect(within(cards[2]).getByText("Dispatch Overflow Rate")).toBeInTheDocument()
+  expect(within(cards[3]).getByText("Delivery Admission Errors")).toBeInTheDocument()
+  expect(within(cards[4]).getByText("Delivery Route Expired")).toBeInTheDocument()
+  expect(within(cards[5]).getByText("Delivery Queue Usage")).toBeInTheDocument()
+  expect(within(cards[6]).getByText("Append Latency P95")).toBeInTheDocument()
+  expect(within(cards[7]).getByText("Message Send Rate")).toBeInTheDocument()
+  expect(within(cards[8]).getByText("Dispatch Enqueue Rate")).toBeInTheDocument()
+  expect(within(cards[9]).getByText("Delivery Enqueue Rate")).toBeInTheDocument()
+  expect(within(cards[10]).getByText("Delivery Retry Rate")).toBeInTheDocument()
 })
 
 test("renders channel operator cards from realtime API data", async () => {
@@ -1517,19 +1636,21 @@ test("renders channel operator cards from realtime API data", async () => {
   renderClusterMonitorPage()
 
   const cards = await screen.findAllByTestId("cluster-monitor-metric-card")
-  expect(cards).toHaveLength(12)
-  expect(within(cards[0]).getByText("Channel Append Latency P99")).toBeInTheDocument()
-  expect(within(cards[1]).getByText("Active Channels")).toBeInTheDocument()
-  expect(within(cards[2]).getByText("Append Batch Records P95")).toBeInTheDocument()
-  expect(within(cards[3]).getByText("Append Batch Bytes P95")).toBeInTheDocument()
-  expect(within(cards[4]).getByText("Channel Append Error Rate")).toBeInTheDocument()
-  expect(within(cards[5]).getByText("Writer Admission Usage")).toBeInTheDocument()
-  expect(within(cards[6]).getByText("Parked Followers")).toBeInTheDocument()
-  expect(within(cards[7]).getByText("Channel Activation Rejects")).toBeInTheDocument()
-  expect(within(cards[8]).getByText("Reactor Mailbox Depth")).toBeInTheDocument()
-  expect(within(cards[9]).getByText("Channel Worker Queue Depth")).toBeInTheDocument()
-  expect(within(cards[10]).getByText("Pull Hint Error Rate")).toBeInTheDocument()
-  expect(within(cards[11]).getByText("Replication Latency P99")).toBeInTheDocument()
+  expect(cards).toHaveLength(14)
+  expect(within(cards[0]).getByText("Active Channels")).toBeInTheDocument()
+  expect(within(cards[1]).getByText("Channel Append Error Rate")).toBeInTheDocument()
+  expect(within(cards[2]).getByText("Channel Activation Rejects")).toBeInTheDocument()
+  expect(within(cards[3]).getByText("Pull Hint Error Rate")).toBeInTheDocument()
+  expect(within(cards[4]).getByText("Writer Admission Usage")).toBeInTheDocument()
+  expect(within(cards[5]).getByText("Reactor Mailbox Depth")).toBeInTheDocument()
+  expect(within(cards[6]).getByText("Channel Worker Queue Depth")).toBeInTheDocument()
+  expect(within(cards[7]).getByText("Channel Append Latency P99")).toBeInTheDocument()
+  expect(within(cards[8]).getByText("Replication Latency P99")).toBeInTheDocument()
+  expect(within(cards[9]).getByText("Channel Runtime Load Rate")).toBeInTheDocument()
+  expect(within(cards[10]).getByText("Channel Runtime Idle Eviction Rate")).toBeInTheDocument()
+  expect(within(cards[11]).getByText("Append Batch Records P95")).toBeInTheDocument()
+  expect(within(cards[12]).getByText("Append Batch Bytes P95")).toBeInTheDocument()
+  expect(within(cards[13]).getByText("Parked Followers")).toBeInTheDocument()
 })
 
 test("renders database operator cards from realtime API data", async () => {
@@ -1538,15 +1659,15 @@ test("renders database operator cards from realtime API data", async () => {
 
   const cards = await screen.findAllByTestId("cluster-monitor-metric-card")
   expect(cards).toHaveLength(9)
-  expect(within(cards[0]).getByText("Storage Write P99")).toBeInTheDocument()
-  expect(within(cards[1]).getByText("Storage Commit Error Rate")).toBeInTheDocument()
-  expect(within(cards[2]).getByText("Storage Commit Queue Usage")).toBeInTheDocument()
-  expect(within(cards[3]).getByText("Physical Commit P99")).toBeInTheDocument()
-  expect(within(cards[4]).getByText("Commit Batch Records P95")).toBeInTheDocument()
-  expect(within(cards[5]).getByText("Commit Batch Bytes P95")).toBeInTheDocument()
-  expect(within(cards[6]).getByText("Pebble Disk Usage")).toBeInTheDocument()
-  expect(within(cards[7]).getByText("Pebble Read Amplification")).toBeInTheDocument()
-  expect(within(cards[8]).getByText("Pebble Compaction Debt")).toBeInTheDocument()
+  expect(within(cards[0]).getByText("Storage Commit Error Rate")).toBeInTheDocument()
+  expect(within(cards[1]).getByText("Storage Commit Queue Usage")).toBeInTheDocument()
+  expect(within(cards[2]).getByText("Commit Batch Records P95")).toBeInTheDocument()
+  expect(within(cards[3]).getByText("Commit Batch Bytes P95")).toBeInTheDocument()
+  expect(within(cards[4]).getByText("Pebble Disk Usage")).toBeInTheDocument()
+  expect(within(cards[5]).getByText("Pebble Read Amplification")).toBeInTheDocument()
+  expect(within(cards[6]).getByText("Pebble Compaction Debt")).toBeInTheDocument()
+  expect(within(cards[7]).getByText("Storage Write P99")).toBeInTheDocument()
+  expect(within(cards[8]).getByText("Physical Commit P99")).toBeInTheDocument()
 })
 
 test("renders slot operator cards from realtime API data", async () => {
@@ -1556,15 +1677,15 @@ test("renders slot operator cards from realtime API data", async () => {
   const cards = await screen.findAllByTestId("cluster-monitor-metric-card")
   expect(cards).toHaveLength(10)
   expect(within(cards[0]).getByText("Slot Leader Stability")).toBeInTheDocument()
-  expect(within(cards[1]).getByText("Slot Propose Rate")).toBeInTheDocument()
-  expect(within(cards[2]).getByText("Slot Apply Gap")).toBeInTheDocument()
-  expect(within(cards[3]).getByText("Slot Apply Latency P99")).toBeInTheDocument()
-  expect(within(cards[4]).getByText("Slot Proposal Reject Rate")).toBeInTheDocument()
-  expect(within(cards[5]).getByText("Slot Leader Changes")).toBeInTheDocument()
-  expect(within(cards[6]).getByText("Slot Replica Lag Max")).toBeInTheDocument()
-  expect(within(cards[7]).getByText("Slot Scheduler Queue Usage")).toBeInTheDocument()
-  expect(within(cards[8]).getByText("Slot Scheduler Inflight Usage")).toBeInTheDocument()
-  expect(within(cards[9]).getByText("Slot Scheduler Task Latency P99")).toBeInTheDocument()
+  expect(within(cards[1]).getByText("Slot Apply Gap")).toBeInTheDocument()
+  expect(within(cards[2]).getByText("Slot Replica Lag Max")).toBeInTheDocument()
+  expect(within(cards[3]).getByText("Slot Proposal Reject Rate")).toBeInTheDocument()
+  expect(within(cards[4]).getByText("Slot Scheduler Queue Usage")).toBeInTheDocument()
+  expect(within(cards[5]).getByText("Slot Scheduler Inflight Usage")).toBeInTheDocument()
+  expect(within(cards[6]).getByText("Slot Apply Latency P99")).toBeInTheDocument()
+  expect(within(cards[7]).getByText("Slot Scheduler Task Latency P99")).toBeInTheDocument()
+  expect(within(cards[8]).getByText("Slot Propose Rate")).toBeInTheDocument()
+  expect(within(cards[9]).getByText("Slot Leader Changes")).toBeInTheDocument()
 })
 
 test("keeps internal traffic unit readable when an old burst is larger than the current value", async () => {
@@ -1604,6 +1725,17 @@ test("renders all node resource pressure stats in global scope", async () => {
   expect(within(card).getByText("15%")).toBeInTheDocument()
   expect(within(card).getByText("node-2")).toBeInTheDocument()
   expect(within(card).getByText("40%")).toBeInTheDocument()
+})
+
+test("uses stable series keys when node stats have duplicate labels and values", async () => {
+  vi.mocked(getRealtimeMonitor).mockResolvedValueOnce(duplicateNodeStatLabelsClusterMonitorResponse())
+  renderClusterMonitorPage()
+
+  const card = await screen.findByTestId("cluster-monitor-metric-card")
+  const statKeys = Array.from(card.querySelectorAll("[data-series-key]"), (element) => element.getAttribute("data-series-key"))
+  expect(statKeys).toEqual(["node_id=1", "node_id=2"])
+  expect(within(card).getAllByText("node")).toHaveLength(2)
+  expect(within(card).getAllByText("40%")).toHaveLength(2)
 })
 
 test("renders node GC pressure cards from realtime API data", async () => {
@@ -1650,7 +1782,7 @@ test("shows unavailable guidance for source errors and rejected requests", async
   const unavailableTitle = await screen.findByText("Prometheus is unavailable")
   expect(unavailableTitle).toBeInTheDocument()
   expect(unavailableTitle.closest("section")).toHaveAttribute("data-cluster-monitor-surface", "source-state")
-  expect(screen.getByText("dial tcp 127.0.0.1:9090: connect: connection refused")).toBeInTheDocument()
+  expect(screen.queryByText("dial tcp 127.0.0.1:9090: connect: connection refused")).not.toBeInTheDocument()
   expect(screen.queryByTestId("cluster-monitor-metric-card")).not.toBeInTheDocument()
 
   unmount()
@@ -1660,7 +1792,7 @@ test("shows unavailable guidance for source errors and rejected requests", async
   const rejectedTitle = await screen.findByText("Prometheus is unavailable")
   expect(rejectedTitle).toBeInTheDocument()
   expect(rejectedTitle.closest("section")).toHaveAttribute("data-cluster-monitor-surface", "source-state")
-  expect(screen.getByText("manager api unavailable")).toBeInTheDocument()
+  expect(screen.queryByText("manager api unavailable")).not.toBeInTheDocument()
 })
 
 test("updates selected time range and auto refresh interval from the toolbar", async () => {

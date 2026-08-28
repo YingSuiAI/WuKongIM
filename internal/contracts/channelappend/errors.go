@@ -1,6 +1,9 @@
 package channelappend
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+)
 
 var (
 	// ErrInvalidCommand reports a malformed send command.
@@ -23,6 +26,14 @@ var (
 	ErrStaleRoute = errors.New("internal/message: stale route")
 	// ErrRouteNotReady reports that cluster routing is not ready for foreground writes.
 	ErrRouteNotReady = errors.New("internal/message: route not ready")
+	// ErrAppendAuthorityUnavailable reports definitive pre-submit evidence that
+	// the resolved authority node could not be reached. It remains a
+	// route-not-ready error so ordinary bounded route refresh still applies.
+	ErrAppendAuthorityUnavailable = fmt.Errorf("%w: append authority unavailable", ErrRouteNotReady)
+	// ErrAppendOutcomeUnknown reports that a remote append may have reached the
+	// authority even though its response was lost. A retry must perform the
+	// durable sender/client/payload idempotency lookup before appending again.
+	ErrAppendOutcomeUnknown = errors.New("internal/message: append outcome unknown")
 	// ErrChannelNotFound reports that the target channel is not available.
 	ErrChannelNotFound = errors.New("internal/message: channel not found")
 	// ErrBackpressured reports bounded runtime pressure.

@@ -5,11 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	backupcontract "github.com/WuKongIM/WuKongIM/internal/contracts/backup"
 	"github.com/WuKongIM/WuKongIM/internal/contracts/onlinedelivery"
 	"github.com/WuKongIM/WuKongIM/internal/observability/diagnostics"
-	runtimedelivery "github.com/WuKongIM/WuKongIM/internal/runtime/delivery"
 	authoritypresence "github.com/WuKongIM/WuKongIM/internal/runtime/presence"
 	managementusecase "github.com/WuKongIM/WuKongIM/internal/usecase/management"
 	"github.com/WuKongIM/WuKongIM/internal/usecase/presence"
@@ -28,6 +28,7 @@ const (
 	rpcStatusContextDeadlineExceeded = "context_deadline_exceeded"
 	rpcStatusNotFound                = "not_found"
 	rpcStatusInvalidArgument         = "invalid_argument"
+	rpcStatusBackpressured           = "backpressured"
 	rpcStatusRejected                = "rejected"
 
 	presenceOpRegisterRoute      = "register_route"
@@ -74,7 +75,7 @@ type PresenceOwner interface {
 
 // DeliveryOwnerPush accepts owner-node delivery batches over node RPC.
 type DeliveryOwnerPush interface {
-	Push(context.Context, runtimedelivery.PushCommand) (runtimedelivery.PushResult, error)
+	PushOwner(context.Context, onlinedelivery.OwnerPush) (onlinedelivery.OwnerPushResult, error)
 }
 
 // DeliveryEventPush accepts typed EVENT batches over node RPC.
@@ -84,7 +85,7 @@ type DeliveryEventPush interface {
 
 // ManagerConnectionReader handles owner-local manager connection inventory requests.
 type ManagerConnectionReader interface {
-	ListConnections(context.Context, managementusecase.ListConnectionsRequest) ([]managementusecase.Connection, error)
+	ListConnections(context.Context, managementusecase.ListConnectionsRequest) (managementusecase.ListConnectionsResponse, error)
 	GetConnection(context.Context, managementusecase.GetConnectionRequest) (managementusecase.ConnectionDetail, error)
 	NodeRuntimeSummary(context.Context, uint64) (managementusecase.NodeRuntimeSummary, error)
 	SetNodeDrainMode(context.Context, managementusecase.SetNodeDrainModeRequest) (managementusecase.SetNodeDrainModeResponse, error)
@@ -602,11 +603,13 @@ type PresenceRPCNode interface {
 type Client struct {
 	// node is the raw cluster RPC transport used by this adapter.
 	node PresenceRPCNode
+	// channelAppendAttemptTimeout bounds one remote Channel append transport attempt.
+	channelAppendAttemptTimeout time.Duration
 }
 
 // NewClient creates a presence authority RPC client.
 func NewClient(node PresenceRPCNode) *Client {
-	return &Client{node: node}
+	return &Client{node: node, channelAppendAttemptTimeout: defaultChannelAppendRPCAttemptTimeout}
 }
 
 // RegisterRoute registers one owner route on the target authority node.

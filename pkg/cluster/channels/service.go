@@ -10,6 +10,7 @@ import (
 
 	ch "github.com/WuKongIM/WuKongIM/pkg/channel"
 	"github.com/WuKongIM/WuKongIM/pkg/channel/reactor"
+	"github.com/WuKongIM/WuKongIM/pkg/channel/replication"
 	channelservice "github.com/WuKongIM/WuKongIM/pkg/channel/service"
 	channelstore "github.com/WuKongIM/WuKongIM/pkg/channel/store"
 	channeltransport "github.com/WuKongIM/WuKongIM/pkg/channel/transport"
@@ -47,6 +48,21 @@ type ConversationHydrationObserver interface {
 	ObserveConversationHydrationBatch(result string, items, remoteCalls, localReads int, duration time.Duration)
 }
 
+// AppendAuthorityRecoveryDisposition reports whether recovery retained the
+// current authority or is waiting for a durable migration.
+type AppendAuthorityRecoveryDisposition uint8
+
+const (
+	AppendAuthorityRecoveryPending AppendAuthorityRecoveryDisposition = iota
+	AppendAuthorityRecoveryCurrent
+)
+
+// AppendAuthorityRecovery starts or joins durable recovery for an exact
+// authoritative metadata version whose leader could not serve an append.
+type AppendAuthorityRecovery interface {
+	EnsureAppendAuthorityRecovery(context.Context, ch.Meta) (AppendAuthorityRecoveryDisposition, error)
+}
+
 // ForwardClient forwards client append calls to the authoritative channel leader.
 type ForwardClient interface {
 	// ForwardAppend forwards one append request to node.
@@ -55,7 +71,8 @@ type ForwardClient interface {
 	ForwardAppendBatch(context.Context, ch.NodeID, ch.AppendBatchRequest) (ch.AppendBatchResult, error)
 	// ForwardLastVisible forwards one last-visible message read to node.
 	ForwardLastVisible(context.Context, ch.NodeID, LastVisibleRequest) (LastVisibleResponse, error)
-	// ForwardConversationHeads forwards one aligned conversation-head batch to node.
+	// ForwardConversationHeads forwards one aligned conversation-head batch to
+	// node. A successful response transfers ownership of message payloads to the caller.
 	ForwardConversationHeads(context.Context, ch.NodeID, ConversationHeadsRequest) (ConversationHeadsResponse, error)
 	// ForwardCommittedReads forwards one aligned committed-message batch to node.
 	ForwardCommittedReads(context.Context, ch.NodeID, CommittedReadsRequest) (CommittedReadsResponse, error)
@@ -148,7 +165,8 @@ type ConversationHeadResult struct {
 
 // ConversationHeadsResponse preserves request item ordering.
 type ConversationHeadsResponse struct {
-	// Items is positionally aligned with ConversationHeadsRequest.Items.
+	// Items is positionally aligned with ConversationHeadsRequest.Items. Message
+	// payloads are response-owned immutable bytes transferred to the caller.
 	Items []ConversationHeadResult
 }
 
@@ -238,12 +256,17 @@ type Config struct {
 	Store channelstore.Factory
 	// Transport sends Channel replication RPCs when constructing Runtime.
 	Transport channeltransport.Client
+	// QuorumLog owns exact authority recovery and quorum durability for leader appends.
+	QuorumLog replication.DurableQuorumLog
 	// MetaSource resolves authoritative channel metadata.
 	MetaSource ChannelMetaSource
 	// Forward sends client append calls to the resolved channel leader.
 	Forward ForwardClient
 	// MigrationStore exposes Slot-backed migration task and fence commands.
 	MigrationStore *MigrationStore
+	// AppendAuthorityRecovery creates durable leader-failover work when a fresh
+	// authoritative resolve still names the exact failed append leader.
+	AppendAuthorityRecovery AppendAuthorityRecovery
 }
 
 // Service wraps Channel and exposes both client and replication surfaces.
@@ -260,6 +283,7 @@ type Service struct {
 	metaApplyLocks [channelMetaApplyLockCount]sync.Mutex
 	observer       any
 	migration      *MigrationStore
+	appendRecovery AppendAuthorityRecovery
 }
 
 // NewService creates a Service from cfg.
@@ -290,6 +314,7 @@ func NewService(cfg Config) (*Service, error) {
 			AppendAdmissionGuard:          cfg.AppendAdmissionGuard,
 			Store:                         cfg.Store,
 			Transport:                     cfg.Transport,
+			QuorumLog:                     cfg.QuorumLog,
 			MetaResolver:                  cfg.MetaSource,
 			Observer:                      cfg.Observer,
 		})
@@ -303,7 +328,7 @@ func NewService(cfg Config) (*Service, error) {
 		return nil, fmt.Errorf("channels: runtime must implement channel.Cluster and channel/transport.Server")
 	}
 	ensurer, _ := cfg.MetaSource.(ChannelMetaEnsurer)
-	return &Service{runtime: combined, localNode: cfg.LocalNode, metaSource: cfg.MetaSource, ensurer: ensurer, forward: cfg.Forward, store: cfg.Store, observer: cfg.Observer, migration: cfg.MigrationStore}, nil
+	return &Service{runtime: combined, localNode: cfg.LocalNode, metaSource: cfg.MetaSource, ensurer: ensurer, forward: cfg.Forward, store: cfg.Store, observer: cfg.Observer, migration: cfg.MigrationStore, appendRecovery: cfg.AppendAuthorityRecovery}, nil
 }
 
 // Runtime returns the Channel public cluster surface.
@@ -368,6 +393,26 @@ func (s *Service) ResolveAppendAuthority(ctx context.Context, id ch.ChannelID) (
 	if !ok || !cacheableAppendMeta(id, meta) {
 		return ch.Meta{}, unavailableAppendMetaError(meta)
 	}
+	if s.appendRecovery != nil && s.metaCache.failedAuthorityMatches(id, meta) {
+		// Keep the known-failed version out of the hot cache so every bounded
+		// Router retry can observe a newly committed migration result.
+		s.metaCache.invalidateAuthority(id, meta.Leader, meta.Epoch, meta.LeaderEpoch, meta.RouteGeneration)
+		disposition, err := s.appendRecovery.EnsureAppendAuthorityRecovery(ctx, meta)
+		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ch.Meta{}, ctxErr
+			}
+			return ch.Meta{}, fmt.Errorf("%w: append authority recovery: %v", ch.ErrNotReady, err)
+		}
+		if disposition == AppendAuthorityRecoveryCurrent {
+			s.metaCache.restoreCurrentAuthority(id, meta)
+			return meta, nil
+		}
+		// The current metadata still names the failed leader. Existing Router
+		// retry deadlines bound this wait; only a newer authoritative meta may
+		// become appendable.
+		return ch.Meta{}, ch.ErrNotReady
+	}
 	return meta, nil
 }
 
@@ -382,11 +427,31 @@ func (s *Service) InvalidateAppendAuthority(id ch.ChannelID, leader ch.NodeID, e
 	}
 }
 
+// MarkAppendAuthorityFailed records definitive leader unavailability for one
+// exact cached authority version.
+func (s *Service) MarkAppendAuthorityFailed(id ch.ChannelID, leader ch.NodeID, epoch uint64, leaderEpoch uint64, routeGeneration uint64) {
+	if s == nil {
+		return
+	}
+	if s.metaCache.markAuthorityFailed(id, leader, epoch, leaderEpoch, routeGeneration) {
+		s.observeMetaCache("invalidate")
+	}
+}
+
 // Tick advances Channel background work.
 func (s *Service) Tick(ctx context.Context) error { return s.runtime.Tick(ctx) }
 
-// Close closes the Channel runtime.
-func (s *Service) Close() error { return s.runtime.Close() }
+// Close stops metadata-create admission before closing the Channel runtime.
+func (s *Service) Close() error {
+	var errs []error
+	if closer, ok := s.metaSource.(interface{ Close() error }); ok {
+		errs = append(errs, closer.Close())
+	}
+	if s.runtime != nil {
+		errs = append(errs, s.runtime.Close())
+	}
+	return errors.Join(errs...)
+}
 
 // ReadChannelLastVisible reads the newest visible message from the authoritative channel leader.
 func (s *Service) ReadChannelLastVisible(ctx context.Context, id ch.ChannelID, visibleAfterSeq uint64) (ch.Message, bool, error) {
@@ -482,6 +547,11 @@ func (s *Service) ReadConversationHeads(ctx context.Context, ids []ch.ChannelID,
 	if len(ids) == 0 {
 		return results, nil
 	}
+	metaResults, err := s.resolveReadMetas(ctx, ids)
+	if err != nil {
+		resultLabel = "error"
+		return nil, err
+	}
 	type remoteItem struct {
 		index   int
 		request ConversationHeadRequest
@@ -493,12 +563,13 @@ func (s *Service) ReadConversationHeads(ctx context.Context, ids []ch.ChannelID,
 			resultLabel = "error"
 			return nil, err
 		}
-		meta, ok, err := s.resolveReadMeta(ctx, id)
-		if err != nil {
-			results[index].Err = err
+		metaResult := metaResults[index]
+		meta := metaResult.Meta
+		if metaResult.Err != nil {
+			results[index].Err = metaResult.Err
 			continue
 		}
-		if !ok || meta.Leader == 0 {
+		if !metaResult.Found || meta.Leader == 0 {
 			results[index].Err = ch.ErrNotReady
 			continue
 		}
@@ -564,9 +635,7 @@ func (s *Service) ReadConversationHeads(ctx context.Context, ids []ch.ChannelID,
 		}
 		localReads += len(items)
 		for index, item := range items {
-			result := response.Items[index]
-			result.Head.Message.Payload = append([]byte(nil), result.Head.Message.Payload...)
-			results[item.index] = result
+			results[item.index] = response.Items[index]
 		}
 	}
 	return results, nil
@@ -590,8 +659,17 @@ func (s *Service) handleForwardConversationHeads(ctx context.Context, req Conver
 	response := ConversationHeadsResponse{Items: make([]ConversationHeadResult, len(req.Items))}
 	localItems := make([]ConversationHeadRequest, 0, len(req.Items))
 	localIndexes := make([]int, 0, len(req.Items))
+	ids := make([]ch.ChannelID, len(req.Items))
+	for i, item := range req.Items {
+		ids[i] = item.ChannelID
+	}
+	metaResults, err := s.resolveReadMetas(ctx, ids)
+	if err != nil {
+		return ConversationHeadsResponse{}, err
+	}
 	for index, item := range req.Items {
-		meta, ok, err := s.resolveReadMeta(ctx, item.ChannelID)
+		metaResult := metaResults[index]
+		meta, ok, err := metaResult.Meta, metaResult.Found, metaResult.Err
 		if err != nil && !canFallbackConversationHeadOnMissingMeta(s.localNode, item, err) {
 			response.Items[index].Err = err
 			continue
@@ -979,7 +1057,6 @@ func readLastOrdinaryCommitted(ctx context.Context, store channelstore.ChannelSt
 		}
 		for _, message := range read.Messages {
 			if !message.SyncOnce {
-				message.Payload = append([]byte(nil), message.Payload...)
 				return message, true, nil
 			}
 		}
@@ -1406,6 +1483,36 @@ func (s *Service) resolveReadMeta(ctx context.Context, id ch.ChannelID) (ch.Meta
 		return ch.Meta{}, true, err
 	}
 	return normalizeAppendMeta(id, meta)
+}
+
+func (s *Service) resolveReadMetas(ctx context.Context, ids []ch.ChannelID) ([]ChannelMetaResult, error) {
+	results := make([]ChannelMetaResult, len(ids))
+	if s == nil || s.metaSource == nil {
+		return results, nil
+	}
+	if source, ok := s.metaSource.(ChannelMetaBatchSource); ok {
+		batchResults := source.ResolveChannelMetas(ctx, ids)
+		if len(batchResults) != len(ids) {
+			return nil, ch.ErrInvalidConfig
+		}
+		for i, id := range ids {
+			if batchResults[i].Err != nil || !batchResults[i].Found {
+				results[i] = batchResults[i]
+				continue
+			}
+			meta, found, err := normalizeAppendMeta(id, batchResults[i].Meta)
+			results[i] = ChannelMetaResult{Meta: meta, Found: found, Err: err}
+		}
+		return results, nil
+	}
+	for i, id := range ids {
+		if err := ctxErr(ctx); err != nil {
+			return nil, err
+		}
+		meta, found, err := s.resolveReadMeta(ctx, id)
+		results[i] = ChannelMetaResult{Meta: meta, Found: found, Err: err}
+	}
+	return results, nil
 }
 
 func normalizeAppendMeta(id ch.ChannelID, meta ch.Meta) (ch.Meta, bool, error) {

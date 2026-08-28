@@ -24,13 +24,13 @@ Route: `/{lang}/guide`
   - **运行聊天演示 / Run the Chat Demo** `/{lang}/guide/quick-start/chat-demo` — 使用内置聊天演示验证两个测试用户之间的通信。 / Uses the embedded chat demo to verify communication between two test users.
   - **下一步 / Next Steps** `/{lang}/guide/quick-start/next-steps` — 按接入、部署、运维和参考需求引导后续阅读。 / Routes readers to integration, deployment, operations, and reference material.
 
-- **核心概念 / Core Concepts** `/{lang}/guide/core-concepts` — 建立应用开发所需的统一业务术语。 / Establishes the shared product vocabulary needed by application developers.
+- **核心概念 / Core Concepts** `/{lang}/guide/core-concepts` — 用消息、频道、用户、设备和会话理解 WuKongIM 如何组织即时通信。 / Explains how WuKongIM organizes communication through messages, channels, users, devices, and conversations.
 
-  - **集群与节点 / Clusters & Nodes** `/{lang}/guide/core-concepts/cluster-and-nodes` — 解释所有部署都是集群，以及节点、Slot、副本和 Leader 的关系。 / Explains cluster-only deployment semantics and the relationship among nodes, slots, replicas, and leaders.
-  - **消息 / Messages** `/{lang}/guide/core-concepts/messages` — 解释消息标识、序号、顺序、持久化、去重和离线生命周期。 / Explains identifiers, sequence, ordering, persistence, deduplication, and offline lifecycle.
-  - **频道 / Channels** `/{lang}/guide/core-concepts/channels` — 解释频道作为消息路由和存储核心单位的职责。 / Explains channels as the core unit for message routing and storage.
-  - **用户与设备 / Users & Devices** `/{lang}/guide/core-concepts/users-and-devices` — 区分用户、设备、连接、登录状态和多端在线。 / Distinguishes users, devices, connections, login state, and multi-device presence.
-  - **会话 / Conversations** `/{lang}/guide/core-concepts/conversations` — 解释会话列表、最近消息、未读数和状态同步。 / Explains conversation lists, latest messages, unread counts, and state synchronization.
+  - **消息 / Message** `/{lang}/guide/core-concepts/messages` — 消息是什么、如何找到接收范围，以及发送成功、送达和已读的区别。 / Explains what a message is, how it finds recipients, and why sent, delivered, and read are different outcomes.
+  - **频道 / Channel** `/{lang}/guide/core-concepts/channels` — 频道如何表示单聊、群聊等消息目标，并组织参与者和消息历史。 / Explains how a Channel represents direct and group targets and organizes participants and message history.
+  - **用户 / User** `/{lang}/guide/core-concepts/users` — 用户如何通过稳定 UID 接入，以及 WuKongIM 与业务账号系统的职责边界。 / Explains how a stable UID enters WuKongIM and what remains the responsibility of the product account system.
+  - **设备 / Device** `/{lang}/guide/core-concepts/devices` — 设备、连接与多端在线的区别，以及哪些状态会跨设备共享。 / Separates devices from connections and explains multi-endpoint presence and shared state.
+  - **会话 / Conversation** `/{lang}/guide/core-concepts/conversations` — 会话如何把频道呈现为聊天列表，并管理未读和个人可见状态。 / Explains how a Conversation presents a Channel in a chat list with unread and personal visibility state.
 
 - **集成指南 / Integration** `/{lang}/guide/integration` — 从业务系统视角完成 WuKongIM 接入。 / Integrates WuKongIM from the perspective of an existing product system.
 
@@ -39,6 +39,7 @@ Route: `/{lang}/guide`
   - **消息收发 / Messaging** `/{lang}/guide/integration/messaging` — 串联连接、发送、接收、确认、重连和离线补偿。 / Connects sending, receiving, acknowledgements, reconnects, and offline recovery.
   - **Webhook / Webhooks** `/{lang}/guide/integration/webhooks` — 介绍事件回调、签名、重试、幂等和失败处理。 / Introduces event callbacks, signatures, retries, idempotency, and failure handling.
   - **插件扩展 / Plugin Extensions** `/{lang}/guide/integration/plugins` — 说明插件的适用问题、生命周期和安全边界。 / Explains suitable plugin use cases, lifecycle, and security boundaries.
+  - **上线验收 / Integration Acceptance** `/{lang}/guide/integration/acceptance` — 把可执行兼容性证据与生产身份、网络、回调、容量和回滚门禁分开。 / Separates executable compatibility evidence from production identity, network, callback, capacity, and rollback gates.
 
 - **场景教程 / Tutorials** `/{lang}/guide/tutorials` — 提供面向典型业务场景的端到端方案。 / Provides end-to-end solutions for representative product scenarios.
 
@@ -100,22 +101,22 @@ Route: `/{lang}/server`
 
 Route: `/{lang}/sdk`
 
-在不同客户端平台接入 WuKongIM。 / Integrate WuKongIM across supported client platforms.
+在不同客户端平台接入 WuKongIM。 / Integrate WuKongIM across client platforms.
 
-- **选择 SDK / Choose an SDK** `/{lang}/sdk/choose-sdk` — 根据应用平台、框架和运行环境选择客户端 SDK。 / Choose a client SDK by platform, framework, and runtime.
+- **选择 SDK / Choose an SDK** `/{lang}/sdk/choose-sdk` — 按应用平台、能力需求和验证状态选择客户端 SDK，并找到官方源码。 / Choose a client SDK by platform, capability needs, and verification status, then find official source.
 
-- **版本与兼容性 / Versions & Compatibility** `/{lang}/sdk/compatibility` — 汇总 SDK 版本、服务端兼容范围、系统要求和维护状态。 / Lists SDK versions, server compatibility, system requirements, and maintenance status.
+- **版本与兼容性 / Versions & Compatibility** `/{lang}/sdk/compatibility` — 记录 v3 Beta 黄金路径的服务端 revision、SDK、Node、浏览器兼容目标与 receipt 状态。 / Records the server revision, SDK, Node, and browser compatibility target plus receipt status for the v3 Beta golden path.
 
-- **公共指南 / Common Guides** `/{lang}/sdk/common-guides` — 统一说明所有客户端 SDK 共有的接入行为。 / Explains integration behavior shared by all client SDKs.
+- **公共指南 / Common Guides** `/{lang}/sdk/common-guides` — 以服务端可证明语义说明跨 SDK 接入行为，不替代平台 API 文档。 / Explains cross-SDK integration behavior through server-proven semantics without replacing platform API docs.
 
-  - **身份与 Token / Identity & Token** `/{lang}/sdk/common-guides/identity-and-token` — 说明用户、设备、Token 获取和失效处理。 / Explains users, devices, token acquisition, and invalidation.
-  - **初始化与连接 / Initialization & Connection** `/{lang}/sdk/common-guides/initialization-and-connection` — 说明 SDK 初始化、连接状态、生命周期和退出。 / Covers SDK initialization, connection state, lifecycle, and logout.
-  - **消息收发 / Messaging** `/{lang}/sdk/common-guides/messaging` — 解释发送、接收、确认、消息状态和错误处理。 / Explains send, receive, acknowledgement, message state, and error handling.
-  - **自定义消息 / Custom Messages** `/{lang}/sdk/common-guides/custom-messages` — 定义自定义消息的编码、注册、兼容和降级。 / Defines encoding, registration, compatibility, and fallback for custom messages.
-  - **会话与未读数 / Conversations & Unread Counts** `/{lang}/sdk/common-guides/conversations-and-unread` — 说明会话、最近消息、未读数和已读状态。 / Explains conversations, latest messages, unread counts, and read state.
-  - **离线消息与推送 / Offline Messages & Push** `/{lang}/sdk/common-guides/offline-and-push` — 区分离线同步和系统推送，并说明协作方式。 / Distinguishes offline synchronization from system push and explains how they cooperate.
-  - **多设备同步 / Multi-device Sync** `/{lang}/sdk/common-guides/multi-device` — 说明多端登录、消息同步和设备状态一致性。 / Explains multi-device login, message sync, and device-state consistency.
-  - **重连与异常处理 / Reconnect & Errors** `/{lang}/sdk/common-guides/reconnect-and-errors` — 说明断线、网络切换、超时、重试和常见错误。 / Covers disconnects, network changes, timeouts, retries, and common errors.
+  - **身份与 Token / Identity & Token** `/{lang}/sdk/common-guides/identity-and-token` — 设计 UID、设备、Token 获取、轮换和失效边界。 / Designs UID, device, token acquisition, rotation, and invalidation boundaries.
+  - **初始化与连接 / Initialization & Connection** `/{lang}/sdk/common-guides/initialization-and-connection` — 组织 SDK 实例、路由、连接状态、恢复门和退出生命周期。 / Organizes SDK instances, routing, connection states, recovery gates, and logout lifecycle.
+  - **消息收发 / Messaging** `/{lang}/sdk/common-guides/messaging` — 解释发送、接收、确认、幂等、消息状态与瞬时分支。 / Explains send, receive, acknowledgements, idempotency, message state, and transient branches.
+  - **自定义消息 / Custom Messages** `/{lang}/sdk/common-guides/custom-messages` — 设计应用 Payload 的版本、编码、兼容、降级和安全边界。 / Designs application payload versioning, encoding, compatibility, fallback, and security boundaries.
+  - **会话与未读数 / Conversations & Unread Counts** `/{lang}/sdk/common-guides/conversations-and-unread` — 区分会话投影、最近消息、Badge floor、已读状态和拉取游标。 / Separates conversation projections, latest messages, badge floors, read state, and pull cursors.
+  - **离线消息与推送 / Offline Messages & Push** `/{lang}/sdk/common-guides/offline-and-push` — 区分持久消息恢复、离线候选 Webhook 和厂商通知。 / Separates durable message recovery, offline-candidate webhooks, and provider notifications.
+  - **多设备同步 / Multi-device Sync** `/{lang}/sdk/common-guides/multi-device` — 说明设备类别、冲突等级、多端连接、共享投影和产品设备状态。 / Explains device categories, conflict levels, concurrent sessions, shared projections, and product device state.
+  - **重连与异常处理 / Reconnect & Errors** `/{lang}/sdk/common-guides/reconnect-and-errors` — 按网络、路由、连接、发送和同步阶段处理重连与错误。 / Handles reconnects and errors across network, route, connection, send, and synchronization phases.
 
 - **Android / Android** `/{lang}/sdk/android` — Android SDK 的支持范围、系统要求和接入入口。 / Support scope, system requirements, and entry points for the Android SDK.
 
@@ -133,11 +134,11 @@ Route: `/{lang}/sdk`
   - **API 参考 / API Reference** `/{lang}/sdk/ios/api-reference` — iOS SDK 的类、方法、事件、参数和错误定义。 / Classes, methods, events, parameters, and errors for the iOS SDK.
   - **升级指南 / Upgrade Guide** `/{lang}/sdk/ios/upgrade` — iOS SDK 的破坏性变更、迁移步骤和发布记录。 / Breaking changes, migration steps, and release history for the iOS SDK.
 
-- **JavaScript / Web / JavaScript / Web** `/{lang}/sdk/javascript` — JavaScript SDK 的浏览器支持范围和接入入口。 / Browser support and entry points for the JavaScript SDK.
+- **JavaScript / Web / JavaScript / Web** `/{lang}/sdk/javascript` — 使用固定的 SDK 兼容目标完成浏览器安装、连接、双向消息、离线恢复、能力核对和验收报告；完整 API 与升级仍在规划中。 / Complete browser installation, connection, two-way messaging, offline recovery, capability review, and acceptance reporting with the pinned SDK compatibility target; complete API and upgrade material remain planned.
 
-  - **安装与配置 / Installation** `/{lang}/sdk/javascript/installation` — JavaScript / Web SDK 的依赖、权限和构建配置。 / Dependencies, permissions, and build configuration for the JavaScript / Web SDK.
-  - **快速接入 / Quickstart** `/{lang}/sdk/javascript/quickstart` — 在 JavaScript / Web 应用中完成首次连接和消息收发。 / Connect and exchange the first messages with the JavaScript / Web SDK.
-  - **平台专属能力 / Platform Capabilities** `/{lang}/sdk/javascript/platform-capabilities` — JavaScript / Web 平台的生命周期、后台运行和推送等差异。 / Lifecycle, background execution, push, and other JavaScript / Web-specific behavior.
+  - **安装与配置 / Installation** `/{lang}/sdk/javascript/installation` — 安装精确版本的 JavaScript SDK，并配置框架无关的 TypeScript 黄金样例。 / Install the exact JavaScript SDK version and configure the framework-neutral TypeScript golden sample.
+  - **快速接入 / Quickstart** `/{lang}/sdk/javascript/quickstart` — 通过 localhost BFF 完成连接、双向消息、断开、重连和离线同步。 / Use the localhost BFF to connect, exchange messages, disconnect, reconnect, and recover offline messages.
+  - **平台专属能力 / Platform Capabilities** `/{lang}/sdk/javascript/platform-capabilities` — 按真实 Chromium 场景区分场景覆盖能力、安全边界和未验证范围。 / Separates scenario-covered capabilities, security boundaries, and unverified scope through the real Chromium scenario.
   - **API 参考 / API Reference** `/{lang}/sdk/javascript/api-reference` — JavaScript / Web SDK 的类、方法、事件、参数和错误定义。 / Classes, methods, events, parameters, and errors for the JavaScript / Web SDK.
   - **升级指南 / Upgrade Guide** `/{lang}/sdk/javascript/upgrade` — JavaScript / Web SDK 的破坏性变更、迁移步骤和发布记录。 / Breaking changes, migration steps, and release history for the JavaScript / Web SDK.
 
@@ -171,19 +172,19 @@ Route: `/{lang}/api`
 
 查阅 HTTP API、Webhook 和客户端协议。 / Reference HTTP APIs, webhooks, and client protocols.
 
-- **通用约定 / Conventions** `/{lang}/api/conventions` — 定义 Base URL、JSON、时间、ID、分页、幂等和响应结构。 / Defines base URLs, JSON, time, identifiers, pagination, idempotency, and response envelopes.
+- **通用约定 / Conventions** `/{lang}/api/conventions` — 定义 v3 Beta 黄金路径子集使用的 Base URL、JSON、标识和兼容响应结构。 / Defines base URLs, JSON, identifiers, and compatible response envelopes used by the v3 Beta golden-path subset.
 
-- **认证与安全 / Authentication & Security** `/{lang}/api/authentication` — 说明 API 凭证、Token、请求保护和生产安全要求。 / Explains API credentials, tokens, request protection, and production security.
+- **认证与安全 / Authentication & Security** `/{lang}/api/authentication` — 说明开发身份、受信 BFF，以及默认组合尚未提供的生产鉴权保证。 / Explains development identities, the trusted BFF, and the production authentication guarantees absent from the default composition.
 
-- **版本与兼容性 / Versions & Compatibility** `/{lang}/api/compatibility` — 说明 API、客户端协议与服务端版本的兼容规则。 / Defines compatibility among APIs, client protocols, and server versions.
+- **版本与兼容性 / Versions & Compatibility** `/{lang}/api/compatibility` — 记录黄金路径 HTTP 子集、客户端协议与服务端快照的兼容目标和 receipt 状态。 / Records the compatibility target and receipt status for the golden-path HTTP subset, client protocol, and server snapshot.
 
-- **产品 HTTP API / Product HTTP API** `/{lang}/api/product-http` — 面向稳定产品能力的规范驱动 HTTP 参考。 / Specification-driven HTTP reference for stable product capabilities.
+- **产品 HTTP API（Beta 子集） / Product HTTP API (Beta subset)** `/{lang}/api/product-http` — 仅发布 JavaScript 黄金路径声明使用的受信服务端接口。 / Publishes only the trusted server-side endpoints declared by the JavaScript golden path.
 
-  - **用户 / Users** `/{lang}/api/product-http/users` — Token、设备退出、在线状态和系统用户接口。 / Token, device logout, online status, and system-user endpoints.
+  - **用户 / Users** `/{lang}/api/product-http/users` — 记录黄金路径用于开发身份准备的 `/user/token` 合同与安全边界。 / Documents the `/user/token` contract and security boundary used to prepare golden-path development identities.
   - **频道 / Channels** `/{lang}/api/product-http/channels` — 频道、订阅者、黑名单、白名单和临时频道接口。 / Channel, subscriber, blacklist, whitelist, and temporary-channel endpoints.
-  - **消息 / Messages** `/{lang}/api/product-http/messages` — 消息发送、同步、确认和消息事件接口。 / Message send, sync, acknowledgement, and event endpoints.
+  - **消息 / Messages** `/{lang}/api/product-http/messages` — 记录黄金路径用于离线恢复的 `/channel/messagesync` 合同。 / Documents the `/channel/messagesync` contract used for golden-path offline recovery.
   - **会话 / Conversations** `/{lang}/api/product-http/conversations` — 会话列表、同步、未读数和删除接口。 / Conversation list, sync, unread-count, and deletion endpoints.
-  - **路由发现 / Route Discovery** `/{lang}/api/product-http/routing` — 获取目标节点 TCP 和 WebSocket 接入地址。 / Discovers TCP and WebSocket addresses for the target node.
+  - **路由发现 / Route Discovery** `/{lang}/api/product-http/routing` — 获取服务端配置的 TCP 和 WebSocket 客户端入口地址。 / Discovers the configured TCP and WebSocket client-ingress addresses.
   - **错误响应 / Error Responses** `/{lang}/api/product-http/errors` — 解释 HTTP 状态、业务状态和 Reason Code 的关系。 / Relates HTTP status, business status, and protocol reason codes.
 
 - **运维 HTTP API / Operations HTTP API** `/{lang}/api/operations-http` — 发布稳定且受支持的运维接口。 / Publishes stable and supported operations endpoints.
@@ -207,12 +208,12 @@ Route: `/{lang}/api`
   - **数据包类型 / Packet Types** `/{lang}/api/client-protocols/packet-types` — 说明 Connect、Send、Recv、Ack 和 Ping/Pong 字段。 / Documents Connect, Send, Recv, Ack, and Ping/Pong fields.
   - **加密与安全 / Encryption & Security** `/{lang}/api/client-protocols/encryption` — 说明握手密钥、负载保护和协议安全约束。 / Covers handshake keys, payload protection, and protocol security constraints.
 
-- **公共数据字典 / Shared Dictionaries** `/{lang}/api/dictionaries` — 集中定义跨 API 和协议复用的常量。 / Centralizes constants shared across APIs and protocols.
+- **公共数据字典 / Shared Dictionaries** `/{lang}/api/dictionaries` — 发布源码校准的 Channel、设备、消息标志与 Reason Code 字典。 / Publishes source-aligned Channel, device, message-flag, and Reason Code dictionaries.
 
-  - **Channel Type / Channel Type** `/{lang}/api/dictionaries/channel-types` — 定义单聊、群聊和其他频道类型。 / Defines direct, group, and other channel types.
-  - **Device Flag / Device Flag** `/{lang}/api/dictionaries/device-flags` — 定义 App、Web、System 等设备标识。 / Defines App, Web, System, and other device identifiers.
-  - **Message Flags / Message Flags** `/{lang}/api/dictionaries/message-flags` — 定义持久化、红点、回执和流式消息标志。 / Defines persistence, red-dot, receipt, and streaming-message flags.
-  - **Reason Code / Reason Code** `/{lang}/api/dictionaries/reason-codes` — 定义成功、鉴权失败、重试和拒绝等原因码。 / Defines success, authentication failure, retry, refusal, and other reason codes.
+  - **Channel Type / Channel Type** `/{lang}/api/dictionaries/channel-types` — 列出当前 1–12 Channel Type，并标注基础、专用和旧类型边界。 / Lists current Channel Types 1–12 with baseline, specialized, and legacy boundaries.
+  - **Device Flag / Device Flag** `/{lang}/api/dictionaries/device-flags` — 列出 APP、WEB、PC、SYSTEM 与 Device Level 冲突策略。 / Lists APP, WEB, PC, SYSTEM, and Device Level conflict policies.
+  - **Message Flags / Message Flags** `/{lang}/api/dictionaries/message-flags` — 列出固定 Header 与 Setting 位，并解释持久化、红点、命令、回执和流语义。 / Lists fixed-header and Setting bits for persistence, red dots, commands, receipts, and streams.
+  - **Reason Code / Reason Code** `/{lang}/api/dictionaries/reason-codes` — 完整列出当前 0–29 协议枚举并标注使用阶段、重试和可达性。 / Lists the complete current 0–29 protocol enum with stage, retry, and reachability guidance.
 
 - **规范下载 / Specifications** `/{lang}/api/specifications` — 提供校准后、可机器读取的接口与协议规范。 / Provides aligned, machine-readable API and protocol specifications.
 

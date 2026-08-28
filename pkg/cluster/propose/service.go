@@ -6,14 +6,16 @@ import (
 	"fmt"
 	"time"
 
+	clusternet "github.com/WuKongIM/WuKongIM/pkg/cluster/net"
 	"github.com/WuKongIM/WuKongIM/pkg/cluster/routing"
+	"github.com/WuKongIM/WuKongIM/pkg/transport"
 )
 
 const (
-	stageMetaCreateProposeLocal   = "meta_create_propose_local"
-	stageMetaCreateProposeForward = "meta_create_propose_forward"
-	leaderChangeRetryAttempts     = 100
-	leaderChangeRetryBackoff      = 10 * time.Millisecond
+	stageMetaCreateProposeLocal     = "meta_create_propose_local"
+	stageMetaCreateProposeForward   = "meta_create_propose_forward"
+	leaderChangeRetryBackoff        = 10 * time.Millisecond
+	defaultLeaderChangeRetryTimeout = 5 * time.Second
 )
 
 // Config wires a Service.
@@ -26,6 +28,10 @@ type Config struct {
 	Slots SlotRuntime
 	// Forward forwards requests to remote leaders.
 	Forward ForwardClient
+	// LeaderChangeRetryTimeout bounds retries while Slot leadership is changing.
+	// The production composition sets this from the configured maximum Slot
+	// election window. A shorter caller context always wins.
+	LeaderChangeRetryTimeout time.Duration
 }
 
 // Service routes Slot metadata proposals to local or remote leaders.
@@ -34,11 +40,23 @@ type Service struct {
 	router    Router
 	slots     SlotRuntime
 	forward   ForwardClient
+	// leaderChangeRetryTimeout is long enough for one configured Slot election.
+	leaderChangeRetryTimeout time.Duration
 }
 
 // NewService creates a Service from cfg.
 func NewService(cfg Config) *Service {
-	return &Service{localNode: cfg.LocalNode, router: cfg.Router, slots: cfg.Slots, forward: cfg.Forward}
+	retryTimeout := cfg.LeaderChangeRetryTimeout
+	if retryTimeout <= 0 {
+		retryTimeout = defaultLeaderChangeRetryTimeout
+	}
+	return &Service{
+		localNode:                cfg.LocalNode,
+		router:                   cfg.Router,
+		slots:                    cfg.Slots,
+		forward:                  cfg.Forward,
+		leaderChangeRetryTimeout: retryTimeout,
+	}
 }
 
 // Propose submits req to the current Slot leader.
@@ -62,21 +80,22 @@ func (s *Service) propose(ctx context.Context, req Request, wantResult bool) ([]
 	if s == nil || s.router == nil || s.slots == nil {
 		return nil, ErrInvalidRequest
 	}
+	deadline := time.Now().Add(s.leaderChangeRetryTimeout)
 	var lastErr error
-	for attempt := 0; attempt < leaderChangeRetryAttempts; attempt++ {
+	for {
 		result, err := s.proposeOnceInternal(ctx, req, wantResult)
 		if !isLeaderChangeRetryable(err) {
 			return result, err
 		}
 		lastErr = err
-		if attempt == leaderChangeRetryAttempts-1 {
-			break
-		}
-		if err := waitLeaderChangeRetry(ctx); err != nil {
+		more, err := waitLeaderChangeRetry(ctx, deadline)
+		if err != nil {
 			return nil, err
 		}
+		if !more {
+			return nil, lastErr
+		}
 	}
-	return nil, lastErr
 }
 
 func (s *Service) proposeOnceInternal(ctx context.Context, req Request, wantResult bool) ([]byte, error) {
@@ -85,17 +104,20 @@ func (s *Service) proposeOnceInternal(ctx context.Context, req Request, wantResu
 		return nil, err
 	}
 	payload := EncodePayload(route.HashSlot, req.Command)
-	var lastNotLeader error
+	var lastRetryable error
 	for _, leader := range routeLeaderCandidates(route) {
 		var result []byte
 		result, err = s.proposeToLeaderInternal(ctx, route, leader, payload, wantResult)
-		if !errors.Is(err, ErrNotLeader) {
+		if err == nil {
+			return result, nil
+		}
+		if !isLeaderChangeRetryable(err) {
 			return result, err
 		}
-		lastNotLeader = err
+		lastRetryable = err
 	}
-	if lastNotLeader != nil {
-		return nil, lastNotLeader
+	if lastRetryable != nil {
+		return nil, lastRetryable
 	}
 	return nil, ErrNotLeader
 }
@@ -164,17 +186,32 @@ func routeLeaderCandidates(route routing.Route) []uint64 {
 }
 
 func isLeaderChangeRetryable(err error) bool {
-	return errors.Is(err, ErrNotLeader)
+	return errors.Is(err, ErrNotLeader) || isDefinitelyNotDelivered(err)
 }
 
-func waitLeaderChangeRetry(ctx context.Context) error {
-	timer := time.NewTimer(leaderChangeRetryBackoff)
+// isDefinitelyNotDelivered recognizes only failures that occur before a
+// request can enter a remote handler. Timeouts, closed connections, resets,
+// queue failures, and other ambiguous transport outcomes must not be retried
+// here because generic Slot commands are not all idempotent.
+func isDefinitelyNotDelivered(err error) bool {
+	return errors.Is(err, clusternet.ErrNodeNotFound) ||
+		errors.Is(err, transport.ErrNodeNotFound) ||
+		errors.Is(err, transport.ErrDialFailed)
+}
+
+func waitLeaderChangeRetry(ctx context.Context, deadline time.Time) (bool, error) {
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return false, nil
+	}
+	wait := min(leaderChangeRetryBackoff, remaining)
+	timer := time.NewTimer(wait)
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
-		return ctx.Err()
+		return false, ctx.Err()
 	case <-timer.C:
-		return nil
+		return time.Now().Before(deadline), nil
 	}
 }
 

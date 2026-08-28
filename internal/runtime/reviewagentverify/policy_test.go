@@ -90,6 +90,114 @@ func TestPolicySelectsMandatoryChecksFromCompletePaths(t *testing.T) {
 			want: []string{"docs-contracts"},
 		},
 		{
+			name: "all docs-site source stays on the exclusive docs fast path",
+			files: []contract.ChangedFile{
+				changed("docs-site/lib/i18n.ts"),
+			},
+			want: []string{"docs-contracts"},
+		},
+		{
+			name: "JavaScript quickstart docs add the focused integration gate",
+			files: []contract.ChangedFile{
+				changed("docs-site/examples/javascript-web-quickstart/src/client/main.ts"),
+			},
+			want: []string{"docs-contracts", "docs-integration"},
+		},
+		{
+			name: "published developer API support pages add the focused integration gate",
+			files: []contract.ChangedFile{
+				changed("docs-site/content/docs/api/authentication.en.mdx"),
+				changed("docs-site/content/docs/api/conventions.mdx"),
+				changed("docs-site/content/docs/api/dictionaries/index.en.mdx"),
+			},
+			want: []string{"docs-contracts", "docs-integration"},
+		},
+		{
+			name: "shared developer presentation sources add the focused integration gate",
+			files: []contract.ChangedFile{
+				changed("docs-site/app/(root)/layout.tsx"),
+				changed("docs-site/app/[lang]/layout.tsx"),
+				changed("docs-site/app/[lang]/(docs)/[section]/layout.tsx"),
+				changed("docs-site/app/[lang]/(home)/layout.tsx"),
+				changed("docs-site/app/global.css"),
+				changed("docs-site/components/provider.tsx"),
+			},
+			want: []string{"docs-contracts", "docs-integration"},
+		},
+		{
+			name: "golden path server contract adds focused integration to Go checks",
+			files: []contract.ChangedFile{
+				changed("internal/access/api/channel_messagesync.go"),
+			},
+			want: []string{"docs-integration", "go-unit", "go-vet"},
+		},
+		{
+			name: "golden path token registration and async auth add focused integration",
+			files: []contract.ChangedFile{
+				changed("internal/access/api/user_legacy.go"),
+				changed("pkg/gateway/core/async_auth.go"),
+			},
+			want: []string{"docs-integration", "go-unit", "go-vet"},
+		},
+		{
+			name: "golden path runtime dependency adds focused integration to Go checks",
+			files: []contract.ChangedFile{
+				changed("internal/usecase/message/sync.go"),
+			},
+			want: []string{"docs-integration", "go-unit", "go-vet"},
+		},
+		{
+			name: "golden path user metadata dependency adds focused integration",
+			files: []contract.ChangedFile{
+				changed("internal/infra/cluster/user_metadata.go"),
+				changed("pkg/cluster/node.go"),
+				changed("pkg/cluster/node_meta.go"),
+			},
+			want: []string{"docs-integration", "go-unit", "go-vet"},
+		},
+		{
+			name: "golden path channel routing dependency adds focused integration",
+			files: []contract.ChangedFile{
+				changed("pkg/cluster/channels/channel.go"),
+			},
+			want: []string{"docs-integration", "go-unit", "go-vet"},
+		},
+		{
+			name: "FLOW and governing root rule",
+			files: []contract.ChangedFile{
+				changed("pkg/channel/FLOW.md"),
+				changed("AGENTS.md"),
+			},
+			want: []string{"flow-doc-contracts", "go-unit", "go-vet"},
+		},
+		{
+			name: "generated FLOW knowledge stays on the exclusive docs path",
+			files: []contract.ChangedFile{
+				changed("docs/development/FLOW_INDEX.md"),
+				changed("docs/development/PROJECT_KNOWLEDGE.md"),
+			},
+			want: []string{"docs-contracts", "flow-doc-contracts"},
+		},
+		{
+			name: "FLOW check remains additive on a mixed docs change",
+			files: []contract.ChangedFile{
+				changed("docs/example/FLOW.md"),
+				changed("docs/example/guide.md"),
+			},
+			want: []string{"docs-contracts", "flow-doc-contracts"},
+		},
+		{
+			name: "all Agent context discovery boundaries",
+			files: []contract.ChangedFile{
+				changed("internal/infra/issueagentgithub/instructions.go"),
+				changed("internal/infra/reviewagentgithub/reader.go"),
+				changed(".github/issue-agent/prompts/engineer.md"),
+			},
+			want: []string{
+				"flow-doc-contracts", "go-unit", "go-vet", "workflow-contracts",
+			},
+		},
+		{
 			name: "rename from production into docs evaluates both names",
 			files: []contract.ChangedFile{{
 				Path:         "docs/queue.md",
@@ -167,6 +275,8 @@ func testVerificationPolicy() verify.Policy {
 		TrustedChecks: map[string]verify.CheckPlan{
 			"go-unit": {}, "go-vet": {}, "scripts-integration": {},
 			"workflow-contracts": {}, "docs-contracts": {},
+			"docs-integration":       {},
+			"flow-doc-contracts":     {},
 			"review-proxy-contracts": {},
 			"web-lint":               {}, "web-test": {}, "web-typecheck": {},
 			"web-build": {}, "web-bundle": {}, "demo-test": {},
@@ -174,6 +284,58 @@ func testVerificationPolicy() verify.Policy {
 			"go-integration": {}, "go-e2e": {}, "three-node-cluster": {},
 		},
 		PathRules: []verify.PathRule{
+			{
+				Name: "documentation golden path integration",
+				Paths: []string{
+					"docs-site/app/(root)/layout.tsx",
+					"docs-site/app/global.css",
+					"docs-site/content/docs/api/authentication.en.mdx",
+					"docs-site/content/docs/api/conventions.mdx",
+					"docs-site/content/docs/api/dictionaries/index.en.mdx",
+					"internal/access/api/channel_messagesync.go",
+					"internal/access/api/user_legacy.go",
+					"internal/infra/cluster/user_metadata.go",
+					"pkg/cluster/node.go",
+					"pkg/cluster/node_meta.go",
+					"pkg/gateway/core/async_auth.go",
+				},
+				Prefixes: []string{
+					"docs-site/app/[lang]/",
+					"docs-site/components/",
+					"docs-site/examples/javascript-web-quickstart/",
+					"internal/usecase/message/",
+					"pkg/cluster/channels/",
+				},
+				Checks: []string{"docs-integration"},
+				Always: true,
+			},
+			{
+				Name: "flow documents",
+				Paths: []string{
+					"AGENTS.md",
+					".github/issue-agent/prompts/engineer.md",
+					".github/issue-agent/prompts/review.md",
+					"docs/development/FLOW_INDEX.md",
+					"docs/development/PROJECT_KNOWLEDGE.md",
+					"internal/infra/issueagentgithub/instructions.go",
+					"internal/infra/issueagentgithub/instructions_test.go",
+					"internal/infra/reviewagentgithub/reader.go",
+					"internal/infra/reviewagentgithub/reader_budget_test.go",
+					"internal/infra/reviewagentgithub/reader_test.go",
+					"internal/runtime/reviewagentverify/instructions.go",
+					"internal/runtime/reviewagentverify/context_test.go",
+				},
+				Prefixes: []string{""},
+				Suffixes: []string{"FLOW.md"},
+				Checks:   []string{"flow-doc-contracts"},
+				Always:   true,
+			},
+			{
+				Name:     "flow tooling",
+				Prefixes: []string{"pkg/flowdoc/", "scripts/flowcheck/"},
+				Checks:   []string{"flow-doc-contracts"},
+				Always:   true,
+			},
 			{
 				Name:     "repository default",
 				Prefixes: []string{""},
@@ -243,7 +405,7 @@ func testVerificationPolicy() verify.Policy {
 				Name:      "documentation-only",
 				Paths:     []string{"README.md", "README_CN.md"},
 				Prefixes:  []string{"docs/", "docs-site/"},
-				Suffixes:  []string{".md", ".mdx"},
+				Suffixes:  []string{},
 				Checks:    []string{"docs-contracts"},
 				Exclusive: true,
 			},

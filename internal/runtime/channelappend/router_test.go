@@ -670,6 +670,56 @@ func TestRouterRetriesRouteErrorsWithinDeadline(t *testing.T) {
 	}
 }
 
+func TestRouterUnknownRemoteOutcomeForcesDurableIdempotencyLookupBeforeRetry(t *testing.T) {
+	remoteTarget := routerTarget("unknown-outcome", 2, 8)
+	localTarget := routerTarget("unknown-outcome", 2, 7)
+	resolver := &routerResolverForTest{targets: []AuthorityTarget{remoteTarget, localTarget}}
+	remote := &routerRemoteForTest{results: []SendBatchItemResult{{Err: ErrAppendOutcomeUnknown}}}
+	local := &routerLocalSubmitterForTest{
+		results: []SendBatchItemResult{{Result: SendResult{MessageID: 31, MessageSeq: 4, Reason: ReasonSuccess}}},
+	}
+	router := NewRouter(RouterOptions{LocalNodeID: 7, Resolver: resolver, Local: local, Remote: remote, RetryBackoff: time.Millisecond})
+	item := routerItem("u1", "unknown-outcome", 2)
+	item.Deadline = time.Now().Add(time.Second)
+
+	results := router.SendBatch([]SendBatchItem{item})
+
+	if len(results) != 1 || results[0].Err != nil || results[0].Result.MessageID != 31 {
+		t.Fatalf("results = %#v, want recovered success", results)
+	}
+	if remote.calls != 1 || remote.target.WriteFenced {
+		t.Fatalf("first remote target = calls:%d fenced:%v, want one ordinary attempt", remote.calls, remote.target.WriteFenced)
+	}
+	if local.calls != 1 || !local.target.WriteFenced {
+		t.Fatalf("retry local target = calls:%d fenced:%v, want durable idempotency lookup", local.calls, local.target.WriteFenced)
+	}
+	if len(resolver.invalidated) != 1 || resolver.invalidated[0] != remoteTarget {
+		t.Fatalf("invalidated = %#v, want exact ambiguous authority", resolver.invalidated)
+	}
+	if len(resolver.markedFailed) != 0 {
+		t.Fatalf("marked failed = %#v, ambiguous outcome must not declare the authority dead", resolver.markedFailed)
+	}
+}
+
+func TestRouterMarksOnlyDefinitiveAuthorityUnavailabilityFailed(t *testing.T) {
+	target := routerTarget("authority-unavailable", 2, 8)
+	resolver := &routerResolverForTest{targets: []AuthorityTarget{target}}
+	remote := &routerRemoteForTest{results: []SendBatchItemResult{{Err: ErrAppendAuthorityUnavailable}}}
+	router := NewRouter(RouterOptions{LocalNodeID: 7, Resolver: resolver, Remote: remote, MaxRouteAttempts: 1})
+
+	results := router.SendBatch([]SendBatchItem{routerItem("u1", "authority-unavailable", 2)})
+
+	if len(results) != 1 || !errors.Is(results[0].Err, ErrRouteNotReady) {
+		t.Fatalf("results = %#v, want route-not-ready authority failure", results)
+	}
+	if len(resolver.invalidated) != 1 || resolver.invalidated[0] != target {
+		t.Fatalf("invalidated = %#v, want exact failed authority cache refresh", resolver.invalidated)
+	}
+	if len(resolver.markedFailed) != 1 || resolver.markedFailed[0] != target {
+		t.Fatalf("marked failed = %#v, want definitive authority failure marker", resolver.markedFailed)
+	}
+}
+
 func TestRouterInvalidatesFailedAuthorityAfterRetryBudgetIsExhausted(t *testing.T) {
 	target := routerTarget("terminal-stale", 2, 7)
 	resolver := &routerResolverForTest{targets: []AuthorityTarget{target}}
@@ -920,6 +970,76 @@ func TestRouterSendBatchObservesWholeBatch(t *testing.T) {
 	}
 }
 
+func TestRouterSendBatchEachPublishesReadyChannelBeforeSlowChannelCompletes(t *testing.T) {
+	fastTarget := routerTarget("fast", 2, 7)
+	slowTarget := routerTarget("slow", 2, 7)
+	local := newRouterControlledLocalSubmitter(2)
+	router := NewRouter(RouterOptions{
+		LocalNodeID: 7,
+		Resolver: &routerResolverForTest{targetsByChannel: map[ChannelID]AuthorityTarget{
+			fastTarget.ChannelID: fastTarget,
+			slowTarget.ChannelID: slowTarget,
+		}},
+		Local: local,
+	})
+
+	type emittedResult struct {
+		index  int
+		result SendBatchItemResult
+	}
+	emitted := make(chan emittedResult, 2)
+	done := make(chan struct{})
+	go func() {
+		router.SendBatchEach([]SendBatchItem{
+			routerItem("u0", "fast", 2),
+			routerItem("u1", "slow", 2),
+		}, func(index int, result SendBatchItemResult) {
+			emitted <- emittedResult{index: index, result: result}
+		})
+		close(done)
+	}()
+
+	first := local.nextCall(t)
+	second := local.nextCall(t)
+	fastCall, slowCall := first, second
+	if fastCall.target.ChannelID == slowTarget.ChannelID {
+		fastCall, slowCall = slowCall, fastCall
+	}
+	if fastCall.target.ChannelID != fastTarget.ChannelID || slowCall.target.ChannelID != slowTarget.ChannelID {
+		t.Fatalf("routed calls = %#v, %#v, want fast and slow channels", first.target.ChannelID, second.target.ChannelID)
+	}
+
+	local.complete(fastCall, controlledRouterResults(fastCall.items))
+	select {
+	case got := <-emitted:
+		if got.index != 0 || got.result.Err != nil || got.result.Result.Reason != ReasonSuccess {
+			t.Fatalf("first emitted result = %#v, want fast channel success at index 0", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ready channel result remained blocked behind slow channel completion")
+	}
+	select {
+	case <-done:
+		t.Fatal("SendBatchEach returned before slow channel completed")
+	default:
+	}
+
+	local.complete(slowCall, controlledRouterResults(slowCall.items))
+	select {
+	case got := <-emitted:
+		if got.index != 1 || got.result.Err != nil || got.result.Result.Reason != ReasonSuccess {
+			t.Fatalf("second emitted result = %#v, want slow channel success at index 1", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("slow channel result was not emitted after completion")
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("SendBatchEach did not join all channel work")
+	}
+}
+
 func BenchmarkRouterSubmitResolvedGroupsNoLeaderOverflow(b *testing.B) {
 	const groupCount = 32
 	groups := make([]routerBatchGroup, groupCount)
@@ -1032,6 +1152,7 @@ type routerResolverForTest struct {
 	lastID           ChannelID
 	calls            int
 	invalidated      []AuthorityTarget
+	markedFailed     []AuthorityTarget
 }
 
 type recordingRouterObserverForTest struct {
@@ -1125,6 +1246,14 @@ func (r *routerResolverForTest) InvalidateAppendAuthority(id ChannelID, target A
 	defer r.mu.Unlock()
 	if target.ChannelID == id {
 		r.invalidated = append(r.invalidated, target)
+	}
+}
+
+func (r *routerResolverForTest) MarkAppendAuthorityFailed(id ChannelID, target AuthorityTarget) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if target.ChannelID == id {
+		r.markedFailed = append(r.markedFailed, target)
 	}
 }
 

@@ -92,7 +92,7 @@ func TestDeliveryRPCLogsRejectedPush(t *testing.T) {
 		Delivery: &fakeDeliveryOwnerPush{err: pushErr},
 	})
 
-	pushBody, err := encodeDeliveryPushRequest(deliveryPushRequest{Command: testDeliveryPushCommand()})
+	pushBody, err := encodeDeliveryPushRequest(deliveryPushRequest{Push: testDeliveryPush()})
 	if err != nil {
 		t.Fatalf("encodeDeliveryPushRequest() error = %v", err)
 	}

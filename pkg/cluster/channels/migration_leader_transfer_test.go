@@ -664,6 +664,10 @@ func (r *fakeMigrationExecutorRuntime) ProbeChannel(_ context.Context, nodeID ui
 	return probe, nil
 }
 
+func (r *fakeMigrationExecutorRuntime) ProbeChannelReplica(ctx context.Context, nodeID uint64, meta metadb.ChannelRuntimeMeta) (ch.RuntimeProbeChannel, error) {
+	return r.ProbeChannel(ctx, nodeID, meta.ChannelID, uint8(meta.ChannelType))
+}
+
 func (r *fakeMigrationExecutorRuntime) DrainChannel(_ context.Context, nodeID uint64, req ch.DrainChannelRequest) (ch.DrainChannelResult, error) {
 	r.ops = append(r.ops, fmt.Sprintf("drain:%d", nodeID))
 	return r.drain, nil
@@ -671,6 +675,11 @@ func (r *fakeMigrationExecutorRuntime) DrainChannel(_ context.Context, nodeID ui
 
 func (r *fakeMigrationExecutorRuntime) ApplyChannelMeta(_ context.Context, nodeID uint64, _ metadb.ChannelRuntimeMeta) error {
 	r.ops = append(r.ops, fmt.Sprintf("apply_meta:%d", nodeID))
+	return nil
+}
+
+func (r *fakeMigrationExecutorRuntime) CatchUpChannelReplica(_ context.Context, leaderNode, targetNode uint64, _ metadb.ChannelRuntimeMeta, through uint64) error {
+	r.ops = append(r.ops, fmt.Sprintf("catch_up:%d:%d:%d", leaderNode, targetNode, through))
 	return nil
 }
 

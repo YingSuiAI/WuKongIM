@@ -139,7 +139,16 @@ func TestSealRendersNativeTwelveGroupTemplates(t *testing.T) {
 	nodeConfig := read("config/wukongim.toml.tmpl")
 	if !strings.Contains(nodeConfig, "initial_slot_count = 12") || !strings.Contains(nodeConfig, "hash_slot_count = 256") ||
 		!strings.Contains(nodeConfig, "slot_replica_n = 3") || !strings.Contains(nodeConfig, "channel_replica_n = 3") ||
+		!strings.Contains(nodeConfig, `slot_tick_interval = "50ms"`) ||
+		!strings.Contains(nodeConfig, "slot_election_tick = 40") ||
+		!strings.Contains(nodeConfig, "slot_heartbeat_tick = 2") ||
 		!strings.Contains(nodeConfig, "max_channels = 50000") ||
+		!strings.Contains(nodeConfig, "channel_store_append_workers = 128") ||
+		!strings.Contains(nodeConfig, "channel_store_apply_workers = 8") ||
+		!strings.Contains(nodeConfig, "channel_rpc_workers = 96") ||
+		!strings.Contains(nodeConfig, "channel_rpc_batch_max_items = 8") ||
+		!strings.Contains(nodeConfig, "runtime_async_send_workers = 1000") ||
+		!strings.Contains(nodeConfig, "recipient_worker_concurrency = 320") ||
 		!strings.Contains(nodeConfig, `external_ws_addr = "ws://{{PUBLIC_HTTP_HOST}}"`) {
 		t.Fatalf("node template = %s", nodeConfig)
 	}
@@ -184,6 +193,7 @@ func TestSealRendersNativeTwelveGroupTemplates(t *testing.T) {
 	stageScript := read("scripts/run-chat-lifecycle-stage.sh")
 	for _, fragment := range []string{
 		"stage_unit=wkbench-coordinator.service", "stage_unit=wkbench-rehearsal.service", "stage_unit=wkbench-formal.service",
+		"WK_CHAT_LAB_MAX_DURATION_SECONDS", `--duration "${WK_CHAT_LAB_MAX_DURATION_SECONDS}s"`,
 		`wukongim_process_up{unit=\"" unit "\"}`, `up == 1 && cpu == 1 && memory == 1`,
 		`exec "${command[@]}"`,
 	} {
@@ -192,7 +202,8 @@ func TestSealRendersNativeTwelveGroupTemplates(t *testing.T) {
 		}
 	}
 	rehearsalUnit := read("systemd/wkbench-rehearsal.service")
-	if !strings.Contains(rehearsalUnit, "ExecStart=/opt/wukongim/scripts/run-chat-lifecycle-stage.sh rehearsal") {
+	if !strings.Contains(rehearsalUnit, "ExecStart=/opt/wukongim/scripts/run-chat-lifecycle-stage.sh rehearsal") ||
+		!strings.Contains(rehearsalUnit, "SuccessExitStatus=130") {
 		t.Fatalf("rehearsal systemd ownership = %s", rehearsalUnit)
 	}
 	for _, script := range []string{"scripts/wait-coordinator-dependencies.sh", "scripts/run-chat-lifecycle-stage.sh"} {

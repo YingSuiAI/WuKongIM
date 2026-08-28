@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/WuKongIM/WuKongIM/pkg/cluster/control"
+	"github.com/WuKongIM/WuKongIM/pkg/cluster/propose"
 	"github.com/WuKongIM/WuKongIM/pkg/cluster/routing"
 	"github.com/WuKongIM/WuKongIM/pkg/slot/multiraft"
 )
@@ -40,6 +41,35 @@ func TestNodeSlotProxyPortRoutesFromControlSnapshot(t *testing.T) {
 	}
 	if got := node.PeersForSlot(2); !reflect.DeepEqual(got, []multiraft.NodeID{1, 2}) {
 		t.Fatalf("PeersForSlot(2) = %#v, want [1 2]", got)
+	}
+}
+
+func TestNodeSlotProxyPortLeaderPrefersHostedRaftObservation(t *testing.T) {
+	node := newStartedSlotProxyPortNode(t, &recordingProposer{})
+	node.router.UpdateSlotLeaders([]routing.SlotStatus{{SlotID: 2, Leader: 1, LeaderTerm: 2}})
+	node.slotStatusRuntime = fakeSlotStatusRuntime{statuses: map[multiraft.SlotID]multiraft.Status{
+		2: {SlotID: 2, NodeID: 1, LeaderID: 2, Term: 3},
+	}}
+
+	leader, err := node.LeaderOf(2)
+	if err != nil {
+		t.Fatalf("LeaderOf(2) error = %v", err)
+	}
+	if leader != 2 {
+		t.Fatalf("LeaderOf(2) = %d, want locally observed leader 2 instead of stale routed leader 1", leader)
+	}
+}
+
+func TestNodeSlotProxyPortLeaderDoesNotReuseStaleRouteDuringHostedElection(t *testing.T) {
+	node := newStartedSlotProxyPortNode(t, &recordingProposer{})
+	node.router.UpdateSlotLeaders([]routing.SlotStatus{{SlotID: 2, Leader: 1, LeaderTerm: 2}})
+	node.slotStatusRuntime = fakeSlotStatusRuntime{statuses: map[multiraft.SlotID]multiraft.Status{
+		2: {SlotID: 2, NodeID: 1, Term: 3},
+	}}
+
+	leader, err := node.LeaderOf(2)
+	if !errors.Is(err, ErrNoSlotLeader) {
+		t.Fatalf("LeaderOf(2) = %d, %v, want ErrNoSlotLeader while the hosted group elects", leader, err)
 	}
 }
 
@@ -77,7 +107,9 @@ func TestNodeSlotProxyPortLocalProposeRejectsRemoteLeader(t *testing.T) {
 	}
 }
 
-func newStartedSlotProxyPortNode(t *testing.T, proposer *recordingProposer) *Node {
+func newStartedSlotProxyPortNode(t *testing.T, proposer interface {
+	Propose(context.Context, propose.Request) error
+}) *Node {
 	t.Helper()
 	node, err := New(validNodeConfig(t), WithProposer(proposer))
 	if err != nil {

@@ -3536,7 +3536,6 @@
           "reset_required": {"type": "boolean"}
         }
       },
-
       "ConnzResponse": {
         "type": "object",
         "properties": {

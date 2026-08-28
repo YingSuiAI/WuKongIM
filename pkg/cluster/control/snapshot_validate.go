@@ -7,6 +7,13 @@ func (s Snapshot) Validate() error {
 	if s.HashSlots.Count == 0 {
 		return fmt.Errorf("control snapshot: hash slot count must be > 0")
 	}
+	if s.SlotReplicaCountTransition != nil {
+		if s.SlotReplicaCountTransition.SourceReplicaCount != s.SlotReplicaCount ||
+			s.SlotReplicaCountTransition.TargetReplicaCount <= s.SlotReplicaCount ||
+			len(s.SlotReplicaCountTransition.TargetNodeIDs) != int(s.SlotReplicaCountTransition.TargetReplicaCount) {
+			return fmt.Errorf("control snapshot: invalid slot replica count transition")
+		}
+	}
 	dataNodes := make(map[uint64]struct{}, len(s.Nodes))
 	seenNodes := make(map[uint64]struct{}, len(s.Nodes))
 	for _, node := range s.Nodes {

@@ -21,6 +21,14 @@ func TestFreshRegistryScrapeExposesLifecycleZeroCounters(t *testing.T) {
 	scrape := recorder.Body.String()
 	require.Contains(t, scrape, `wukongim_channelv2_activation_rejected_total{node_id="8",node_name="node-8",reason="max_channels"} 0`)
 	require.Equal(t, 1, strings.Count(scrape, "wukongim_channelv2_activation_rejected_total{"))
+	for _, role := range []string{"leader", "follower"} {
+		require.Contains(t, scrape, `wukongim_channelv2_runtime_load_total{node_id="8",node_name="node-8",role="`+role+`"} 0`)
+		for _, reason := range []string{"idle", "bench"} {
+			require.Contains(t, scrape, `wukongim_channelv2_runtime_eviction_total{node_id="8",node_name="node-8",reason="`+reason+`",role="`+role+`"} 0`)
+		}
+	}
+	require.Equal(t, 2, strings.Count(scrape, "wukongim_channelv2_runtime_load_total{"))
+	require.Equal(t, 4, strings.Count(scrape, "wukongim_channelv2_runtime_eviction_total{"))
 	for _, result := range []string{"created", "already_existing", "error"} {
 		require.Contains(t, scrape, `wukongim_channelv2_meta_created_total{result="`+result+`",slot_id="1"} 0`)
 	}
@@ -53,6 +61,7 @@ func TestGatewayMetricsTrackConnectionAndTraffic(t *testing.T) {
 	reg.Gateway.MessageReceived("tcp", 12)
 	reg.Gateway.MessageDelivered("tcp", 18)
 	reg.Gateway.FrameHandled("SEND", 5*time.Millisecond)
+	reg.Gateway.TransportWrite("SENDACK", 225*time.Millisecond, nil)
 	reg.Gateway.SetAsyncSendQueue(3, 1024)
 	reg.Gateway.ObserveAsyncSendDispatchWait("wkproto", 2*time.Millisecond)
 	reg.Gateway.ObserveAsyncSendBatch(8, 256, 500*time.Microsecond)
@@ -172,6 +181,11 @@ func TestGatewayMetricsTrackConnectionAndTraffic(t *testing.T) {
 	requireMetricFamily(t, families, "wukongim_gateway_async_send_batch_records")
 	requireMetricFamily(t, families, "wukongim_gateway_async_send_batch_bytes")
 	requireMetricFamily(t, families, "wukongim_gateway_async_send_batch_wait_duration_seconds")
+	transportWrite := requireMetricFamily(t, families, "wukongim_gateway_transport_write_duration_seconds")
+	require.Equal(t, uint64(1), findMetricByLabels(t, transportWrite, map[string]string{
+		"frame_type": "SENDACK",
+		"result":     "ok",
+	}).GetHistogram().GetSampleCount())
 
 	sendacks := requireMetricFamily(t, families, "wukongim_gateway_sendacks_total")
 	require.Equal(t, float64(1), findMetricByLabels(t, sendacks, map[string]string{
@@ -610,6 +624,8 @@ func TestChannelRuntimeMetricsTrackReactorAndWorkerRuntime(t *testing.T) {
 	reg.ChannelRuntime.ObserveWorkerAdmission("channelv2-rpc", "rpc_pull_hint", "full")
 	reg.ChannelRuntime.ObserveWorkerBatch("rpc_pull", "ok", 3)
 	reg.ChannelRuntime.SetChannelRuntimeCount(2, "leader", 17)
+	reg.ChannelRuntime.ObserveRuntimeLoad("leader")
+	reg.ChannelRuntime.ObserveRuntimeEviction("leader", "idle")
 	reg.ChannelRuntime.ObserveChannelActivationRejected("max_channels")
 	reg.ChannelRuntime.SetFollowerParkedCount(2, 11)
 	reg.ChannelRuntime.ObserveFollowerRecoveryProbe("ok")
@@ -857,6 +873,16 @@ func TestChannelRuntimeMetricsTrackReactorAndWorkerRuntime(t *testing.T) {
 		"role":       "leader",
 	})
 	require.Equal(t, float64(17), activeRuntimes.GetMetric()[0].GetGauge().GetValue())
+
+	runtimeLoads := requireMetricFamily(t, families, "wukongim_channelv2_runtime_load_total")
+	require.Equal(t, float64(1), findMetricByLabels(t, runtimeLoads, map[string]string{
+		"node_id": "8", "node_name": "node-8", "role": "leader",
+	}).GetCounter().GetValue())
+
+	runtimeEvictions := requireMetricFamily(t, families, "wukongim_channelv2_runtime_eviction_total")
+	require.Equal(t, float64(1), findMetricByLabels(t, runtimeEvictions, map[string]string{
+		"node_id": "8", "node_name": "node-8", "role": "leader", "reason": "idle",
+	}).GetCounter().GetValue())
 
 	activationRejected := requireMetricFamily(t, families, "wukongim_channelv2_activation_rejected_total")
 	require.Len(t, activationRejected.GetMetric(), 1)
@@ -1476,6 +1502,9 @@ func TestStorageMetricsTrackPebbleEngineSnapshot(t *testing.T) {
 	reg := New(15, "node-15")
 
 	reg.Storage.SetPebbleMetrics("channel_log", StoragePebbleObservation{
+		SequencedExactFreshAppends:     2345,
+		DurablePredecessorCacheHits:    2200,
+		DurablePredecessorValidations:  18,
 		DiskSpaceUsageBytes:            1024,
 		ReadAmplification:              3,
 		MemTableSizeBytes:              2048,
@@ -1540,6 +1569,12 @@ func TestStorageMetricsTrackPebbleEngineSnapshot(t *testing.T) {
 	require.Equal(t, float64(128), findMetricByLabels(t, compactionBytes, map[string]string{"store": "channel_log"}).GetGauge().GetValue())
 	compactionsInProgress := requireMetricFamily(t, families, "wukongim_storage_pebble_compactions_in_progress")
 	require.Equal(t, float64(2), findMetricByLabels(t, compactionsInProgress, map[string]string{"store": "channel_log"}).GetGauge().GetValue())
+	exactFresh := requireMetricFamily(t, families, "wukongim_storage_message_exact_fresh_appends")
+	require.Equal(t, float64(2345), findMetricByLabels(t, exactFresh, map[string]string{"store": "channel_log"}).GetGauge().GetValue())
+	predecessorHits := requireMetricFamily(t, families, "wukongim_storage_message_predecessor_cache_hits")
+	require.Equal(t, float64(2200), findMetricByLabels(t, predecessorHits, map[string]string{"store": "channel_log"}).GetGauge().GetValue())
+	predecessorValidations := requireMetricFamily(t, families, "wukongim_storage_message_predecessor_durable_validations")
+	require.Equal(t, float64(18), findMetricByLabels(t, predecessorValidations, map[string]string{"store": "channel_log"}).GetGauge().GetValue())
 	idempotencySkips := requireMetricFamily(t, families, "wukongim_storage_message_idempotency_negative_filter_skips")
 	require.Equal(t, float64(1234), findMetricByLabels(t, idempotencySkips, map[string]string{"store": "channel_log"}).GetGauge().GetValue())
 	idempotencyReads := requireMetricFamily(t, families, "wukongim_storage_message_idempotency_point_reads")
@@ -1784,6 +1819,47 @@ func TestRegistryExposesIdleChannelAppendWriterState(t *testing.T) {
 	}).GetHistogram().GetSampleSum())
 }
 
+func TestRegistryExposesClosedTerminalResultPartitions(t *testing.T) {
+	reg := New(12, "node-12")
+
+	families, err := reg.Gather()
+	require.NoError(t, err)
+	delivery := requireMetricFamily(t, families, "wukongim_delivery_recipient_worker_process_total")
+	for _, result := range []string{"ok", "panic", "timeout", "canceled", "error", "retry_exhausted", "unknown"} {
+		require.Equal(t, float64(0), findMetricByLabels(t, delivery, map[string]string{
+			"node_id": "12", "node_name": "node-12", "result": result,
+		}).GetCounter().GetValue())
+	}
+	postCommit := requireMetricFamily(t, families, "wukongim_channelappend_effect_total")
+	for _, result := range []string{
+		"ok", "mixed", "canceled", "timeout", "backpressured", "channel_busy", "route_not_ready",
+		"stale_route", "stale_completion", "not_authority", "not_leader", "channel_not_found",
+		"append_result_missing", "append_failed", "commit_failed", "invalid_subscribers", "invalid_cursor",
+		"unsupported", "auth_fail", "invalid_request", "system_error", "other",
+	} {
+		require.Equal(t, float64(0), findMetricByLabels(t, postCommit, map[string]string{
+			"node_id": "12", "node_name": "node-12", "stage": "post_commit", "result": result,
+		}).GetCounter().GetValue())
+	}
+}
+
+func TestRegistryNormalizesTerminalResultPartitions(t *testing.T) {
+	reg := New(12, "node-12")
+	reg.Delivery.ObserveRecipientWorkerProcess("unbounded-result", 1, time.Millisecond)
+	reg.ChannelAppend.ObserveEffect("post_commit", "unbounded-result", 1, time.Millisecond)
+
+	families, err := reg.Gather()
+	require.NoError(t, err)
+	delivery := requireMetricFamily(t, families, "wukongim_delivery_recipient_worker_process_total")
+	require.Equal(t, float64(1), findMetricByLabels(t, delivery, map[string]string{
+		"node_id": "12", "node_name": "node-12", "result": "unknown",
+	}).GetCounter().GetValue())
+	postCommit := requireMetricFamily(t, families, "wukongim_channelappend_effect_total")
+	require.Equal(t, float64(1), findMetricByLabels(t, postCommit, map[string]string{
+		"node_id": "12", "node_name": "node-12", "stage": "post_commit", "result": "other",
+	}).GetCounter().GetValue())
+}
+
 func TestRegistryExposesChannelAppendMetrics(t *testing.T) {
 	reg := New(12, "node-12")
 	reg.ChannelAppend.ObserveRouter("local", "ok", 8, 3*time.Millisecond)
@@ -1797,6 +1873,7 @@ func TestRegistryExposesChannelAppendMetrics(t *testing.T) {
 	reg.ChannelAppend.ObserveEffectPool("append", "full", 16, 16, true)
 	reg.ChannelAppend.ObserveEffect("append", "ok", 8, 4*time.Millisecond)
 	reg.ChannelAppend.ObserveEffect("post_commit", "route_not_ready", 1, 6*time.Millisecond)
+	reg.ChannelAppend.ObserveIdempotencyRecovery(5, 2, 1)
 
 	families, err := reg.Gather()
 	require.NoError(t, err)
@@ -1895,7 +1972,18 @@ func TestRegistryExposesChannelAppendMetrics(t *testing.T) {
 		"stage":     "append",
 	}).GetGauge().GetValue())
 
-	for _, family := range []*dto.MetricFamily{router, admission, state, handoffDepth, handoffCapacity, retryQueue, retryContended, effect, poolSubmit, poolInflight, poolCapacity, poolSaturated} {
+	idempotencyRecovery := requireMetricFamily(t, families, "wukongim_channelappend_idempotency_recovery_items_total")
+	require.Equal(t, float64(5), findMetricByLabels(t, idempotencyRecovery, map[string]string{
+		"node_id": "12", "node_name": "node-12", "result": "recovered",
+	}).GetCounter().GetValue())
+	require.Equal(t, float64(2), findMetricByLabels(t, idempotencyRecovery, map[string]string{
+		"node_id": "12", "node_name": "node-12", "result": "unresolved",
+	}).GetCounter().GetValue())
+	require.Equal(t, float64(1), findMetricByLabels(t, idempotencyRecovery, map[string]string{
+		"node_id": "12", "node_name": "node-12", "result": "lookup_error",
+	}).GetCounter().GetValue())
+
+	for _, family := range []*dto.MetricFamily{router, admission, state, handoffDepth, handoffCapacity, retryQueue, retryContended, effect, poolSubmit, poolInflight, poolCapacity, poolSaturated, idempotencyRecovery} {
 		for _, metric := range family.GetMetric() {
 			requireNoMetricLabel(t, metric, "uid")
 			requireNoMetricLabel(t, metric, "channel_id")

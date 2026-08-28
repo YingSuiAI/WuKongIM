@@ -13,11 +13,17 @@ import (
 )
 
 const (
+	// DefaultStoreAppendWorkers is the qualified leader append pool size for
+	// sustained 2,000 SEND/s three-replica workloads.
+	DefaultStoreAppendWorkers = 128
+	// DefaultStoreApplyWorkers is the qualified follower apply pool size for
+	// sustained 2,000 SEND/s three-replica workloads.
+	DefaultStoreApplyWorkers = 8
 	// DefaultRPCWorkers bounds the QPS-validated blocking replication pool.
-	DefaultRPCWorkers = 160
+	DefaultRPCWorkers = 96
 	// DefaultRPCBatchMaxItems amortizes one blocking replication transport call
 	// across a bounded number of Pull or PullHint items.
-	DefaultRPCBatchMaxItems      = 16
+	DefaultRPCBatchMaxItems      = 8
 	rpcBatchMaxWait              = 250 * time.Microsecond
 	storeAppendBatchMaxItems     = 64
 	storeAppendBatchMaxWait      = 250 * time.Microsecond
@@ -34,6 +40,8 @@ type QueueObserver interface {
 }
 
 // InflightObserver receives current and peak running worker counts.
+// Implementations are called synchronously from worker goroutines and must be
+// concurrency-safe and non-blocking.
 type InflightObserver interface {
 	SetWorkerInflight(pool string, inflight int)
 	SetWorkerInflightPeak(pool string, peak int)
@@ -123,9 +131,15 @@ type Pool struct {
 
 	obsMu sync.RWMutex
 	obs   QueueObserver
+	// queueObservationMu linearizes absolute queue-depth publications. A delayed
+	// older callback reloads the latest physical depth before it reaches the sink.
+	queueObservationMu sync.Mutex
 
 	inflight     atomic.Int64
 	inflightPeak atomic.Int64
+	// inflightObservationMu linearizes absolute current/peak publications. A
+	// delayed older worker samples the latest physical state before publishing.
+	inflightObservationMu sync.Mutex
 	// rpcGroupTurn rotates same-kind RPC target groups between bounded batches.
 	rpcGroupTurn atomic.Uint64
 }
@@ -281,6 +295,11 @@ func (p *Pool) QueueCapacity() int {
 }
 
 func (p *Pool) observeQueueDepth() {
+	if p == nil {
+		return
+	}
+	p.queueObservationMu.Lock()
+	defer p.queueObservationMu.Unlock()
 	p.observer().SetWorkerQueueDepth(p.cfg.Name, p.QueueDepth())
 }
 
@@ -361,9 +380,11 @@ func (p *Pool) observeInflight(inflight int) {
 	if !ok {
 		return
 	}
-	obs.SetWorkerInflight(p.cfg.Name, inflight)
-	peak := p.updateInflightPeak(inflight)
-	obs.SetWorkerInflightPeak(p.cfg.Name, peak)
+	p.updateInflightPeak(inflight)
+	p.inflightObservationMu.Lock()
+	defer p.inflightObservationMu.Unlock()
+	obs.SetWorkerInflight(p.cfg.Name, int(p.inflight.Load()))
+	obs.SetWorkerInflightPeak(p.cfg.Name, int(p.inflightPeak.Load()))
 }
 
 func (p *Pool) updateInflightPeak(inflight int) int {
@@ -435,7 +456,7 @@ func (o workerWorkqueueObserver) ObserveBoundedPool(obs workqueue.BoundedPoolObs
 		p.observeQueueCapacity()
 		p.observeWorkers()
 	case "depth":
-		p.observer().SetWorkerQueueDepth(p.cfg.Name, obs.QueueDepth)
+		p.observeQueueDepth()
 	case "admission":
 		p.observeAdmission(workerAdmissionResultFromWorkqueue(obs.Result))
 	case "worker":

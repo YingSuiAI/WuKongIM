@@ -72,6 +72,37 @@ func TestProposeAppendBatchTrustsMessageIDsOnlyWhenEveryWaiterIsServerAllocated(
 	}
 }
 
+func TestProposeAppendBatchSharesDeclaredImmutablePayload(t *testing.T) {
+	state := leaderState(t, 1, []ch.NodeID{1}, []ch.NodeID{1}, 1)
+	payload := []byte("immutable")
+	decision := state.ProposeAppendBatch(AppendBatchCommand{
+		BatchOpID: 1,
+		Waiters: []AppendBatchWaiter{{
+			OpID: 1, Records: []ch.Record{{ID: 10, Payload: payload, SizeBytes: len(payload)}}, PayloadsImmutable: true,
+		}},
+	})
+
+	require.NoError(t, decision.Err)
+	require.Len(t, decision.Tasks, 1)
+	require.Same(t, &payload[0], &decision.Tasks[0].StoreAppend.Records[0].Payload[0])
+}
+
+func TestProposeAppendBatchOwnsBorrowedPayload(t *testing.T) {
+	state := leaderState(t, 1, []ch.NodeID{1}, []ch.NodeID{1}, 1)
+	payload := []byte("borrowed")
+	decision := state.ProposeAppendBatch(AppendBatchCommand{
+		BatchOpID: 1,
+		Waiters: []AppendBatchWaiter{{
+			OpID: 1, Records: []ch.Record{{ID: 10, Payload: payload, SizeBytes: len(payload)}},
+		}},
+	})
+
+	require.NoError(t, decision.Err)
+	require.Len(t, decision.Tasks, 1)
+	payload[0] = 'B'
+	require.Equal(t, "borrowed", string(decision.Tasks[0].StoreAppend.Records[0].Payload))
+}
+
 func TestAppendStoredWaitsForQuorumFollowerAck(t *testing.T) {
 	state := leaderState(t, 1, []ch.NodeID{1, 2, 3}, []ch.NodeID{1, 2, 3}, 2)
 	decision := state.ProposeAppend(AppendCommand{OpID: 1, CommitMode: ch.CommitModeQuorum, Records: []ch.Record{{ID: 10, Payload: []byte("a"), SizeBytes: 1}}})
@@ -81,6 +112,103 @@ func TestAppendStoredWaitsForQuorumFollowerAck(t *testing.T) {
 	require.Equal(t, uint64(1), state.HW)
 	require.Len(t, decision.Replies, 1)
 	require.Empty(t, state.PendingAppendOrder)
+}
+
+func TestQuorumCommittedAppendPublishesOffsetsAndRepliesWithoutFollowerAck(t *testing.T) {
+	state := leaderState(t, 1, []ch.NodeID{1, 2, 3}, []ch.NodeID{1, 2, 3}, 2)
+	decision := state.ProposeAppendBatch(AppendBatchCommand{
+		BatchOpID: 100,
+		Waiters: []AppendBatchWaiter{
+			{OpID: 1, CommitMode: ch.CommitModeQuorum, Records: []ch.Record{{ID: 10, Payload: []byte("a"), SizeBytes: 1}}},
+			{OpID: 2, CommitMode: ch.CommitModeQuorum, Records: []ch.Record{{ID: 20, Payload: []byte("b"), SizeBytes: 1}}},
+		},
+	})
+	require.Len(t, decision.Tasks, 1)
+
+	decision = state.ApplyQuorumCommitted(QuorumCommittedResult{
+		Fence: decision.Tasks[0].Fence,
+		First: 7,
+		Last:  8,
+		HW:    8,
+	})
+
+	require.Equal(t, uint64(8), state.LEO)
+	require.Equal(t, uint64(8), state.HW)
+	require.Equal(t, machineProgress(8), state.Progress[1])
+	require.Len(t, decision.Replies, 2)
+	require.Equal(t, uint64(7), decision.Replies[0].AppendItems[0].MessageSeq)
+	require.Equal(t, uint64(8), decision.Replies[1].AppendItems[0].MessageSeq)
+	require.Nil(t, state.InflightAppend)
+	require.Empty(t, state.PendingAppends)
+	require.Empty(t, decision.Signals, "quorum receipt must not start the displaced PullHint/AckOffset hot path")
+}
+
+func TestQuorumCommittedAppendRebindsWaiterToOlderDurableRecord(t *testing.T) {
+	state := leaderState(t, 1, []ch.NodeID{1, 2, 3}, []ch.NodeID{1, 2, 3}, 2)
+	decision := state.ProposeAppendBatch(AppendBatchCommand{
+		BatchOpID: 100,
+		Waiters: []AppendBatchWaiter{{
+			OpID: 1, CommitMode: ch.CommitModeQuorum,
+			Records: []ch.Record{{ID: 902, FromUID: "sender", ClientMsgNo: "client-9", Payload: []byte("payload"), SizeBytes: 7, ServerTimestampMS: 902}},
+		}},
+	})
+	rebound := []ch.Record{{
+		ID: 901, Epoch: state.Epoch, FromUID: "sender", ClientMsgNo: "client-9",
+		Payload: []byte("payload"), SizeBytes: 7, ServerTimestampMS: 901,
+	}}
+	decision = state.ApplyQuorumCommitted(QuorumCommittedResult{
+		Fence: decision.Tasks[0].Fence, First: 7, Last: 7, HW: 7, Records: rebound,
+	})
+
+	require.Len(t, decision.Replies, 1)
+	require.NoError(t, decision.Replies[0].Err)
+	require.Equal(t, uint64(901), decision.Replies[0].Append.MessageID)
+	require.Equal(t, uint64(7), decision.Replies[0].Append.MessageSeq)
+	require.Equal(t, int64(901), decision.Replies[0].Append.Message.ServerTimestampMS)
+	require.Equal(t, uint64(7), state.LEO)
+	require.Equal(t, uint64(7), state.HW)
+}
+
+func TestQuorumCommittedAppendRejectsDifferentLogicalRebind(t *testing.T) {
+	state := leaderState(t, 1, []ch.NodeID{1, 2, 3}, []ch.NodeID{1, 2, 3}, 2)
+	decision := state.ProposeAppendBatch(AppendBatchCommand{
+		BatchOpID: 100,
+		Waiters: []AppendBatchWaiter{{
+			OpID: 1, Records: []ch.Record{{ID: 902, FromUID: "sender", ClientMsgNo: "client-9", Payload: []byte("payload"), SizeBytes: 7}},
+		}},
+	})
+	decision = state.ApplyQuorumCommitted(QuorumCommittedResult{
+		Fence: decision.Tasks[0].Fence, First: 7, Last: 7, HW: 7,
+		Records: []ch.Record{{ID: 901, FromUID: "sender", ClientMsgNo: "client-9", Payload: []byte("different"), SizeBytes: 9}},
+	})
+	require.Len(t, decision.Replies, 1)
+	require.ErrorIs(t, decision.Replies[0].Err, ch.ErrLogConflict)
+	require.Zero(t, state.LEO)
+	require.Zero(t, state.HW)
+}
+
+func TestQuorumCommittedAppendRejectsMalformedReceiptWithoutMutation(t *testing.T) {
+	state := leaderState(t, 1, []ch.NodeID{1, 2, 3}, []ch.NodeID{1, 2, 3}, 2)
+	decision := state.ProposeAppend(AppendCommand{OpID: 1, CommitMode: ch.CommitModeQuorum, Records: []ch.Record{{ID: 10, Payload: []byte("a"), SizeBytes: 1}}})
+	require.Len(t, decision.Tasks, 1)
+
+	decision = state.ApplyQuorumCommitted(QuorumCommittedResult{
+		Fence: decision.Tasks[0].Fence,
+		First: 7,
+		Last:  8,
+		HW:    8,
+	})
+
+	require.Len(t, decision.Replies, 1)
+	require.ErrorIs(t, decision.Replies[0].Err, ch.ErrLogConflict)
+	require.Zero(t, state.LEO)
+	require.Zero(t, state.HW)
+	require.Nil(t, state.InflightAppend)
+	require.Empty(t, state.PendingAppends)
+}
+
+func machineProgress(match uint64) ReplicaProgress {
+	return ReplicaProgress{Match: match}
 }
 
 func TestAppendStoredUpdatesPendingWaiterOffsetsInPlace(t *testing.T) {

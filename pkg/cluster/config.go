@@ -197,10 +197,10 @@ type ChannelConfig struct {
 	StoreAppendBatchMaxWait time.Duration
 	// StoreApplyWorkers caps blocking follower apply store workers. Zero keeps the Channel runtime default.
 	StoreApplyWorkers int
-	// RPCWorkers caps blocking Channel replication RPC workers. Zero uses the QPS-validated default of 160.
+	// RPCWorkers caps blocking Channel replication RPC workers. Zero uses the QPS-validated default of 96.
 	RPCWorkers int
 	// RPCBatchMaxItems caps same-target Channel Pull or PullHint items in one
-	// blocking transport call. Zero uses the Channel worker default of 16.
+	// blocking transport call. Zero uses the Channel worker default of 8.
 	RPCBatchMaxItems int
 	// MailboxSize bounds each Channel reactor mailbox.
 	MailboxSize int
@@ -238,7 +238,7 @@ type ChannelMigrationConfig struct {
 	MaxPagesPerTick int
 	// MaxTasksPerTick caps repair tasks created per scanner tick.
 	MaxTasksPerTick int
-	// TaskLimit caps active migration tasks inspected by the executor per tick.
+	// TaskLimit caps runnable migration candidates returned to the executor per tick.
 	TaskLimit int
 }
 

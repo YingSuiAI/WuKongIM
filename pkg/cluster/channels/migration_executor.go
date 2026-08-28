@@ -32,8 +32,10 @@ type MigrationTaskStore interface {
 // MigrationRuntime reads remote/local Channel runtime proof for migration phases.
 type MigrationRuntime interface {
 	ProbeChannel(ctx context.Context, nodeID uint64, channelID string, channelType uint8) (ch.RuntimeProbeChannel, error)
+	ProbeChannelReplica(ctx context.Context, nodeID uint64, meta metadb.ChannelRuntimeMeta) (ch.RuntimeProbeChannel, error)
 	DrainChannel(ctx context.Context, nodeID uint64, req ch.DrainChannelRequest) (ch.DrainChannelResult, error)
 	ApplyChannelMeta(ctx context.Context, nodeID uint64, meta metadb.ChannelRuntimeMeta) error
+	CatchUpChannelReplica(ctx context.Context, leaderNode, targetNode uint64, meta metadb.ChannelRuntimeMeta, through uint64) error
 }
 
 // MigrationObserver receives low-cardinality migration executor observations.
@@ -62,7 +64,7 @@ type MigrationExecutorConfig struct {
 	Observer MigrationObserver
 	// Clock returns current wall-clock time for lease checks. Nil uses time.Now.
 	Clock func() time.Time
-	// TaskLimit bounds tasks inspected per RunOnce tick. Zero uses one task.
+	// TaskLimit bounds runnable candidates returned per RunOnce tick. Zero uses one task.
 	TaskLimit int
 }
 

@@ -5,11 +5,12 @@ import (
 	"reflect"
 	"testing"
 
-	runtimedelivery "github.com/WuKongIM/WuKongIM/internal/runtime/delivery"
+	channelappendcontract "github.com/WuKongIM/WuKongIM/internal/contracts/channelappend"
+	"github.com/WuKongIM/WuKongIM/internal/contracts/onlinedelivery"
 )
 
 func TestDeliveryCodecRequestRoundTrip(t *testing.T) {
-	req := deliveryPushRequest{Command: testDeliveryPushCommand()}
+	req := deliveryPushRequest{Push: testDeliveryPush()}
 
 	body, err := encodeDeliveryPushRequest(req)
 	if err != nil {
@@ -41,10 +42,10 @@ func TestDeliveryCodecRequestRoundTrip(t *testing.T) {
 func TestDeliveryCodecResponseRoundTrip(t *testing.T) {
 	resp := deliveryPushResponse{
 		Status: rpcStatusOK,
-		Result: runtimedelivery.PushResult{
-			Accepted:  []runtimedelivery.Route{testDeliveryRoute("u1", 101)},
-			Retryable: []runtimedelivery.Route{testDeliveryRoute("u2", 202)},
-			Dropped:   []runtimedelivery.Route{testDeliveryRoute("u3", 303)},
+		Result: onlinedelivery.OwnerPushResult{
+			Accepted:  []onlinedelivery.Route{testDeliveryRoute("u1", 101)},
+			Retryable: []onlinedelivery.Route{testDeliveryRoute("u2", 202)},
+			Dropped:   []onlinedelivery.Route{testDeliveryRoute("u3", 303)},
 		},
 	}
 
@@ -70,7 +71,7 @@ func TestDeliveryCodecResponseRoundTrip(t *testing.T) {
 }
 
 func TestDeliveryCodecRejectsBadMagicTruncatedAndTrailingBytes(t *testing.T) {
-	reqBody, err := encodeDeliveryPushRequest(deliveryPushRequest{Command: testDeliveryPushCommand()})
+	reqBody, err := encodeDeliveryPushRequest(deliveryPushRequest{Push: testDeliveryPush()})
 	if err != nil {
 		t.Fatalf("encodeDeliveryPushRequest() error = %v", err)
 	}
@@ -104,10 +105,10 @@ func TestDeliveryCodecRejectsBadMagicTruncatedAndTrailingBytes(t *testing.T) {
 	}
 }
 
-func testDeliveryPushCommand() runtimedelivery.PushCommand {
-	return runtimedelivery.PushCommand{
+func testDeliveryPush() onlinedelivery.OwnerPush {
+	return onlinedelivery.OwnerPush{
 		OwnerNodeID: 13,
-		Envelope: runtimedelivery.Envelope{
+		Event: channelappendcontract.CommittedEnvelope{
 			MessageID:         1001,
 			MessageSeq:        7,
 			ChannelID:         "channel-1",
@@ -120,22 +121,18 @@ func testDeliveryPushCommand() runtimedelivery.PushCommand {
 			Payload:           []byte{1, 2, 3, 4},
 			MessageScopedUIDs: []string{"u1", "u2"},
 		},
-		Routes: []runtimedelivery.Route{
+		Routes: []onlinedelivery.Route{
 			testDeliveryRoute("u1", 101),
 			testDeliveryRoute("u2", 202),
 		},
 	}
 }
 
-func testDeliveryRoute(uid string, sessionID uint64) runtimedelivery.Route {
-	return runtimedelivery.Route{
-		UID:         uid,
-		OwnerNodeID: 13,
-		OwnerBootID: 23,
-		OwnerSeq:    sessionID + 1000,
-		SessionID:   sessionID,
-		DeviceID:    "device-" + uid,
-		DeviceFlag:  1,
-		DeviceLevel: 2,
+func testDeliveryRoute(uid string, sessionID uint64) onlinedelivery.Route {
+	return onlinedelivery.Route{
+		UID: uid, OwnerNodeID: 13, OwnerBootID: 23, OwnerSeq: sessionID + 1000,
+		SessionID: sessionID, DeviceID: "device-" + uid, AppInstanceID: "app-" + uid,
+		InstallationGeneration: 31, SessionGeneration: 32, AuthorizationFence: 33,
+		ProtocolVersion: 6, DeviceFlag: 1, DeviceLevel: 2,
 	}
 }

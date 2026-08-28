@@ -13,6 +13,10 @@ type Cluster interface {
 	HashSlotForKey(string) uint16
 	HashSlotsOf(multiraft.SlotID) []uint16
 	HashSlotTableVersion() uint64
+	// IsLocalSlotLeader reports the local Multi-Raft runtime's current
+	// leadership for slotID. Foreground routing snapshots are not authority for
+	// serving Slot RPCs because they may lag a completed Raft election.
+	IsLocalSlotLeader(multiraft.SlotID) bool
 	LeaderOf(multiraft.SlotID) (multiraft.NodeID, error)
 	IsLocal(multiraft.NodeID) bool
 	PeersForSlot(multiraft.SlotID) []multiraft.NodeID

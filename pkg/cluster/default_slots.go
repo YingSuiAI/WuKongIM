@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -23,20 +24,35 @@ import (
 )
 
 const (
-	defaultSlotTickInterval       = 10 * time.Millisecond
+	defaultSlotTickInterval       = 50 * time.Millisecond
 	defaultSlotLeaderPollInterval = 10 * time.Millisecond
-	defaultSlotElectionTick       = 50
-	defaultSlotHeartbeatTick      = 1
+	defaultSlotElectionTick       = 40
+	defaultSlotHeartbeatTick      = 2
 	defaultSlotRuntimeWorkerCount = 20
 	defaultSlotRaftDirName        = "slotraft"
 	defaultSlotMetaDirName        = "slotmeta"
 	slotRaftBatchMagic            = "WKSRB1"
 )
 
+// slotLeaderChangeRetryTimeout covers the full randomized Raft election
+// window plus one local route-publication interval. Caller deadlines may make
+// an individual proposal wait less than this cluster-level maximum.
+func slotLeaderChangeRetryTimeout(tickInterval time.Duration, electionTick int) time.Duration {
+	if tickInterval <= 0 || electionTick <= 0 {
+		return 0
+	}
+	return time.Duration(electionTick*2)*tickInterval + defaultSlotLeaderPollInterval
+}
+
 // ensureDefaultSlots creates the Slot runtime used by the default proposer.
 func (n *Node) ensureDefaultSlots() error {
 	if n == nil || n.slots != nil {
 		return nil
+	}
+	if _, err := os.Lstat(filepath.Join(n.cfg.DataDir, metadb.DirectoryProjectionUpgradePendingFile)); err == nil {
+		return fmt.Errorf("directory projection upgrade incomplete: rerun wkdb upgrade-person-directory before starting the node")
+	} else if !os.IsNotExist(err) {
+		return err
 	}
 	metaDB, err := metadb.OpenWithLogger(filepath.Join(n.cfg.DataDir, defaultSlotMetaDirName), namedLogger(n.cfg.Logger, "slot_meta_db"))
 	if err != nil {

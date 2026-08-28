@@ -202,6 +202,13 @@ type ClusterState struct {
 	UpdatedAt time.Time `json:"updated_at"`
 	// Config stores durable cluster sizing and placement defaults.
 	Config ClusterConfig `json:"config"`
+	// SlotReplicaCountTransition records an in-progress, forward-only increase
+	// of every physical Slot's voter count. ReplicaCount remains the last fully
+	// converged cluster-wide value until every Slot reaches TargetReplicaCount.
+	SlotReplicaCountTransition *SlotReplicaCountTransition `json:"slot_replica_count_transition,omitempty"`
+	// ControllerVoterPromotion reserves one forward-only promotion before target
+	// preparation or live Raft membership changes can begin.
+	ControllerVoterPromotion *ControllerVoterPromotion `json:"controller_voter_promotion,omitempty"`
 	// Controllers lists the desired Controller Raft voters.
 	Controllers []ControllerVoter `json:"controllers"`
 	// Nodes lists durable cluster members.
@@ -220,6 +227,27 @@ type ClusterState struct {
 	OpsMCP *OpsMCPState `json:"ops_mcp,omitempty"`
 	// Checksum protects the canonical JSON payload excluding this field.
 	Checksum string `json:"checksum"`
+}
+
+// SlotReplicaCountTransition is the durable fence for a cluster-wide,
+// forward-only Slot voter-count increase.
+type SlotReplicaCountTransition struct {
+	// SourceReplicaCount is the last fully converged replica count.
+	SourceReplicaCount uint16 `json:"source_replica_count"`
+	// TargetReplicaCount is the voter count every Slot must reach.
+	TargetReplicaCount uint16 `json:"target_replica_count"`
+	// StartedAtRevision identifies the Controller state from which expansion began.
+	StartedAtRevision uint64 `json:"started_at_revision"`
+	// TargetNodeIDs is the exact immutable final voter topology for every Slot.
+	TargetNodeIDs []uint64 `json:"target_node_ids"`
+}
+
+// ControllerVoterPromotion excludes Slot expansion until one exact promotion
+// completes. Failed requests retain this intent for forward recovery.
+type ControllerVoterPromotion struct {
+	TargetNodeID   uint64   `json:"target_node_id"`
+	TargetAddr     string   `json:"target_addr"`
+	PreviousVoters []uint64 `json:"previous_voters"`
 }
 
 // ClusterConfig stores durable cluster sizing and placement defaults.

@@ -23,6 +23,11 @@ var (
 
 const defaultSessionHeartbeatInterval = 30 * time.Second
 
+// veryLargeCanaryAnchorLimit keeps the unique owner-routed correctness canary
+// sendable for both ordinary and sampled probes without retaining its roster.
+// The fixed bound is generation-local and does not grow with group size.
+const veryLargeCanaryAnchorLimit = 2
+
 // SessionClock is the narrow time source used for login latency and expiration.
 // Unit workers can advance it without wall-clock sleeps.
 type SessionClock interface {
@@ -43,6 +48,24 @@ type SessionClient interface {
 	// QueueSnapshot must stop waiting when its context is canceled.
 	QueueSnapshot(context.Context) (SessionQueueSnapshot, error)
 	ReadErrorInfo(error) (wkproto.ReadErrorInfo, bool)
+}
+
+// sessionFrameObserver is the optional precision seam implemented by the
+// production adapter. Generic test or alternate clients may omit it; the pool
+// then timestamps the frame when its sole drain consumes it.
+type sessionFrameObserver interface {
+	ReadFrameObserved(context.Context) (frame.Frame, time.Time, error)
+}
+
+// SessionFrameTiming carries identity-free, process-local SEND boundaries.
+type SessionFrameTiming struct {
+	PendingStartedAt time.Time
+	WriteStartedAt   time.Time
+	ObservedAt       time.Time
+}
+
+type sessionFrameTimingObserver interface {
+	ReadFrameTiming(context.Context) (frame.Frame, SessionFrameTiming, error)
 }
 
 // SessionClientFactory constructs a client with the deterministic per-UID
@@ -71,6 +94,19 @@ func (a *WKProtoSessionAdapter) Connect(ctx context.Context, uid, deviceID strin
 
 func (a *WKProtoSessionAdapter) ReadFrame(ctx context.Context) (frame.Frame, error) {
 	return a.client.ReadFrame(ctx)
+}
+
+func (a *WKProtoSessionAdapter) ReadFrameObserved(ctx context.Context) (frame.Frame, time.Time, error) {
+	return a.client.ReadFrameObserved(ctx)
+}
+
+func (a *WKProtoSessionAdapter) ReadFrameTiming(ctx context.Context) (frame.Frame, SessionFrameTiming, error) {
+	packet, timing, err := a.client.ReadFrameTiming(ctx)
+	return packet, SessionFrameTiming{
+		PendingStartedAt: timing.PendingStartedAt,
+		WriteStartedAt:   timing.WriteStartedAt,
+		ObservedAt:       timing.ObservedAt,
+	}, err
 }
 
 func (a *WKProtoSessionAdapter) TrySend(ctx context.Context, packet *frame.SendPacket) error {
@@ -115,6 +151,8 @@ func (a *WKProtoSessionAdapter) ReadErrorInfo(err error) (wkproto.ReadErrorInfo,
 }
 
 var _ SessionClient = (*WKProtoSessionAdapter)(nil)
+var _ sessionFrameObserver = (*WKProtoSessionAdapter)(nil)
+var _ sessionFrameTimingObserver = (*WKProtoSessionAdapter)(nil)
 
 // SessionQueueSnapshot is the bounded common projection needed by the engine.
 type SessionQueueSnapshot struct {
@@ -197,10 +235,40 @@ type SessionPoolSnapshot struct {
 	SyncCompleted              uint64
 	SyncFailed                 uint64
 	SyncCanceled               uint64
+	// CloseReasons attributes every teardown to a fixed, identity-free
+	// initiator and separately counts transport-close failures.
+	CloseReasons               SessionCloseReasonSnapshot
 	GatewayConnectLatency      WorkerHistogramSnapshot
 	ConversationSyncLatency    WorkerHistogramSnapshot
 	ConversationSyncThresholds LatencyThresholdCounters
+	SendPendingToWriteLatency  WorkerHistogramSnapshot
+	SendWriteToAckLatency      WorkerHistogramSnapshot
 }
+
+// SessionCloseReasonSnapshot is the bounded connection-teardown vocabulary.
+// The first six counters are mutually exclusive initiators;
+// TransportCloseFailed is an additional cleanup outcome.
+type SessionCloseReasonSnapshot struct {
+	Expired              uint64 `json:"expired"`
+	HeartbeatFailed      uint64 `json:"heartbeat_failed"`
+	RemoteTerminal       uint64 `json:"remote_terminal"`
+	ReadFailed           uint64 `json:"read_failed"`
+	GenerationStop       uint64 `json:"generation_stop"`
+	ExplicitLogout       uint64 `json:"explicit_logout"`
+	TransportCloseFailed uint64 `json:"transport_close_failed"`
+}
+
+type sessionCloseReason uint32
+
+const (
+	sessionCloseReasonNone sessionCloseReason = iota
+	sessionCloseReasonExpired
+	sessionCloseReasonHeartbeatFailed
+	sessionCloseReasonRemoteTerminal
+	sessionCloseReasonReadFailed
+	sessionCloseReasonGenerationStop
+	sessionCloseReasonExplicitLogout
+)
 
 // SessionCounts is the O(1) ownership projection used by the scheduler.
 type SessionCounts struct {
@@ -217,7 +285,10 @@ type onlineSession struct {
 	heartbeatDone         chan struct{}
 	groupIndex            int
 	groupPosition         int
+	canaryAnchor          bool
 	relationshipsObserved bool
+	// closeInitiator is guarded by SessionPool.mu and claimed exactly once.
+	closeInitiator sessionCloseReason
 }
 
 // SessionPool owns only currently online clients. A UID has exactly one
@@ -243,23 +314,37 @@ type SessionPool struct {
 	online             map[string]*onlineSession
 	onlineByIndex      map[uint64]*onlineSession
 	onlineGroupMembers [][]*onlineSession
-	starting           map[string]struct{}
-	closing            map[string]*onlineSession
-	readErrors         uint64
-	verificationErrors uint64
-	factoryFailed      uint64
-	factoryCanceled    uint64
-	connectStarted     uint64
-	connectCompleted   uint64
-	connectFailed      uint64
-	connectCanceled    uint64
-	syncStarted        uint64
-	syncCompleted      uint64
-	syncFailed         uint64
-	syncCanceled       uint64
-	gatewayLatency     WorkerHistogramSnapshot
-	syncLatency        WorkerHistogramSnapshot
-	syncThresholds     LatencyThresholdCounters
+	// canaryAnchors is the exact number of non-expiring owner-local sessions
+	// retained for the unique very-large correctness canary.
+	canaryAnchors int
+	starting      map[string]struct{}
+	closing       map[string]*onlineSession
+	// sendLeases keeps an admitted logical SEND's session routable until its
+	// final ACK, terminal result, or cancellation releases ownership.
+	sendLeases map[string]uint32
+	// correlationLeases binds each sampled logical SEND to one exact online
+	// recipient. correlationLeaseCounts lets expiry test one UID in O(1)
+	// without retaining message history after the verifier closes the sample.
+	correlationLeases         map[string]string
+	correlationLeaseCounts    map[string]uint32
+	readErrors                uint64
+	verificationErrors        uint64
+	factoryFailed             uint64
+	factoryCanceled           uint64
+	connectStarted            uint64
+	connectCompleted          uint64
+	connectFailed             uint64
+	connectCanceled           uint64
+	syncStarted               uint64
+	syncCompleted             uint64
+	syncFailed                uint64
+	syncCanceled              uint64
+	closeReasons              SessionCloseReasonSnapshot
+	gatewayLatency            WorkerHistogramSnapshot
+	syncLatency               WorkerHistogramSnapshot
+	syncThresholds            LatencyThresholdCounters
+	sendPendingToWriteLatency WorkerHistogramSnapshot
+	sendWriteToAckLatency     WorkerHistogramSnapshot
 	// transportAdmissionRejected survives individual session churn for the generation.
 	transportAdmissionRejected atomic.Uint64
 
@@ -298,15 +383,20 @@ func NewSessionPool(config SessionPoolConfig) (*SessionPool, error) {
 		syncer: config.Syncer, verifier: config.Verifier, clock: config.Clock,
 		deviceID: config.DeviceID, startingCapacity: config.StartingCapacity,
 		heartbeatInterval: config.HeartbeatInterval, heartbeatTimeout: config.SingleAnomaly, heartbeatSleep: sleepSessionHeartbeat,
-		onSendack:          config.OnSendack,
-		onAsyncSendError:   config.OnAsyncSendError,
-		online:             make(map[string]*onlineSession),
-		onlineByIndex:      make(map[uint64]*onlineSession),
-		onlineGroupMembers: make([][]*onlineSession, config.Catalog.Count()),
-		starting:           make(map[string]struct{}),
-		closing:            make(map[string]*onlineSession),
-		gatewayLatency:     newWorkerHistogramSnapshot(),
-		syncLatency:        newWorkerHistogramSnapshot(),
+		onSendack:                 config.OnSendack,
+		onAsyncSendError:          config.OnAsyncSendError,
+		online:                    make(map[string]*onlineSession),
+		onlineByIndex:             make(map[uint64]*onlineSession),
+		onlineGroupMembers:        make([][]*onlineSession, config.Catalog.Count()),
+		starting:                  make(map[string]struct{}),
+		closing:                   make(map[string]*onlineSession),
+		sendLeases:                make(map[string]uint32),
+		correlationLeases:         make(map[string]string),
+		correlationLeaseCounts:    make(map[string]uint32),
+		gatewayLatency:            newWorkerHistogramSnapshot(),
+		syncLatency:               newWorkerHistogramSnapshot(),
+		sendPendingToWriteLatency: newWorkerHistogramSnapshot(),
+		sendWriteToAckLatency:     newWorkerHistogramSnapshot(),
 		syncThresholds: LatencyThresholdCounters{
 			P99Limit: config.SyncLatency.P99, P999Limit: config.SyncLatency.P999,
 		},
@@ -409,15 +499,32 @@ func (p *SessionPool) loginReserved(ctx, drainParent context.Context, login Sess
 		snapshot: snapshot, client: client, cancel: cancel, done: make(chan struct{}), heartbeatDone: make(chan struct{}),
 		groupIndex: -1, groupPosition: -1, relationshipsObserved: !login.NewIdentity,
 	}
-	if group, _, member, groupErr := p.catalog.GroupForMemberIndex(login.UserIndex); groupErr != nil {
+	canaryAnchorCandidate := false
+	if group, memberOrdinal, member, groupErr := p.catalog.GroupForMemberIndex(login.UserIndex); groupErr != nil {
 		cancel()
 		_ = client.Close()
 		return SessionSnapshot{}, groupErr
 	} else if member {
 		session.groupIndex = int(group.Index)
+		if group.Category == GroupVeryLarge {
+			groupOwner, ownerErr := p.catalog.GroupOwner(group.Index)
+			userOwner, _ := p.identity.Owner(login.UserIndex)
+			if ownerErr != nil {
+				cancel()
+				_ = client.Close()
+				return SessionSnapshot{}, errSessionConfig
+			}
+			period := p.identity.Workers() / greatestCommonDivisor(group.memberStride, p.identity.Workers())
+			canaryAnchorCandidate = groupOwner == userOwner && period > 0 &&
+				uint64(memberOrdinal)%period == 0 && uint64(memberOrdinal)/period < veryLargeCanaryAnchorLimit
+		}
 	}
 	p.mu.Lock()
 	delete(p.starting, login.UID)
+	if canaryAnchorCandidate && p.canaryAnchors < veryLargeCanaryAnchorLimit {
+		session.canaryAnchor = true
+		p.canaryAnchors++
+	}
 	p.online[login.UID] = session
 	p.onlineByIndex[login.UserIndex] = session
 	if session.groupIndex >= 0 {
@@ -522,6 +629,56 @@ func (p *SessionPool) IsOnline(uid string) bool {
 	defer p.mu.RUnlock()
 	_, ok := p.online[uid]
 	return ok
+}
+
+// sendEligibleAt reports whether an owned session may accept a new logical
+// SEND at the owner clock boundary. A deadline-expired session can remain
+// online while an earlier admitted SEND drains, but it must not receive a new
+// SEND lease.
+func (p *SessionPool) sendEligibleAt(uid string, at time.Time) bool {
+	if p == nil || uid == "" {
+		return false
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	session := p.online[uid]
+	return sessionSendEligibleAt(session, p.sendLeases[uid], at)
+}
+
+// sendLoginOrdinalAt returns the exact traffic-ready login generation that
+// owns new SEND admission at the supplied owner-clock boundary.
+func (p *SessionPool) sendLoginOrdinalAt(uid string, at time.Time) (uint64, bool) {
+	if p == nil || uid == "" {
+		return 0, false
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	session := p.online[uid]
+	if !sessionSendEligibleAt(session, p.sendLeases[uid], at) {
+		return 0, false
+	}
+	return session.snapshot.LoginOrdinal, true
+}
+
+// sendEligibleLoginAt rejects a later login of the same UID. Mandatory work
+// planned by an earlier session generation cannot transfer to its replacement.
+func (p *SessionPool) sendEligibleLoginAt(uid string, loginOrdinal uint64, at time.Time) bool {
+	if p == nil || uid == "" {
+		return false
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	session := p.online[uid]
+	return sessionSendEligibleAt(session, p.sendLeases[uid], at) && session.snapshot.LoginOrdinal == loginOrdinal
+}
+
+func sessionSendEligibleAt(session *onlineSession, sendLeases uint32, at time.Time) bool {
+	return sessionTrafficEligibleAt(session, at) && sendLeases != ^uint32(0)
+}
+
+func sessionTrafficEligibleAt(session *onlineSession, at time.Time) bool {
+	return session != nil && session.snapshot.TrafficReady &&
+		(session.canaryAnchor || session.snapshot.Deadline.After(at))
 }
 
 // Counts reports current ownership map sizes without touching client gauges.
@@ -697,6 +854,115 @@ func (p *SessionPool) expireAsync(now time.Time) (int, error) {
 	return len(sessions), nil
 }
 
+func (p *SessionPool) acquireSendLease(uid string) bool {
+	if p == nil || uid == "" {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	session := p.online[uid]
+	if !sessionSendEligibleAt(session, p.sendLeases[uid], p.clock.Now()) {
+		return false
+	}
+	current := p.sendLeases[uid]
+	if current == ^uint32(0) {
+		return false
+	}
+	p.sendLeases[uid] = current + 1
+	return true
+}
+
+// acquireSendAndCorrelationLease atomically protects the sender until its
+// final SEND result and, for a sampled message, one exact recipient until the
+// verifier closes that correlation. The second lease is deliberately sparse:
+// exact one-percent sampling bounds both maps independently of total traffic.
+func (p *SessionPool) acquireSendAndCorrelationLease(intent TrafficIntent, at time.Time) bool {
+	if p == nil || intent.Logical.Sender == "" ||
+		(intent.correlationRecipient != "" && intent.Logical.ClientMsgNo == "") {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	sender := p.online[intent.Logical.Sender]
+	if !sessionSendEligibleAt(sender, p.sendLeases[intent.Logical.Sender], at) {
+		return false
+	}
+	if p.sendLeases[intent.Logical.Sender] == ^uint32(0) {
+		return false
+	}
+	if intent.correlationRecipient != "" {
+		if intent.correlationRecipient == intent.Logical.Sender || p.correlationLeases[intent.Logical.ClientMsgNo] != "" ||
+			p.correlationLeaseCounts[intent.correlationRecipient] == ^uint32(0) {
+			return false
+		}
+		recipient := p.online[intent.correlationRecipient]
+		if !sessionTrafficEligibleAt(recipient, at) {
+			return false
+		}
+	}
+	p.sendLeases[intent.Logical.Sender]++
+	if intent.correlationRecipient != "" {
+		p.correlationLeases[intent.Logical.ClientMsgNo] = intent.correlationRecipient
+		p.correlationLeaseCounts[intent.correlationRecipient]++
+	}
+	return true
+}
+
+func (p *SessionPool) releaseSendLease(uid string) bool {
+	if p == nil || uid == "" {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	current := p.sendLeases[uid]
+	if current == 0 {
+		return false
+	}
+	if current == 1 {
+		delete(p.sendLeases, uid)
+	} else {
+		p.sendLeases[uid] = current - 1
+	}
+	return true
+}
+
+func (p *SessionPool) releaseCorrelationLease(clientMsgNo string) bool {
+	if p == nil || clientMsgNo == "" {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	uid := p.correlationLeases[clientMsgNo]
+	if uid == "" {
+		return false
+	}
+	current := p.correlationLeaseCounts[uid]
+	if current == 0 {
+		return false
+	}
+	delete(p.correlationLeases, clientMsgNo)
+	if current == 1 {
+		delete(p.correlationLeaseCounts, uid)
+	} else {
+		p.correlationLeaseCounts[uid] = current - 1
+	}
+	return true
+}
+
+// releaseAllCorrelationLeases clears only generation-local observation
+// ownership after every session drain has joined. A successful SENDACK can
+// outlive inflight SEND ownership while its sampled RECV is still pending, so
+// Engine.Stop must not leave that bounded lease in the next generation.
+func (p *SessionPool) releaseAllCorrelationLeases() {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	p.correlationLeases = make(map[string]string)
+	p.correlationLeaseCounts = make(map[string]uint32)
+	p.mu.Unlock()
+}
+
 // runExpiryCleanup owns all asynchronous transport teardown for one Engine
 // generation. It releases the queue reservation before the closing tombstone,
 // so replacement admission can never overbook cleanup capacity.
@@ -717,7 +983,7 @@ func (p *SessionPool) detachExpiredWithin(now time.Time, capacity int) ([]*onlin
 	p.mu.Lock()
 	due := make([]string, 0)
 	for uid, session := range p.online {
-		if !session.snapshot.Deadline.After(now) {
+		if !session.canaryAnchor && !session.snapshot.Deadline.After(now) && p.sendLeases[uid] == 0 && p.correlationLeaseCounts[uid] == 0 {
 			due = append(due, uid)
 		}
 	}
@@ -731,6 +997,7 @@ func (p *SessionPool) detachExpiredWithin(now time.Time, capacity int) ([]*onlin
 		session := p.online[uid]
 		p.removeOnlineLocked(uid, session.snapshot.UserIndex)
 		p.closing[uid] = session
+		p.claimCloseReasonLocked(session, sessionCloseReasonExpired)
 		sessions = append(sessions, session)
 	}
 	p.mu.Unlock()
@@ -750,7 +1017,7 @@ func (p *SessionPool) detachExpired(now time.Time) []*onlineSession {
 	due := p.dueSessionUIDs(now)
 	sessions := make([]*onlineSession, 0, len(due))
 	for _, uid := range due {
-		if session := p.detachSession(uid); session != nil {
+		if session := p.detachSession(uid, sessionCloseReasonExpired); session != nil {
 			sessions = append(sessions, session)
 		}
 	}
@@ -761,7 +1028,7 @@ func (p *SessionPool) dueSessionUIDs(now time.Time) []string {
 	p.mu.RLock()
 	due := make([]string, 0)
 	for uid, session := range p.online {
-		if !session.snapshot.Deadline.After(now) {
+		if !session.canaryAnchor && !session.snapshot.Deadline.After(now) && p.sendLeases[uid] == 0 && p.correlationLeaseCounts[uid] == 0 {
 			due = append(due, uid)
 		}
 	}
@@ -773,10 +1040,14 @@ func (p *SessionPool) dueSessionUIDs(now time.Time) []string {
 // Logout removes online admission, cancels and closes the socket, joins its
 // ordered drain and heartbeat, and only then releases recipient monotonic state.
 func (p *SessionPool) Logout(uid string) error {
+	return p.logout(uid, sessionCloseReasonExplicitLogout)
+}
+
+func (p *SessionPool) logout(uid string, reason sessionCloseReason) error {
 	if p == nil {
 		return errSessionOffline
 	}
-	session := p.detachSession(uid)
+	session := p.detachSession(uid, reason)
 	if session == nil {
 		return errSessionOffline
 	}
@@ -785,12 +1056,13 @@ func (p *SessionPool) Logout(uid string) error {
 
 // detachSession moves one traffic-ready UID into its closing tombstone before
 // cancellation, so neither routing nor replacement can overlap old cleanup.
-func (p *SessionPool) detachSession(uid string) *onlineSession {
+func (p *SessionPool) detachSession(uid string, reason sessionCloseReason) *onlineSession {
 	p.mu.Lock()
 	session := p.online[uid]
 	if session != nil {
 		p.removeOnlineLocked(uid, session.snapshot.UserIndex)
 		p.closing[uid] = session
+		p.claimCloseReasonLocked(session, reason)
 	}
 	p.mu.Unlock()
 	if session == nil {
@@ -820,6 +1092,9 @@ func (p *SessionPool) finishDetachedSession(session *onlineSession) error {
 // state while the caller retains the session's closing tombstone.
 func (p *SessionPool) finishDetachedTransport(session *onlineSession) error {
 	closeErr := session.client.Close()
+	if closeErr != nil {
+		p.recordTransportCloseFailure()
+	}
 	<-session.done
 	<-session.heartbeatDone
 	p.verifier.ReleaseRecipient(session.snapshot.UID)
@@ -840,7 +1115,7 @@ func (p *SessionPool) CloseAll() error {
 	sort.Strings(uids)
 	var result error
 	for _, uid := range uids {
-		if err := p.Logout(uid); err != nil && !errors.Is(err, errSessionOffline) {
+		if err := p.logout(uid, sessionCloseReasonGenerationStop); err != nil && !errors.Is(err, errSessionOffline) {
 			result = errors.Join(result, err)
 		}
 	}
@@ -879,8 +1154,11 @@ func (p *SessionPool) SnapshotContext(ctx context.Context) (SessionPoolSnapshot,
 		FactoryFailed: p.factoryFailed, FactoryCanceled: p.factoryCanceled,
 		ConnectStarted: p.connectStarted, ConnectCompleted: p.connectCompleted, ConnectFailed: p.connectFailed, ConnectCanceled: p.connectCanceled,
 		SyncStarted: p.syncStarted, SyncCompleted: p.syncCompleted, SyncFailed: p.syncFailed, SyncCanceled: p.syncCanceled,
+		CloseReasons:          p.closeReasons,
 		GatewayConnectLatency: p.gatewayLatency, ConversationSyncLatency: p.syncLatency,
 		ConversationSyncThresholds: p.syncThresholds,
+		SendPendingToWriteLatency:  p.sendPendingToWriteLatency,
+		SendWriteToAckLatency:      p.sendWriteToAckLatency,
 	}
 	clients := make([]SessionClient, 0, len(p.online))
 	for _, session := range p.online {
@@ -934,7 +1212,8 @@ func (p *SessionPool) resetRuntime() error {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if len(p.online) != 0 || len(p.starting) != 0 || len(p.closing) != 0 {
+	if len(p.online) != 0 || len(p.starting) != 0 || len(p.closing) != 0 || len(p.sendLeases) != 0 ||
+		len(p.correlationLeases) != 0 || len(p.correlationLeaseCounts) != 0 || p.canaryAnchors != 0 {
 		return errSessionOnline
 	}
 	p.ownershipCapacity = 0
@@ -950,18 +1229,24 @@ func (p *SessionPool) resetRuntime() error {
 	p.syncCompleted = 0
 	p.syncFailed = 0
 	p.syncCanceled = 0
+	p.closeReasons = SessionCloseReasonSnapshot{}
 	p.gatewayLatency = newWorkerHistogramSnapshot()
 	p.syncLatency = newWorkerHistogramSnapshot()
+	p.sendPendingToWriteLatency = newWorkerHistogramSnapshot()
+	p.sendWriteToAckLatency = newWorkerHistogramSnapshot()
 	p.transportAdmissionRejected.Store(0)
 	p.onlineByIndex = make(map[uint64]*onlineSession)
 	p.onlineGroupMembers = make([][]*onlineSession, p.catalog.Count())
+	p.sendLeases = make(map[string]uint32)
+	p.correlationLeases = make(map[string]string)
+	p.correlationLeaseCounts = make(map[string]uint32)
 	return nil
 }
 
 func (p *SessionPool) drain(ctx context.Context, session *onlineSession) {
 	defer close(session.done)
 	for {
-		packet, err := session.client.ReadFrame(ctx)
+		packet, timing, err := readSessionFrame(ctx, session.client)
 		if err != nil {
 			info, classified := session.client.ReadErrorInfo(err)
 			if classified && info.Kind == wkproto.ReadErrorNonTerminal {
@@ -985,7 +1270,15 @@ func (p *SessionPool) drain(ctx context.Context, session *onlineSession) {
 		}
 		switch packet := packet.(type) {
 		case *frame.SendackPacket:
-			verificationErr := p.verifier.HandleSendackAt(packet, p.clock.Now())
+			observedAt := timing.ObservedAt
+			if observedAt.IsZero() {
+				observedAt = p.clock.Now()
+			}
+			p.recordSendTiming(timing)
+			verificationErr := p.verifier.HandleSendackAt(packet, observedAt)
+			if !p.verifier.correlationOutstanding(packet.ClientMsgNo) {
+				p.releaseCorrelationLease(packet.ClientMsgNo)
+			}
 			if verificationErr != nil {
 				p.mu.Lock()
 				p.verificationErrors++
@@ -1000,8 +1293,34 @@ func (p *SessionPool) drain(ctx context.Context, session *onlineSession) {
 				p.verificationErrors++
 				p.mu.Unlock()
 			}
+			if !p.verifier.correlationOutstanding(packet.ClientMsgNo) {
+				p.releaseCorrelationLease(packet.ClientMsgNo)
+			}
 		}
 	}
+}
+
+func readSessionFrame(ctx context.Context, client SessionClient) (frame.Frame, SessionFrameTiming, error) {
+	if observer, ok := client.(sessionFrameTimingObserver); ok {
+		return observer.ReadFrameTiming(ctx)
+	}
+	if observer, ok := client.(sessionFrameObserver); ok {
+		packet, observedAt, err := observer.ReadFrameObserved(ctx)
+		return packet, SessionFrameTiming{ObservedAt: observedAt}, err
+	}
+	packet, err := client.ReadFrame(ctx)
+	return packet, SessionFrameTiming{}, err
+}
+
+func (p *SessionPool) recordSendTiming(timing SessionFrameTiming) {
+	if p == nil || timing.PendingStartedAt.IsZero() || timing.WriteStartedAt.IsZero() || timing.ObservedAt.IsZero() ||
+		timing.WriteStartedAt.Before(timing.PendingStartedAt) || timing.ObservedAt.Before(timing.WriteStartedAt) {
+		return
+	}
+	p.mu.Lock()
+	recordWorkerLatency(&p.sendPendingToWriteLatency, timing.WriteStartedAt.Sub(timing.PendingStartedAt))
+	recordWorkerLatency(&p.sendWriteToAckLatency, timing.ObservedAt.Sub(timing.WriteStartedAt))
+	p.mu.Unlock()
 }
 
 // heartbeat keeps an otherwise idle real client visible to the authority
@@ -1021,23 +1340,58 @@ func (p *SessionPool) heartbeat(ctx context.Context, session *onlineSession) {
 			continue
 		}
 		if ctx.Err() == nil {
-			_ = session.client.Close()
+			p.mu.Lock()
+			claimed := p.online[session.snapshot.UID] == session &&
+				p.claimCloseReasonLocked(session, sessionCloseReasonHeartbeatFailed)
+			p.mu.Unlock()
+			if claimed {
+				if err := session.client.Close(); err != nil {
+					p.recordTransportCloseFailure()
+					p.detachHeartbeatCloseFailure(session)
+				}
+			}
 		}
 		return
 	}
 }
 
-func (p *SessionPool) detachUnexpected(session *onlineSession, remoteTerminal bool) {
-	class := FailureClassHarness
-	code := FailureCodeSessionReadFailed
-	if remoteTerminal {
-		class = FailureClassReceive
-		code = FailureCodeSessionRemoteTerminal
-	}
+// detachHeartbeatCloseFailure completes ownership cleanup when a failed PING
+// is followed by a transport Close error. It runs on the heartbeat goroutine,
+// so it joins only the read drain; the caller's deferred close publishes the
+// heartbeatDone boundary after this method returns.
+func (p *SessionPool) detachHeartbeatCloseFailure(session *onlineSession) {
 	p.mu.Lock()
 	if p.online[session.snapshot.UID] != session {
 		p.mu.Unlock()
 		return
+	}
+	p.removeOnlineLocked(session.snapshot.UID, session.snapshot.UserIndex)
+	p.closing[session.snapshot.UID] = session
+	p.mu.Unlock()
+
+	session.cancel()
+	<-session.done
+	p.verifier.ReleaseRecipient(session.snapshot.UID)
+	p.finishClosing(session.snapshot.UID, session)
+}
+
+func (p *SessionPool) detachUnexpected(session *onlineSession, remoteTerminal bool) {
+	class := FailureClassHarness
+	code := FailureCodeSessionReadFailed
+	p.mu.Lock()
+	if p.online[session.snapshot.UID] != session {
+		p.mu.Unlock()
+		return
+	}
+	reason := session.closeInitiator
+	if reason == sessionCloseReasonNone {
+		reason = sessionCloseReasonReadFailed
+		if remoteTerminal {
+			reason = sessionCloseReasonRemoteTerminal
+			class = FailureClassReceive
+			code = FailureCodeSessionRemoteTerminal
+		}
+		p.claimCloseReasonLocked(session, reason)
 	}
 	// Evidence is bounded in-process state. Recording it while ownership is
 	// locked makes the terminal transition observable in one direction only:
@@ -1049,10 +1403,44 @@ func (p *SessionPool) detachUnexpected(session *onlineSession, remoteTerminal bo
 	p.mu.Unlock()
 
 	session.cancel()
-	_ = session.client.Close()
+	if err := session.client.Close(); err != nil {
+		p.recordTransportCloseFailure()
+	}
 	<-session.heartbeatDone
 	p.verifier.ReleaseRecipient(session.snapshot.UID)
 	p.finishClosing(session.snapshot.UID, session)
+}
+
+func (p *SessionPool) claimCloseReasonLocked(session *onlineSession, reason sessionCloseReason) bool {
+	if session == nil || reason == sessionCloseReasonNone || session.closeInitiator != sessionCloseReasonNone {
+		return false
+	}
+	session.closeInitiator = reason
+	p.recordCloseReasonLocked(reason)
+	return true
+}
+
+func (p *SessionPool) recordTransportCloseFailure() {
+	p.mu.Lock()
+	incrementSessionOutcome(&p.closeReasons.TransportCloseFailed)
+	p.mu.Unlock()
+}
+
+func (p *SessionPool) recordCloseReasonLocked(reason sessionCloseReason) {
+	switch reason {
+	case sessionCloseReasonExpired:
+		incrementSessionOutcome(&p.closeReasons.Expired)
+	case sessionCloseReasonHeartbeatFailed:
+		incrementSessionOutcome(&p.closeReasons.HeartbeatFailed)
+	case sessionCloseReasonRemoteTerminal:
+		incrementSessionOutcome(&p.closeReasons.RemoteTerminal)
+	case sessionCloseReasonReadFailed:
+		incrementSessionOutcome(&p.closeReasons.ReadFailed)
+	case sessionCloseReasonGenerationStop:
+		incrementSessionOutcome(&p.closeReasons.GenerationStop)
+	case sessionCloseReasonExplicitLogout:
+		incrementSessionOutcome(&p.closeReasons.ExplicitLogout)
+	}
 }
 
 func (p *SessionPool) finishClosing(uid string, session *onlineSession) {
@@ -1065,6 +1453,12 @@ func (p *SessionPool) finishClosing(uid string, session *onlineSession) {
 
 func (p *SessionPool) removeOnlineLocked(uid string, userIndex uint64) {
 	session := p.online[uid]
+	if session != nil && session.canaryAnchor {
+		if p.canaryAnchors > 0 {
+			p.canaryAnchors--
+		}
+		session.canaryAnchor = false
+	}
 	if session != nil && session.groupIndex >= 0 {
 		members := p.onlineGroupMembers[session.groupIndex]
 		position := session.groupPosition
@@ -1085,6 +1479,10 @@ func (p *SessionPool) removeOnlineLocked(uid string, userIndex uint64) {
 }
 
 func (p *SessionPool) onlineGroupMember(group Group, ordinal uint64, requireRecipient bool) (SessionLogin, bool) {
+	return p.onlineGroupMemberExcluding(group, ordinal, requireRecipient, time.Time{}, nil)
+}
+
+func (p *SessionPool) onlineGroupMemberExcluding(group Group, ordinal uint64, requireRecipient bool, sendEligibleAt time.Time, excluded func(string) bool) (SessionLogin, bool) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	if group.Index >= uint64(len(p.onlineGroupMembers)) {
@@ -1098,13 +1496,51 @@ func (p *SessionPool) onlineGroupMember(group Group, ordinal uint64, requireReci
 	if len(members) < needed {
 		return SessionLogin{}, false
 	}
-	session := members[ordinal%uint64(len(members))]
-	return SessionLogin{
-		UID: session.snapshot.UID, UserIndex: session.snapshot.UserIndex, LoginOrdinal: session.snapshot.LoginOrdinal,
-	}, true
+	start := ordinal % uint64(len(members))
+	for offset := 0; offset < len(members); offset++ {
+		session := members[(start+uint64(offset))%uint64(len(members))]
+		if !sendEligibleAt.IsZero() && !sessionSendEligibleAt(session, p.sendLeases[session.snapshot.UID], sendEligibleAt) {
+			continue
+		}
+		if excluded != nil && excluded(session.snapshot.UID) {
+			continue
+		}
+		return SessionLogin{
+			UID: session.snapshot.UID, UserIndex: session.snapshot.UserIndex, LoginOrdinal: session.snapshot.LoginOrdinal,
+		}, true
+	}
+	return SessionLogin{}, false
+}
+
+// onlineGroupCorrelationRecipient returns one deterministic local recipient
+// distinct from sender. The later atomic lease acquisition revalidates this
+// snapshot before the SEND enters the engine work heap.
+func (p *SessionPool) onlineGroupCorrelationRecipient(group Group, sender string, ordinal uint64, at time.Time) (string, bool) {
+	if p == nil || sender == "" || group.Index >= uint64(len(p.onlineGroupMembers)) {
+		return "", false
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	members := p.onlineGroupMembers[group.Index]
+	if len(members) < 2 {
+		return "", false
+	}
+	start := ordinal % uint64(len(members))
+	for offset := 0; offset < len(members); offset++ {
+		session := members[(start+uint64(offset))%uint64(len(members))]
+		if session.snapshot.UID == sender || !sessionTrafficEligibleAt(session, at) {
+			continue
+		}
+		return session.snapshot.UID, true
+	}
+	return "", false
 }
 
 func (p *SessionPool) onlineGroupMemberInCategory(category GroupCategory, ordinal uint64, requireRecipient bool, owner uint64) (SessionLogin, uint64, bool) {
+	return p.onlineGroupMemberInCategoryExcluding(category, ordinal, requireRecipient, owner, time.Time{}, nil)
+}
+
+func (p *SessionPool) onlineGroupMemberInCategoryExcluding(category GroupCategory, ordinal uint64, requireRecipient bool, owner uint64, sendEligibleAt time.Time, excluded func(string) bool) (SessionLogin, uint64, bool) {
 	start, count, ok := p.catalog.categoryRange(category)
 	if !ok {
 		return SessionLogin{}, 0, false
@@ -1126,10 +1562,19 @@ func (p *SessionPool) onlineGroupMemberInCategory(category GroupCategory, ordina
 		if len(members) < needed {
 			continue
 		}
-		session := members[ordinal%uint64(len(members))]
-		return SessionLogin{
-			UID: session.snapshot.UID, UserIndex: session.snapshot.UserIndex, LoginOrdinal: session.snapshot.LoginOrdinal,
-		}, groupIndex, true
+		memberStart := ordinal % uint64(len(members))
+		for memberOffset := 0; memberOffset < len(members); memberOffset++ {
+			session := members[(memberStart+uint64(memberOffset))%uint64(len(members))]
+			if !sendEligibleAt.IsZero() && !sessionSendEligibleAt(session, p.sendLeases[session.snapshot.UID], sendEligibleAt) {
+				continue
+			}
+			if excluded != nil && excluded(session.snapshot.UID) {
+				continue
+			}
+			return SessionLogin{
+				UID: session.snapshot.UID, UserIndex: session.snapshot.UserIndex, LoginOrdinal: session.snapshot.LoginOrdinal,
+			}, groupIndex, true
+		}
 	}
 	return SessionLogin{}, 0, false
 }

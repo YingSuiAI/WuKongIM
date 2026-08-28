@@ -106,13 +106,27 @@ func TestRaftTransportObservesAggregateQueueCapacity(t *testing.T) {
 	t.Cleanup(raftTransport.Stop)
 
 	raftTransport.observeQueue("ok")
+	var firstRevision uint64
 	select {
 	case event := <-observer.events:
 		if event.Capacity != 6 || event.Items != 0 {
 			t.Fatalf("event = %#v, want aggregate depth=0 capacity=6", event)
 		}
+		if event.Revision == 0 {
+			t.Fatal("controller raft queue revision = 0, want physical-state revision")
+		}
+		firstRevision = event.Revision
 	case <-time.After(time.Second):
 		t.Fatal("timeout waiting for aggregate queue observation")
+	}
+	raftTransport.observeQueue("ok")
+	select {
+	case event := <-observer.events:
+		if event.Revision <= firstRevision {
+			t.Fatalf("controller raft queue revisions = %d..%d, want physical order", firstRevision, event.Revision)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for second aggregate queue observation")
 	}
 }
 
@@ -290,6 +304,44 @@ func TestControlWriteClientPreservesWrappedSemanticErrorIdentity(t *testing.T) {
 
 	if !errors.Is(err, controller.ErrProposalRejected) {
 		t.Fatalf("Submit() error = %v, want errors.Is(ErrProposalRejected)", err)
+	}
+}
+
+func TestControlWriteClientForwardsSlotLeaderTransferWithSemanticRevisionError(t *testing.T) {
+	network := clusternet.NewLocalNetwork()
+	task := leaderTransferTaskFromRequest(SlotLeaderTransferRequest{
+		SlotID: 1, SourceNode: 1, TargetNode: 2, TargetPeers: []uint64{1, 2, 3}, ConfigEpoch: 7, StateRevision: 9,
+	})
+	applier := &recordingControlWriteApplier{
+		slotLeaderTransferResult: SlotLeaderTransferResult{Created: true, Task: &task},
+	}
+	network.Register(1, clusternet.RPCControlWrite, NewControlWriteHandler(applier))
+	client := NewControlWriteClient(network)
+	req := SlotLeaderTransferRequest{
+		SlotID: 1, SourceNode: 1, TargetNode: 2, TargetPeers: []uint64{1, 2, 3}, ConfigEpoch: 7, StateRevision: 9,
+	}
+
+	result, err := client.Submit(context.Background(), 1, ControlWriteRequest{
+		Action:             ControlWriteActionSlotLeaderTransfer,
+		SlotLeaderTransfer: req,
+	})
+	if err != nil {
+		t.Fatalf("Submit(slot leader transfer) error = %v", err)
+	}
+	if len(applier.slotLeaderTransfers) != 1 || !reflect.DeepEqual(applier.slotLeaderTransfers[0], req) {
+		t.Fatalf("slotLeaderTransfers = %#v, want %#v", applier.slotLeaderTransfers, req)
+	}
+	if !reflect.DeepEqual(result.SlotLeaderTransfer, applier.slotLeaderTransferResult) {
+		t.Fatalf("Submit(slot leader transfer) = %#v, want %#v", result.SlotLeaderTransfer, applier.slotLeaderTransferResult)
+	}
+
+	applier.slotLeaderTransferErr = controller.ErrExpectedRevisionMismatch
+	_, err = client.Submit(context.Background(), 1, ControlWriteRequest{
+		Action:             ControlWriteActionSlotLeaderTransfer,
+		SlotLeaderTransfer: req,
+	})
+	if !errors.Is(err, controller.ErrExpectedRevisionMismatch) {
+		t.Fatalf("Submit(stale slot leader transfer) error = %v, want ErrExpectedRevisionMismatch", err)
 	}
 }
 
@@ -504,6 +556,9 @@ type recordingControlWriteApplier struct {
 	markNodeRemoved               []MarkNodeRemovedRequest
 	markNodeRemovedResult         MarkNodeRemovedResult
 	markNodeRemovedErr            error
+	slotLeaderTransfers           []SlotLeaderTransferRequest
+	slotLeaderTransferResult      SlotLeaderTransferResult
+	slotLeaderTransferErr         error
 	slotReplicaMoves              []SlotReplicaMoveRequest
 	slotReplicaMoveResult         SlotReplicaMoveResult
 	slotReplicaMoveErr            error
@@ -555,6 +610,11 @@ func (a *recordingControlWriteApplier) MarkNodeRemoved(ctx context.Context, req 
 		return MarkNodeRemovedResult{}, a.markNodeRemovedErr
 	}
 	return a.markNodeRemovedResult, nil
+}
+
+func (a *recordingControlWriteApplier) RequestSlotLeaderTransfer(ctx context.Context, req SlotLeaderTransferRequest) (SlotLeaderTransferResult, error) {
+	a.slotLeaderTransfers = append(a.slotLeaderTransfers, req)
+	return a.slotLeaderTransferResult, a.slotLeaderTransferErr
 }
 
 func (a *recordingControlWriteApplier) RequestSlotReplicaMove(ctx context.Context, req SlotReplicaMoveRequest) (SlotReplicaMoveResult, error) {

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -628,6 +629,94 @@ func TestRuntimeRequestSlotReplicaMoveCreatesTaskWithoutChangingDesiredPeers(t *
 	}
 	if after.Tasks[0].CompletionPolicy != TaskCompletionPolicySingleObserver || len(after.Tasks[0].ParticipantProgress) != 0 {
 		t.Fatalf("task progress policy = %#v progress=%#v, want single observer and empty progress", after.Tasks[0].CompletionPolicy, after.Tasks[0].ParticipantProgress)
+	}
+}
+
+func TestRuntimeSlotReplicaAdditionStartsTransitionAndResumesFailedTask(t *testing.T) {
+	runtime := startSingleVoterRuntime(t, "cluster-slot-replica-add")
+	for _, nodeID := range []uint64{2, 3} {
+		if _, err := runtime.JoinNode(context.Background(), JoinNodeRequest{NodeID: nodeID, Addr: fmt.Sprintf("n%d", nodeID), Roles: []NodeRole{NodeRoleData}, CapacityWeight: 1}); err != nil {
+			t.Fatalf("JoinNode(%d) error = %v", nodeID, err)
+		}
+		if _, err := runtime.ActivateNode(context.Background(), ActivateNodeRequest{NodeID: nodeID}); err != nil {
+			t.Fatalf("ActivateNode(%d) error = %v", nodeID, err)
+		}
+	}
+	ready := waitForState(t, runtime, func(st ClusterState) bool { return len(st.Tasks) == 1 && len(st.Slots) == 1 })
+	bootstrap := ready.Tasks[0]
+	if err := runtime.CompleteTask(context.Background(), TaskResult{TaskID: bootstrap.TaskID, SlotID: bootstrap.SlotID, TaskKind: bootstrap.Kind, ConfigEpoch: bootstrap.ConfigEpoch, Attempt: bootstrap.Attempt}); err != nil {
+		t.Fatalf("CompleteTask(bootstrap) error = %v", err)
+	}
+	before := waitForState(t, runtime, func(st ClusterState) bool { return len(st.Tasks) == 0 })
+	assignment := before.Slots[0]
+	request := SlotReplicaMoveRequest{
+		SlotID: assignment.SlotID, TargetNode: 2, TargetPeers: []uint64{1, 2},
+		ConfigEpoch: assignment.ConfigEpoch, StateRevision: before.Revision, TargetReplicaCount: 3,
+		TransitionTargetNodes: []uint64{1, 2, 3},
+	}
+	created, err := runtime.RequestSlotReplicaMove(context.Background(), request)
+	if err != nil || !created.Created || created.Task == nil {
+		t.Fatalf("RequestSlotReplicaMove(add) = %#v, %v", created, err)
+	}
+	active := waitForState(t, runtime, func(st ClusterState) bool { return st.SlotReplicaCountTransition != nil && len(st.Tasks) == 1 })
+	if active.Config.ReplicaCount != 1 || active.SlotReplicaCountTransition.TargetReplicaCount != 3 || !sameUint64SetForTest(active.Slots[0].DesiredPeers, []uint64{1}) {
+		t.Fatalf("active transition state = %#v", active)
+	}
+	beforePromotion := runtime.raft.Status()
+	if _, err := runtime.PromoteControllerVoter(context.Background(), PromoteControllerVoterRequest{NodeID: 2}); err == nil || !strings.Contains(err.Error(), fsm.ReasonSlotReplicaCountTransitionActive) {
+		t.Fatalf("PromoteControllerVoter() error = %v, want active transition rejection", err)
+	}
+	afterPromotion := runtime.raft.Status()
+	if !sameUint64SetForTest(beforePromotion.Voters, afterPromotion.Voters) || containsRuntimeUint64(afterPromotion.Voters, 2) {
+		t.Fatalf("Controller voters changed before Slot transition: before=%v after=%v", beforePromotion.Voters, afterPromotion.Voters)
+	}
+	task := active.Tasks[0]
+	if err := runtime.FailTask(context.Background(), TaskResult{TaskID: task.TaskID, SlotID: task.SlotID, TaskKind: task.Kind, ConfigEpoch: task.ConfigEpoch, Attempt: task.Attempt, Err: "injected"}); err != nil {
+		t.Fatalf("FailTask() error = %v", err)
+	}
+	failed := waitForState(t, runtime, func(st ClusterState) bool { return len(st.Tasks) == 1 && st.Tasks[0].Status == TaskStatusFailed })
+	request.StateRevision = failed.Revision
+	resumed, err := runtime.RequestSlotReplicaMove(context.Background(), request)
+	if err != nil || !resumed.Created || resumed.Task == nil || resumed.Task.Attempt != 1 || resumed.Task.Status != TaskStatusPending {
+		t.Fatalf("RequestSlotReplicaMove(resume) = %#v, %v", resumed, err)
+	}
+	commitReplicaAdditionForTest(t, runtime, *resumed.Task, []uint64{1}, []uint64{1, 2})
+	afterFirst := waitForState(t, runtime, func(st ClusterState) bool { return len(st.Tasks) == 0 && len(st.Slots[0].DesiredPeers) == 2 })
+	if afterFirst.Config.ReplicaCount != 1 || afterFirst.SlotReplicaCountTransition == nil {
+		t.Fatalf("first addition prematurely finalized transition: %#v", afterFirst)
+	}
+	second, err := runtime.RequestSlotReplicaMove(context.Background(), SlotReplicaMoveRequest{
+		SlotID: afterFirst.Slots[0].SlotID, TargetNode: 3, TargetPeers: []uint64{1, 2, 3},
+		ConfigEpoch: afterFirst.Slots[0].ConfigEpoch, StateRevision: afterFirst.Revision, TargetReplicaCount: 3,
+		TransitionTargetNodes: []uint64{1, 2, 3},
+	})
+	if err != nil || !second.Created || second.Task == nil {
+		t.Fatalf("RequestSlotReplicaMove(second add) = %#v, %v", second, err)
+	}
+	commitReplicaAdditionForTest(t, runtime, *second.Task, []uint64{1, 2}, []uint64{1, 2, 3})
+	complete := waitForState(t, runtime, func(st ClusterState) bool { return len(st.Tasks) == 0 && st.Config.ReplicaCount == 3 })
+	if complete.SlotReplicaCountTransition != nil || !sameUint64SetForTest(complete.Slots[0].DesiredPeers, []uint64{1, 2, 3}) {
+		t.Fatalf("completed transition = %#v", complete)
+	}
+}
+
+func commitReplicaAdditionForTest(t *testing.T, runtime *Runtime, task ReconcileTask, sourceVoters, targetVoters []uint64) {
+	t.Helper()
+	phases := []SlotReplicaMovePhaseAdvance{
+		{TaskID: task.TaskID, SlotID: task.SlotID, ConfigEpoch: task.ConfigEpoch, Attempt: task.Attempt, ExpectedPhaseIndex: task.PhaseIndex, NextStep: TaskStepAddLearner},
+		{TaskID: task.TaskID, SlotID: task.SlotID, ConfigEpoch: task.ConfigEpoch, Attempt: task.Attempt, ExpectedPhaseIndex: task.PhaseIndex + 1, NextStep: TaskStepPromoteLearner, ObservedConfigIndex: 8, ObservedVoters: sourceVoters, ObservedLearners: []uint64{task.TargetNode}},
+		{TaskID: task.TaskID, SlotID: task.SlotID, ConfigEpoch: task.ConfigEpoch, Attempt: task.Attempt, ExpectedPhaseIndex: task.PhaseIndex + 2, NextStep: TaskStepCommitAssignment, ObservedConfigIndex: 9, ObservedVoters: targetVoters},
+	}
+	for _, phase := range phases {
+		if err := runtime.AdvanceSlotReplicaMovePhase(context.Background(), phase); err != nil {
+			t.Fatalf("AdvanceSlotReplicaMovePhase(%s) error = %v", phase.NextStep, err)
+		}
+	}
+	if err := runtime.CommitSlotReplicaMove(context.Background(), SlotReplicaMoveCommit{
+		TaskID: task.TaskID, SlotID: task.SlotID, ConfigEpoch: task.ConfigEpoch, Attempt: task.Attempt,
+		ObservedConfigIndex: 9, ObservedVoters: targetVoters,
+	}); err != nil {
+		t.Fatalf("CommitSlotReplicaMove() error = %v", err)
 	}
 }
 
@@ -1631,6 +1720,7 @@ func TestRuntimePrepareControllerVoterValidatesLocalNodeAgainstPreservedStateBef
 		{
 			name: "missing local node",
 			mutate: func(st ClusterState) ClusterState {
+				st.ControllerVoterPromotion = nil
 				st.Controllers = []ControllerVoter{{NodeID: 1, Addr: "n1", Role: ControllerRoleVoter}}
 				st.Nodes = []Node{st.Nodes[0]}
 				return checksumClusterStateForTest(t, st)
@@ -1640,6 +1730,7 @@ func TestRuntimePrepareControllerVoterValidatesLocalNodeAgainstPreservedStateBef
 		{
 			name: "inactive local node",
 			mutate: func(st ClusterState) ClusterState {
+				st.ControllerVoterPromotion = nil
 				st.Controllers = []ControllerVoter{{NodeID: 1, Addr: "n1", Role: ControllerRoleVoter}}
 				st.Nodes[1].Roles = []NodeRole{NodeRoleData}
 				st.Nodes[1].JoinState = NodeJoinStateLeaving
@@ -1653,6 +1744,7 @@ func TestRuntimePrepareControllerVoterValidatesLocalNodeAgainstPreservedStateBef
 				st.Controllers = []ControllerVoter{{NodeID: 1, Addr: "n1", Role: ControllerRoleVoter}}
 				st.Nodes[1].Roles = []NodeRole{NodeRoleData}
 				st.Nodes[1].Addr = "n4-durable"
+				st.ControllerVoterPromotion.TargetAddr = "n4-durable"
 				return checksumClusterStateForTest(t, st)
 			},
 			nextVoters: []Voter{{NodeID: 1, Addr: "n1"}, {NodeID: 4, Addr: "n4"}},
@@ -1877,11 +1969,12 @@ func runtimeBootstrapVisibleState(t *testing.T, revision uint64, withTask bool) 
 func mirroredPrepareDataNodeStateForTest(t *testing.T, clusterID string, revision uint64) ClusterState {
 	t.Helper()
 	st := ClusterState{
-		SchemaVersion:    CurrentSchemaVersion,
-		ClusterID:        clusterID,
-		Revision:         revision,
-		AppliedRaftIndex: 22,
-		UpdatedAt:        time.Unix(1710000000, 0).UTC(),
+		ControllerVoterPromotion: &cv2state.ControllerVoterPromotion{TargetNodeID: 4, TargetAddr: "n4", PreviousVoters: []uint64{1}},
+		SchemaVersion:            CurrentSchemaVersion,
+		ClusterID:                clusterID,
+		Revision:                 revision,
+		AppliedRaftIndex:         22,
+		UpdatedAt:                time.Unix(1710000000, 0).UTC(),
 		Config: ClusterConfig{
 			SlotCount:             1,
 			HashSlotCount:         4,

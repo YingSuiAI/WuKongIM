@@ -5,7 +5,6 @@ import (
 	"fmt"
 
 	"github.com/WuKongIM/WuKongIM/internal/contracts/onlinedelivery"
-	runtimedelivery "github.com/WuKongIM/WuKongIM/internal/runtime/delivery"
 	clusternet "github.com/WuKongIM/WuKongIM/pkg/cluster/net"
 	"github.com/WuKongIM/WuKongIM/pkg/wklog"
 )
@@ -27,16 +26,16 @@ func (a *Adapter) HandleDeliveryPushRPC(ctx context.Context, payload []byte) ([]
 	if a == nil || a.delivery == nil {
 		return encodeDeliveryPushResponse(deliveryPushResponse{Status: rpcStatusRejected})
 	}
-	result, err := a.delivery.Push(ctx, req.Command)
+	result, err := a.delivery.PushOwner(ctx, req.Push)
 	if err != nil {
 		a.rpcLogger().Warn("delivery push rpc rejected",
 			wklog.Event("internal.access.node.delivery_push_rejected"),
-			wklog.Uint64("ownerNodeID", req.Command.OwnerNodeID),
-			wklog.ChannelID(req.Command.Envelope.ChannelID),
-			wklog.ChannelType(int64(req.Command.Envelope.ChannelType)),
-			wklog.Uint64("messageID", req.Command.Envelope.MessageID),
-			wklog.MessageSeq(req.Command.Envelope.MessageSeq),
-			wklog.Int("routes", len(req.Command.Routes)),
+			wklog.Uint64("ownerNodeID", req.Push.OwnerNodeID),
+			wklog.ChannelID(req.Push.Event.ChannelID),
+			wklog.ChannelType(int64(req.Push.Event.ChannelType)),
+			wklog.Uint64("messageID", req.Push.Event.MessageID),
+			wklog.MessageSeq(req.Push.Event.MessageSeq),
+			wklog.Int("routes", len(req.Push.Routes)),
 			wklog.Error(err),
 		)
 		return encodeDeliveryPushResponse(deliveryPushResponse{Status: rpcStatusRejected})
@@ -44,39 +43,29 @@ func (a *Adapter) HandleDeliveryPushRPC(ctx context.Context, payload []byte) ([]
 	return encodeDeliveryPushResponse(deliveryPushResponse{Status: rpcStatusOK, Result: result})
 }
 
-// PushBatch forwards one owner-node delivery batch to nodeID.
-func (c *Client) PushBatch(ctx context.Context, nodeID uint64, cmd runtimedelivery.PushCommand) (runtimedelivery.PushResult, error) {
+// PushOwner forwards one fence-complete delivery batch to its owner node.
+func (c *Client) PushOwner(ctx context.Context, push onlinedelivery.OwnerPush) (onlinedelivery.OwnerPushResult, error) {
 	if c == nil || c.node == nil {
-		return runtimedelivery.PushResult{}, fmt.Errorf("internal/access/node: delivery rpc client not configured")
+		return onlinedelivery.OwnerPushResult{}, fmt.Errorf("internal/access/node: delivery rpc client not configured")
 	}
-	body, err := encodeDeliveryPushRequest(deliveryPushRequest{Command: cmd})
+	body, err := encodeDeliveryPushRequest(deliveryPushRequest{Push: push.Clone()})
 	if err != nil {
-		return runtimedelivery.PushResult{}, err
+		return onlinedelivery.OwnerPushResult{}, err
 	}
-	respBody, err := c.node.CallRPC(ctx, nodeID, DeliveryPushRPCServiceID, body)
+	respBody, err := c.node.CallRPC(ctx, push.OwnerNodeID, DeliveryPushRPCServiceID, body)
 	if err != nil {
-		return runtimedelivery.PushResult{}, err
+		return onlinedelivery.OwnerPushResult{}, err
 	}
 	resp, err := decodeDeliveryPushResponse(respBody)
 	if err != nil {
-		return runtimedelivery.PushResult{}, err
+		return onlinedelivery.OwnerPushResult{}, err
 	}
 	switch resp.Status {
 	case rpcStatusOK:
 		return resp.Result, nil
 	case rpcStatusRejected:
-		return runtimedelivery.PushResult{}, fmt.Errorf("internal/access/node: delivery rpc rejected")
+		return onlinedelivery.OwnerPushResult{}, fmt.Errorf("internal/access/node: delivery rpc rejected")
 	default:
-		return runtimedelivery.PushResult{}, fmt.Errorf("internal/access/node: unknown delivery rpc status %q", resp.Status)
+		return onlinedelivery.OwnerPushResult{}, fmt.Errorf("internal/access/node: unknown delivery rpc status %q", resp.Status)
 	}
-}
-
-// PushOwner forwards a canonical owner push through the stable version-one
-// delivery wire format.
-func (c *Client) PushOwner(ctx context.Context, cmd onlinedelivery.OwnerPush) (onlinedelivery.OwnerPushResult, error) {
-	result, err := c.PushBatch(ctx, cmd.OwnerNodeID, legacyDeliveryPushFromOnline(cmd))
-	if err != nil {
-		return onlinedelivery.OwnerPushResult{}, err
-	}
-	return onlineDeliveryResultFromLegacy(result), nil
 }

@@ -162,7 +162,7 @@ type Management interface {
 	// AdvanceMessageRetention advances one channel's message retention boundary.
 	AdvanceMessageRetention(ctx context.Context, req managementusecase.AdvanceMessageRetentionRequest) (managementusecase.AdvanceMessageRetentionResponse, error)
 	// ListConnections returns manager-facing local connection DTOs.
-	ListConnections(ctx context.Context, req managementusecase.ListConnectionsRequest) ([]managementusecase.Connection, error)
+	ListConnections(ctx context.Context, req managementusecase.ListConnectionsRequest) (managementusecase.ListConnectionsResponse, error)
 	// GetConnection returns one manager-facing local connection detail DTO.
 	GetConnection(ctx context.Context, req managementusecase.GetConnectionRequest) (managementusecase.ConnectionDetail, error)
 	// ListNodePlugins returns one node's local plugin inventory.
@@ -459,6 +459,7 @@ func (s *Server) registerRoutes() {
 		nodes.Use(s.requirePermission("cluster.node", "r"))
 	}
 	nodes.GET("/nodes", s.handleNodes)
+	nodes.GET("/nodes/:node_id", s.handleNode)
 	nodes.GET("/nodes/:node_id/config", s.handleNodeConfig)
 	nodes.GET("/runtime/workqueues", s.handleRuntimeWorkqueues)
 	nodes.GET("/realtime-monitor", s.handleRealtimeMonitor)
@@ -497,6 +498,7 @@ func (s *Server) registerRoutes() {
 	}
 	slotWrites.POST("/nodes/:node_id/slots/:slot_id/compact", s.handleCompactSlotRaftLog)
 	slotWrites.POST("/slots/leader-transfer-batch", s.handleSlotLeaderTransferBatchExecute)
+	slotWrites.POST("/slots/replica-count-transition/advance", s.handleSlotReplicaTransitionAdvance)
 	slotWrites.POST("/slots/:slot_id/leader-transfer", s.handleSlotLeaderTransfer)
 
 	controllerReads := s.engine.Group("/manager")

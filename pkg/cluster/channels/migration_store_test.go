@@ -108,6 +108,33 @@ func TestMigrationStoreCreateLeaderFailoverRejectsIncompatibleObservedEpoch(t *t
 	require.Empty(t, proposer.lastCommand)
 }
 
+func TestMigrationStoreCreateLeaderFailoverRejectsChangedForegroundAuthority(t *testing.T) {
+	id := ch.ChannelID{ID: "migration-failover-authority", Type: 1}
+	meta := testMigrationRuntimeMeta(id)
+	proposer := &fakeMigrationProposer{}
+	store := NewMigrationStore(MigrationStoreConfig{
+		LocalNode: 2,
+		Router:    fakeMigrationRouter{routes: map[string]routing.Route{id.ID: {HashSlot: 7, SlotID: 11, Leader: 2}}},
+		Proposer:  proposer,
+		Reader:    &fakeMigrationReader{runtimeMeta: map[uint16]metadb.ChannelRuntimeMeta{7: meta}},
+	})
+
+	_, err := store.CreateLeaderFailover(context.Background(), CreateLeaderFailoverRequest{
+		ChannelID:               id,
+		TaskID:                  "task-stale-foreground-failover",
+		DesiredLeader:           3,
+		ObservedLeaderEpoch:     meta.LeaderEpoch,
+		ExpectedLeader:          ch.NodeID(meta.Leader),
+		ExpectedChannelEpoch:    meta.ChannelEpoch,
+		ExpectedLeaderEpoch:     meta.LeaderEpoch,
+		ExpectedRouteGeneration: meta.RouteGeneration + 1,
+		CreatedAtMS:             1234,
+	})
+
+	require.ErrorIs(t, err, ch.ErrStaleMeta)
+	require.Empty(t, proposer.lastCommand)
+}
+
 func TestMigrationStoreCreateLeaderTransferValidatesDesiredLeader(t *testing.T) {
 	ctx := context.Background()
 	id := ch.ChannelID{ID: "migration-leader-validation", Type: 1}

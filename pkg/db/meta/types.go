@@ -205,6 +205,8 @@ const (
 	TableIDMessageEventApplied uint32 = 15
 	// TableIDUserCMDChannelMembership stores UID-owned command-channel discovery state.
 	TableIDUserCMDChannelMembership uint32 = 16
+	// TableIDPersonDirectoryTask stores durable person-channel directory projection work.
+	TableIDPersonDirectoryTask uint32 = 17
 )
 
 const (
@@ -243,5 +245,6 @@ const (
 	conversationPrimaryIndexID uint16 = 1
 	conversationActiveIndexID  uint16 = 2
 
-	systemIDSnapshot uint16 = 1
+	systemIDSnapshot    uint16 = 1
+	systemIDSlotApplied uint16 = 2
 )

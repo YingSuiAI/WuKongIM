@@ -22,6 +22,17 @@ type channelMetaCache struct {
 	// stale marks an installed exact version unusable until a fresh resolve
 	// confirms the same complete version or installs a newer one.
 	stale map[ch.ChannelID]struct{}
+	// failed retains the exact authoritative version whose append authority was
+	// unreachable. A fresh resolve of the same version must start or join
+	// durable failover instead of routing back to the known-dead leader.
+	failed map[ch.ChannelID]appendAuthorityVersion
+}
+
+type appendAuthorityVersion struct {
+	leader          ch.NodeID
+	epoch           uint64
+	leaderEpoch     uint64
+	routeGeneration uint64
 }
 
 // get returns one appendable, non-stale cached metadata snapshot.
@@ -74,6 +85,7 @@ func (c *channelMetaCache) selectResolved(id ch.ChannelID, meta ch.Meta) (ch.Met
 		}
 		c.items[id] = cloneMeta(meta)
 		delete(c.stale, id)
+		c.clearFailedIfChangedLocked(id, meta)
 	}
 	return cloneMeta(meta), true
 }
@@ -94,6 +106,7 @@ func (c *channelMetaCache) installIfNewerLocked(id ch.ChannelID, meta ch.Meta) (
 	installed := cloneMeta(meta)
 	c.items[id] = installed
 	delete(c.stale, id)
+	c.clearFailedIfChangedLocked(id, installed)
 	return cloneMeta(installed), true
 }
 
@@ -149,7 +162,8 @@ func (c *channelMetaCache) invalidateUsedMeta(id ch.ChannelID, used ch.Meta) boo
 }
 
 // invalidateAuthority marks a cached version stale only when every supplied
-// authority fence matches the installed metadata.
+// authority fence matches the installed metadata. It does not infer that the
+// authority leader is unavailable.
 func (c *channelMetaCache) invalidateAuthority(id ch.ChannelID, leader ch.NodeID, epoch uint64, leaderEpoch uint64, routeGeneration uint64) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -163,6 +177,70 @@ func (c *channelMetaCache) invalidateAuthority(id ch.ChannelID, leader ch.NodeID
 		return false
 	}
 	return c.markStaleLocked(id)
+}
+
+// markAuthorityFailed records definitive leader unavailability for one exact
+// cached authority version and keeps that version out of the hot cache.
+func (c *channelMetaCache) markAuthorityFailed(id ch.ChannelID, leader ch.NodeID, epoch uint64, leaderEpoch uint64, routeGeneration uint64) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.items == nil {
+		return false
+	}
+	meta, ok := c.items[id]
+	if !ok || meta.Leader != leader || meta.Epoch != epoch || meta.LeaderEpoch != leaderEpoch ||
+		(routeGeneration == 0 && meta.RouteGeneration != 0) ||
+		(routeGeneration != 0 && meta.RouteGeneration != routeGeneration) {
+		return false
+	}
+	if c.failed == nil {
+		c.failed = make(map[ch.ChannelID]appendAuthorityVersion)
+	}
+	c.failed[id] = appendAuthorityVersion{leader: leader, epoch: epoch, leaderEpoch: leaderEpoch, routeGeneration: routeGeneration}
+	return c.markStaleLocked(id)
+}
+
+// restoreCurrentAuthority makes one exact, independently probed current
+// authority hot again. It cannot clear a stale marker for a concurrent version.
+func (c *channelMetaCache) restoreCurrentAuthority(id ch.ChannelID, meta ch.Meta) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	current, installed := c.items[id]
+	failed, ok := c.failed[id]
+	if !installed || !ok || !sameCompleteAppendMeta(current, meta) || !failed.matches(meta) {
+		return false
+	}
+	delete(c.failed, id)
+	delete(c.stale, id)
+	return true
+}
+
+// failedAuthorityMatches reports whether meta is the same authority version
+// whose append failed. A newer authoritative projection clears the marker.
+func (c *channelMetaCache) failedAuthorityMatches(id ch.ChannelID, meta ch.Meta) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	failed, ok := c.failed[id]
+	if !ok {
+		return false
+	}
+	if failed.matches(meta) {
+		return true
+	}
+	delete(c.failed, id)
+	return false
+}
+
+func (c *channelMetaCache) clearFailedIfChangedLocked(id ch.ChannelID, meta ch.Meta) {
+	failed, ok := c.failed[id]
+	if ok && !failed.matches(meta) {
+		delete(c.failed, id)
+	}
+}
+
+func (v appendAuthorityVersion) matches(meta ch.Meta) bool {
+	return meta.Leader == v.leader && meta.Epoch == v.epoch && meta.LeaderEpoch == v.leaderEpoch &&
+		((v.routeGeneration == 0 && meta.RouteGeneration == 0) || (v.routeGeneration != 0 && meta.RouteGeneration == v.routeGeneration))
 }
 
 // markStaleLocked records one exact invalidation while the caller holds mu.

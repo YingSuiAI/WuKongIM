@@ -116,6 +116,27 @@ func TestSlotMetaSourceProjectsClearedWriteFenceVersion(t *testing.T) {
 	require.False(t, meta.WriteFence.Set())
 }
 
+func TestSlotMetaSourceBatchResolvePreservesMissingItemAlignment(t *testing.T) {
+	first := ch.ChannelID{ID: "batch-runtime-first", Type: 2}
+	missing := ch.ChannelID{ID: "batch-runtime-missing", Type: 2}
+	last := ch.ChannelID{ID: "batch-runtime-last", Type: 2}
+	reader := &alignedRuntimeMetaBatchReader{results: []RuntimeMetaReadResult{
+		{Meta: metadb.ChannelRuntimeMeta{ChannelID: first.ID, ChannelType: int64(first.Type), ChannelEpoch: 1, LeaderEpoch: 2, Leader: 1, Replicas: []uint64{1}, ISR: []uint64{1}, MinISR: 1, Status: uint8(ch.StatusActive)}},
+		{Err: metadb.ErrNotFound},
+		{Meta: metadb.ChannelRuntimeMeta{ChannelID: last.ID, ChannelType: int64(last.Type), ChannelEpoch: 3, LeaderEpoch: 4, Leader: 2, Replicas: []uint64{2}, ISR: []uint64{2}, MinISR: 1, Status: uint8(ch.StatusActive)}},
+	}}
+	source := NewSlotMetaSource(reader)
+
+	results := source.ResolveChannelMetas(context.Background(), []ch.ChannelID{first, missing, last})
+
+	require.Len(t, results, 3)
+	require.NoError(t, results[0].Err)
+	require.Equal(t, first, results[0].Meta.ID)
+	require.ErrorIs(t, results[1].Err, ch.ErrChannelNotFound)
+	require.NoError(t, results[2].Err)
+	require.Equal(t, last, results[2].Meta.ID)
+}
+
 func TestServicePassesAppendBatchTuningToRuntime(t *testing.T) {
 	id := ch.ChannelID{ID: "batch-tuning", Type: 1}
 	meta := ch.Meta{
@@ -206,23 +227,17 @@ func TestSlotMetaSourceExistingMetaDoesNotCreate(t *testing.T) {
 	}
 }
 
-func TestSlotMetaSourceMissingMetaCreatesOnce(t *testing.T) {
+func TestSlotMetaSourceMissingBatchDependenciesFailsClosed(t *testing.T) {
 	id := ch.ChannelID{ID: "ensure-create", Type: 1}
 	reader := &runtimeMetaReaderFake{err: metadb.ErrNotFound}
 	source := NewSlotMetaSource(reader, SlotMetaSourceOptions{DefaultReplicas: []ch.NodeID{2, 1}, DefaultMinISR: 1})
 
-	meta, err := source.EnsureChannelMeta(context.Background(), id)
-	if err != nil {
-		t.Fatalf("EnsureChannelMeta() error = %v", err)
+	_, err := source.EnsureChannelMeta(context.Background(), id)
+	if !errors.Is(err, ch.ErrInvalidConfig) {
+		t.Fatalf("EnsureChannelMeta() error = %v, want ErrInvalidConfig", err)
 	}
-	if reader.creates != 1 || reader.upserts != 0 {
-		t.Fatalf("creates=%d upserts=%d, want one create-only call", reader.creates, reader.upserts)
-	}
-	if meta.ID != id || meta.Epoch != 1 || meta.LeaderEpoch != 1 || meta.Leader != 2 || meta.Status != ch.StatusActive {
-		t.Fatalf("created meta = %#v, want initial active meta", meta)
-	}
-	if got, want := meta.Replicas, []ch.NodeID{1, 2}; !equalNodeIDs(got, want) {
-		t.Fatalf("Replicas = %v, want %v", got, want)
+	if reader.creates != 0 || reader.upserts != 0 {
+		t.Fatalf("creates=%d upserts=%d, want no unbatched write", reader.creates, reader.upserts)
 	}
 }
 
@@ -234,10 +249,11 @@ func TestSlotMetaSourceConcurrentCreateLoserReturnsAuthoritativeMeta(t *testing.
 		Status: uint8(ch.StatusActive),
 	}
 	store := &concurrentCreateRuntimeMetaStore{authoritative: authoritative}
-	source := NewSlotMetaSource(store, SlotMetaSourceOptions{
+	source := NewSlotMetaSource(store, withTestMetaBatch(store, SlotMetaSourceOptions{
 		DefaultReplicas: []ch.NodeID{2, 1},
 		DefaultMinISR:   1,
-	})
+	}))
+	t.Cleanup(func() { require.NoError(t, source.Close()) })
 
 	meta, err := source.EnsureChannelMeta(context.Background(), id)
 	if err != nil {
@@ -255,11 +271,12 @@ func TestSlotMetaSourceObservesEnsureMetaStageBreakdown(t *testing.T) {
 	id := ch.ChannelID{ID: "ensure-create-observed", Type: 1}
 	reader := &runtimeMetaReaderFake{err: metadb.ErrNotFound}
 	observer := &appendStageObserver{}
-	source := NewSlotMetaSource(reader, SlotMetaSourceOptions{
+	source := NewSlotMetaSource(reader, withTestMetaBatch(reader, SlotMetaSourceOptions{
 		DefaultReplicas: []ch.NodeID{2, 1},
 		DefaultMinISR:   1,
 		Observer:        observer,
-	})
+	}))
+	t.Cleanup(func() { require.NoError(t, source.Close()) })
 
 	_, err := source.EnsureChannelMeta(context.Background(), id)
 	require.NoError(t, err)
@@ -268,35 +285,74 @@ func TestSlotMetaSourceObservesEnsureMetaStageBreakdown(t *testing.T) {
 	requireAppendStage(t, observer.events, "meta_create_build", "ok")
 	requireAppendStage(t, observer.events, "meta_create_propose", "ok")
 	requireAppendStage(t, observer.events, "meta_create_write", "ok")
-	requireAppendStage(t, observer.events, "meta_final_read", "ok")
+	for _, event := range observer.events {
+		if event.stage == "meta_final_read" {
+			t.Fatalf("successful identity-bound create unexpectedly reread authoritative metadata: %#v", event)
+		}
+	}
+	for _, stage := range []string{"meta_create_build", "meta_create_propose"} {
+		requirePositiveAppendStageDuration(t, observer.events, stage)
+	}
 }
 
-func TestSlotMetaSourceCreateObservesAuthoritativeRereadMiss(t *testing.T) {
+func TestSlotMetaSourceDoesNotObserveProposalWhenPlacementBuildFails(t *testing.T) {
+	id := ch.ChannelID{ID: "ensure-build-failed", Type: 1}
+	reader := &runtimeMetaReaderFake{err: metadb.ErrNotFound}
+	observer := &appendStageObserver{}
+	source := NewSlotMetaSource(reader, withTestMetaBatch(reader, SlotMetaSourceOptions{
+		Placement: fakePlacementResolver{err: ch.ErrStaleMeta},
+		Observer:  observer,
+	}))
+	t.Cleanup(func() { require.NoError(t, source.Close()) })
+
+	_, err := source.EnsureChannelMeta(context.Background(), id)
+	if !errors.Is(err, metadb.ErrStaleMeta) && !errors.Is(err, ch.ErrStaleMeta) {
+		t.Fatalf("EnsureChannelMeta() error = %v, want stale placement", err)
+	}
+	requireAppendStage(t, observer.events, "meta_create_build", "err")
+	for _, event := range observer.events {
+		if event.stage == "meta_create_propose" {
+			t.Fatalf("proposal stage = %#v, want no proposal observation before creator call", event)
+		}
+	}
+}
+
+func TestSlotMetaSourceCreatedResultDoesNotDependOnLaggingReread(t *testing.T) {
 	id := ch.ChannelID{ID: "ensure-create-lagging-read", Type: 1}
 	store := &laggingRuntimeMetaStore{}
 	observer := &appendStageObserver{}
-	source := NewSlotMetaSource(store, SlotMetaSourceOptions{DefaultReplicas: []ch.NodeID{2, 1}, DefaultMinISR: 1, Observer: observer})
+	source := NewSlotMetaSource(store, withTestMetaBatch(store, SlotMetaSourceOptions{DefaultReplicas: []ch.NodeID{2, 1}, DefaultMinISR: 1, Observer: observer}))
+	t.Cleanup(func() { require.NoError(t, source.Close()) })
 
-	_, err := source.EnsureChannelMeta(context.Background(), id)
-	if !errors.Is(err, metadb.ErrNotFound) {
-		t.Fatalf("EnsureChannelMeta() error = %v, want authoritative reread miss", err)
+	meta, err := source.EnsureChannelMeta(context.Background(), id)
+	if err != nil {
+		t.Fatalf("EnsureChannelMeta() error = %v", err)
 	}
-	if store.creates != 1 || store.upserts != 0 {
-		t.Fatalf("creates=%d upserts=%d, want one create-only call", store.creates, store.upserts)
+	if meta.ID != id {
+		t.Fatalf("EnsureChannelMeta() meta = %#v, want %v", meta, id)
 	}
-	requireAppendStage(t, observer.events, "meta_final_read", "miss")
+	if store.creates != 1 || store.upserts != 0 || store.reads != 0 {
+		t.Fatalf("creates=%d upserts=%d reads=%d, want one proven create and no reread", store.creates, store.upserts, store.reads)
+	}
+	for _, event := range observer.events {
+		if event.stage == "meta_final_read" {
+			t.Fatalf("successful identity-bound create unexpectedly reread authoritative metadata: %#v", event)
+		}
+	}
 }
 
 func TestSlotMetaSourceCreatesMissingRuntimeMetaFromPlacement(t *testing.T) {
 	id := ch.ChannelID{ID: "ensure-placement", Type: 1}
 	reader := &runtimeMetaReaderFake{err: metadb.ErrNotFound}
-	source := NewSlotMetaSource(reader, SlotMetaSourceOptions{
+	source := NewSlotMetaSource(reader, withTestMetaBatch(reader, SlotMetaSourceOptions{
 		Placement: fakePlacementResolver{placement: ChannelPlacement{
 			Leader:   3,
 			Replicas: []ch.NodeID{2, 3, 1},
+			ISR:      []ch.NodeID{2, 3},
 			MinISR:   2,
 		}},
-	})
+	}))
+	t.Cleanup(func() { require.NoError(t, source.Close()) })
 
 	meta, err := source.EnsureChannelMeta(context.Background(), id)
 	if err != nil {
@@ -305,11 +361,46 @@ func TestSlotMetaSourceCreatesMissingRuntimeMetaFromPlacement(t *testing.T) {
 	if reader.creates != 1 || reader.upserts != 0 {
 		t.Fatalf("creates=%d upserts=%d, want one create-only call", reader.creates, reader.upserts)
 	}
+	if reader.batchReads != 0 {
+		t.Fatalf("authoritative batch rereads=%d, want none after an identity-bound created result", reader.batchReads)
+	}
 	if meta.Leader != 3 || meta.MinISR != 2 {
 		t.Fatalf("created meta leader/minISR = %#v, want placement", meta)
 	}
 	if got, want := meta.Replicas, []ch.NodeID{1, 2, 3}; !equalNodeIDs(got, want) {
 		t.Fatalf("Replicas = %v, want %v", got, want)
+	}
+	if got, want := meta.ISR, []ch.NodeID{2, 3}; !equalNodeIDs(got, want) {
+		t.Fatalf("ISR = %v, want only schedulable replicas %v", got, want)
+	}
+}
+
+func TestRuntimeMetaFromPlacementRequiresExplicitWritableISR(t *testing.T) {
+	id := ch.ChannelID{ID: "explicit-isr", Type: 1}
+	tests := []struct {
+		name      string
+		placement ChannelPlacement
+	}{
+		{
+			name:      "missing ISR",
+			placement: ChannelPlacement{Leader: 1, Replicas: []ch.NodeID{1, 2, 3}, MinISR: 2},
+		},
+		{
+			name:      "leader outside ISR",
+			placement: ChannelPlacement{Leader: 3, Replicas: []ch.NodeID{1, 2, 3}, ISR: []ch.NodeID{1, 2}, MinISR: 2},
+		},
+		{
+			name:      "ISR below MinISR",
+			placement: ChannelPlacement{Leader: 1, Replicas: []ch.NodeID{1, 2, 3}, ISR: []ch.NodeID{1}, MinISR: 2},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := RuntimeMetaFromPlacement(id, tt.placement)
+			if !errors.Is(err, ch.ErrInvalidConfig) {
+				t.Fatalf("RuntimeMetaFromPlacement() error = %v, want ErrInvalidConfig", err)
+			}
+		})
 	}
 }
 
@@ -317,7 +408,7 @@ func TestSlotPlacementResolverUsesDataNodesInsteadOfSlotPeers(t *testing.T) {
 	id := ch.ChannelID{ID: "route-placement", Type: 1}
 	resolver := NewSlotPlacementResolver(
 		fakePlacementRouter{route: routing.Route{Leader: 2, Peers: []uint64{1, 2, 3}}},
-		fakeDataNodeProvider{nodes: []uint64{4, 5, 6}},
+		fakeDataNodeProvider{active: []uint64{4, 5, 6}, schedulable: []uint64{4, 5, 6}},
 		3,
 	)
 
@@ -338,11 +429,25 @@ func TestSlotPlacementResolverUsesDataNodesInsteadOfSlotPeers(t *testing.T) {
 	}
 }
 
+func TestSlotPlacementResolverRejectsDataNodesFromDifferentControlRevision(t *testing.T) {
+	id := ch.ChannelID{ID: "mixed-control-snapshot", Type: 1}
+	resolver := NewSlotPlacementResolver(
+		fakePlacementRouter{route: routing.Route{Revision: 12, Leader: 2, Peers: []uint64{1, 2, 3}}},
+		fakeDataNodeProvider{revision: 11, active: []uint64{1, 2, 3}, schedulable: []uint64{1, 2, 3}},
+		3,
+	)
+
+	_, err := resolver.ResolveChannelPlacement(context.Background(), id)
+	if !errors.Is(err, ch.ErrStaleMeta) {
+		t.Fatalf("ResolveChannelPlacement() error = %v, want ErrStaleMeta", err)
+	}
+}
+
 func TestSlotPlacementResolverPrefersRoutePreferredLeaderOnlyWhenSelected(t *testing.T) {
 	id := ch.ChannelID{ID: "route-placement-preferred", Type: 1}
 	resolver := NewSlotPlacementResolver(
 		fakePlacementRouter{route: routing.Route{Leader: 3, PreferredLeader: 4, Peers: []uint64{1, 2, 3}}},
-		fakeDataNodeProvider{nodes: []uint64{4, 5, 6}},
+		fakeDataNodeProvider{active: []uint64{4, 5, 6}, schedulable: []uint64{4, 5, 6}},
 		3,
 	)
 
@@ -356,7 +461,7 @@ func TestSlotPlacementResolverPrefersRoutePreferredLeaderOnlyWhenSelected(t *tes
 
 	withoutPreferred := NewSlotPlacementResolver(
 		fakePlacementRouter{route: routing.Route{Leader: 3, PreferredLeader: 9, Peers: []uint64{1, 2, 3}}},
-		fakeDataNodeProvider{nodes: []uint64{4, 5, 6}},
+		fakeDataNodeProvider{active: []uint64{4, 5, 6}, schedulable: []uint64{4, 5, 6}},
 		3,
 	)
 	next, err := withoutPreferred.ResolveChannelPlacement(context.Background(), id)
@@ -374,7 +479,7 @@ func TestSlotPlacementResolverPrefersRoutePreferredLeaderOnlyWhenSelected(t *tes
 func TestSlotPlacementResolverHashesFullChannelIdentity(t *testing.T) {
 	resolver := NewSlotPlacementResolver(
 		fakePlacementRouter{route: routing.Route{Leader: 1, Peers: []uint64{1, 2, 3}}},
-		fakeDataNodeProvider{nodes: []uint64{1, 2, 3, 4, 5, 6, 7, 8}},
+		fakeDataNodeProvider{active: []uint64{1, 2, 3, 4, 5, 6, 7, 8}, schedulable: []uint64{1, 2, 3, 4, 5, 6, 7, 8}},
 		3,
 	)
 
@@ -399,8 +504,8 @@ func TestSlotPlacementResolverRejectsInvalidDataNodeCandidates(t *testing.T) {
 		replicaCount int
 	}{
 		{name: "nil provider", dataNodes: nil, replicaCount: 1},
-		{name: "zero replicas", dataNodes: fakeDataNodeProvider{nodes: []uint64{1, 2}}, replicaCount: 0},
-		{name: "insufficient unique nodes", dataNodes: fakeDataNodeProvider{nodes: []uint64{1, 1, 2}}, replicaCount: 3},
+		{name: "zero replicas", dataNodes: fakeDataNodeProvider{active: []uint64{1, 2}, schedulable: []uint64{1, 2}}, replicaCount: 0},
+		{name: "insufficient unique nodes", dataNodes: fakeDataNodeProvider{active: []uint64{1, 1, 2}, schedulable: []uint64{1, 2}}, replicaCount: 3},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -421,7 +526,7 @@ func TestSlotPlacementResolverDeduplicatesDataNodeCandidates(t *testing.T) {
 	id := ch.ChannelID{ID: "dedupe-placement", Type: 1}
 	resolver := NewSlotPlacementResolver(
 		fakePlacementRouter{route: routing.Route{Leader: 1, Peers: []uint64{1, 2, 3}}},
-		fakeDataNodeProvider{nodes: []uint64{7, 5, 7, 6, 5}},
+		fakeDataNodeProvider{active: []uint64{7, 5, 7, 6, 5}, schedulable: []uint64{7, 5, 6}},
 		3,
 	)
 
@@ -441,6 +546,48 @@ func TestSlotPlacementResolverDeduplicatesDataNodeCandidates(t *testing.T) {
 			t.Fatalf("Replicas = %v, want no duplicates", placement.Replicas)
 		}
 		seen[replica] = true
+	}
+}
+
+func TestSlotPlacementResolverCreatesQuorumPlacementWithOneUnavailableActiveNode(t *testing.T) {
+	id := ch.ChannelID{ID: "degraded-new-channel", Type: 1}
+	resolver := NewSlotPlacementResolver(
+		fakePlacementRouter{route: routing.Route{PreferredLeader: 3}},
+		fakeDataNodeProvider{active: []uint64{1, 2, 3}, schedulable: []uint64{1, 2}},
+		3,
+	)
+
+	placement, err := resolver.ResolveChannelPlacement(context.Background(), id)
+	if err != nil {
+		t.Fatalf("ResolveChannelPlacement() error = %v", err)
+	}
+	if placement.MinISR != 2 || len(placement.Replicas) != 3 {
+		t.Fatalf("placement = %#v, want three replicas with MinISR 2", placement)
+	}
+	if got := placement.ISR; len(got) != 2 || !nodeIDIn(got, 1) || !nodeIDIn(got, 2) {
+		t.Fatalf("ISR = %v, want only schedulable nodes 1,2 (leader=%d)", got, placement.Leader)
+	}
+	if placement.Leader == 3 {
+		t.Fatalf("Leader = %d, unavailable preferred node must not lead", placement.Leader)
+	}
+	if placement.Leader != 1 && placement.Leader != 2 {
+		t.Fatalf("Leader = %d, want a schedulable leader", placement.Leader)
+	}
+	if !nodeIDIn(placement.Replicas, 3) {
+		t.Fatalf("Replicas = %v, want unavailable active node retained as trailing replica", placement.Replicas)
+	}
+}
+
+func TestSlotPlacementResolverRejectsWhenSchedulableNodesBelowMinISR(t *testing.T) {
+	resolver := NewSlotPlacementResolver(
+		fakePlacementRouter{route: routing.Route{}},
+		fakeDataNodeProvider{active: []uint64{1, 2, 3}, schedulable: []uint64{1}},
+		3,
+	)
+
+	_, err := resolver.ResolveChannelPlacement(context.Background(), ch.ChannelID{ID: "no-quorum", Type: 1})
+	if !errors.Is(err, ch.ErrInvalidConfig) {
+		t.Fatalf("ResolveChannelPlacement() error = %v, want ErrInvalidConfig", err)
 	}
 }
 
@@ -2752,7 +2899,8 @@ func TestServiceResolveAppendAuthorityUsesAppendEnsurePath(t *testing.T) {
 func TestServiceResolveAppendAuthorityCreatesMissingRuntimeMeta(t *testing.T) {
 	id := ch.ChannelID{ID: "resolve-authority-create", Type: 1}
 	reader := &runtimeMetaReaderFake{err: metadb.ErrNotFound}
-	source := NewSlotMetaSource(reader, SlotMetaSourceOptions{DefaultReplicas: []ch.NodeID{2, 1}, DefaultMinISR: 1})
+	source := NewSlotMetaSource(reader, withTestMetaBatch(reader, SlotMetaSourceOptions{DefaultReplicas: []ch.NodeID{2, 1}, DefaultMinISR: 1}))
+	t.Cleanup(func() { require.NoError(t, source.Close()) })
 	svc, err := NewService(Config{Runtime: &fakeRuntime{}, LocalNode: 1, MetaSource: source})
 	if err != nil {
 		t.Fatalf("NewService() error = %v", err)
@@ -2906,6 +3054,85 @@ func TestServiceReadConversationHeadsUsesOneLiveRuntimeProbeBeforeLeaderCheckpoi
 	}
 }
 
+func TestServiceReadConversationHeadsUsesAlignedBatchMetadata(t *testing.T) {
+	first := ch.ChannelID{ID: "conversation-batch-meta-first", Type: 2}
+	missing := ch.ChannelID{ID: "conversation-batch-meta-missing", Type: 2}
+	second := ch.ChannelID{ID: "conversation-batch-meta-second", Type: 2}
+	source := &batchOnlyChannelMetaSource{metas: map[ch.ChannelID]ch.Meta{
+		first:  {ID: first, Epoch: 1, LeaderEpoch: 1, Leader: 2, Replicas: []ch.NodeID{2}, ISR: []ch.NodeID{2}, MinISR: 1, Status: ch.StatusActive},
+		second: {ID: second, Epoch: 3, LeaderEpoch: 4, Leader: 2, Replicas: []ch.NodeID{2}, ISR: []ch.NodeID{2}, MinISR: 1, Status: ch.StatusActive},
+	}}
+	forward := &recordingConversationHeadsForward{response: ConversationHeadsResponse{Items: []ConversationHeadResult{
+		{Head: ConversationHead{LastCommittedSeq: 10}},
+		{Head: ConversationHead{LastCommittedSeq: 20}},
+	}}}
+	svc, err := NewService(Config{Runtime: &fakeRuntime{}, LocalNode: 1, MetaSource: source, Forward: forward})
+	require.NoError(t, err)
+
+	results, err := svc.ReadConversationHeads(context.Background(), []ch.ChannelID{first, missing, second}, "u1")
+	require.NoError(t, err)
+	require.Len(t, results, 3)
+	require.NoError(t, results[0].Err)
+	require.Equal(t, uint64(10), results[0].Head.LastCommittedSeq)
+	require.ErrorIs(t, results[1].Err, ch.ErrChannelNotFound)
+	require.NoError(t, results[2].Err)
+	require.Equal(t, uint64(20), results[2].Head.LastCommittedSeq)
+}
+
+func TestForwardConversationHeadsUsesAlignedBatchMetadata(t *testing.T) {
+	id := ch.ChannelID{ID: "forward-conversation-batch-meta", Type: 2}
+	factory := channelstore.NewMemoryFactory()
+	store, err := factory.ChannelStore(ch.ChannelKeyForID(id), id)
+	require.NoError(t, err)
+	_, err = store.AppendLeader(context.Background(), channelstore.AppendLeaderRequest{Records: []ch.Record{{ID: 10, FromUID: "u2", Payload: []byte("tail")}}})
+	require.NoError(t, err)
+	require.NoError(t, store.Close())
+	source := &batchOnlyChannelMetaSource{metas: map[ch.ChannelID]ch.Meta{
+		id: {ID: id, Epoch: 2, LeaderEpoch: 3, Leader: 1, Replicas: []ch.NodeID{1}, ISR: []ch.NodeID{1}, MinISR: 1, Status: ch.StatusActive},
+	}}
+	svc, err := NewService(Config{Runtime: &fakeRuntime{}, LocalNode: 1, MetaSource: source, Store: factory})
+	require.NoError(t, err)
+
+	response, err := svc.handleForwardConversationHeads(context.Background(), ConversationHeadsRequest{
+		UID: "u1", Items: []ConversationHeadRequest{{ChannelID: id, ExpectedLeader: 1, ExpectedChannelEpoch: 2, ExpectedLeaderEpoch: 3, ExpectedMinISR: 1}},
+	})
+
+	require.NoError(t, err)
+	require.Len(t, response.Items, 1)
+	require.NoError(t, response.Items[0].Err)
+	require.Equal(t, uint64(1), response.Items[0].Head.LastCommittedSeq)
+	require.Equal(t, []byte("tail"), response.Items[0].Head.Message.Payload)
+}
+
+func TestServiceReadConversationHeadsTransfersLocalPayloadOwnership(t *testing.T) {
+	id := ch.ChannelID{ID: "conversation-head-local-payload-ownership", Type: 2}
+	base := channelstore.NewMemoryFactory()
+	store, err := base.ChannelStore(ch.ChannelKeyForID(id), id)
+	require.NoError(t, err)
+	_, err = store.AppendLeader(context.Background(), channelstore.AppendLeaderRequest{Records: []ch.Record{{ID: 10, FromUID: "u2", Payload: []byte("tail")}}})
+	require.NoError(t, err)
+	require.NoError(t, store.Close())
+	tracking := newLastVisibleTrackingFactory(base)
+	source := NewStaticMetaSource([]ch.Meta{{
+		ID: id, Epoch: 2, LeaderEpoch: 3, Leader: 1,
+		Replicas: []ch.NodeID{1}, ISR: []ch.NodeID{1}, MinISR: 1, Status: ch.StatusActive,
+	}})
+	svc, err := NewService(Config{Runtime: &fakeRuntime{}, LocalNode: 1, MetaSource: source, Store: tracking})
+	require.NoError(t, err)
+
+	results, err := svc.ReadConversationHeads(context.Background(), []ch.ChannelID{id}, "u1")
+
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	require.NoError(t, results[0].Err)
+	readPayload := tracking.lastPayload()
+	require.NotEmpty(t, readPayload)
+	require.NotEmpty(t, results[0].Head.Message.Payload)
+	if &readPayload[0] != &results[0].Head.Message.Payload[0] {
+		t.Fatal("conversation head copied the caller-owned store payload")
+	}
+}
+
 func TestServiceReadConversationHeadsGroupsRemoteReadsByLeaderAndKeepsAlignment(t *testing.T) {
 	remoteA := ch.ChannelID{ID: "conversation-head-remote-a", Type: 2}
 	local := ch.ChannelID{ID: "conversation-head-local", Type: 2}
@@ -3049,13 +3276,21 @@ func TestServiceReadLocalLastVisibleClosesStoreOnReadErrorAndCancellation(t *tes
 type lastVisibleTrackingFactory struct {
 	base channelstore.Factory
 
-	readErr  error
-	acquired atomic.Int64
-	closed   atomic.Int64
+	readErr         error
+	acquired        atomic.Int64
+	closed          atomic.Int64
+	mu              sync.Mutex
+	lastReadPayload []byte
 }
 
 func newLastVisibleTrackingFactory(base channelstore.Factory) *lastVisibleTrackingFactory {
 	return &lastVisibleTrackingFactory{base: base}
+}
+
+func (f *lastVisibleTrackingFactory) lastPayload() []byte {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastReadPayload
 }
 
 func (f *lastVisibleTrackingFactory) ChannelStore(key ch.ChannelKey, id ch.ChannelID) (channelstore.ChannelStore, error) {
@@ -3077,7 +3312,21 @@ func (s *lastVisibleTrackingStore) ReadCommitted(ctx context.Context, req channe
 	if s.parent.readErr != nil {
 		return channelstore.ReadCommittedResult{}, s.parent.readErr
 	}
-	return s.ChannelStore.ReadCommitted(ctx, req)
+	result, err := s.ChannelStore.ReadCommitted(ctx, req)
+	if err == nil && len(result.Messages) > 0 {
+		s.parent.mu.Lock()
+		s.parent.lastReadPayload = result.Messages[0].Payload
+		s.parent.mu.Unlock()
+	}
+	return result, err
+}
+
+func (s *lastVisibleTrackingStore) GetLastSenderMessageSeq(ctx context.Context, uid string, throughSeq uint64) (uint64, bool, error) {
+	lookup, ok := s.ChannelStore.(channelstore.SenderSequenceLookup)
+	if !ok {
+		return 0, false, ch.ErrInvalidConfig
+	}
+	return lookup.GetLastSenderMessageSeq(ctx, uid, throughSeq)
 }
 
 func (s *lastVisibleTrackingStore) Close() error {
@@ -3248,6 +3497,31 @@ func TestServiceRecoversCommittedForwardAppendBatchAfterDeadline(t *testing.T) {
 }
 
 type clusterOnlyRuntime struct{}
+
+type batchOnlyChannelMetaSource struct {
+	metas map[ch.ChannelID]ch.Meta
+}
+
+func (s *batchOnlyChannelMetaSource) ResolveChannelMeta(context.Context, ch.ChannelID) (ch.Meta, error) {
+	return ch.Meta{}, errors.New("unexpected point metadata read")
+}
+
+func (s *batchOnlyChannelMetaSource) ResolveChannelMetas(ctx context.Context, ids []ch.ChannelID) []ChannelMetaResult {
+	results := make([]ChannelMetaResult, len(ids))
+	for i, id := range ids {
+		if err := ctx.Err(); err != nil {
+			results[i].Err = err
+			continue
+		}
+		meta, ok := s.metas[id]
+		if !ok {
+			results[i].Err = fmt.Errorf("%w: %v", ch.ErrChannelNotFound, id)
+			continue
+		}
+		results[i] = ChannelMetaResult{Meta: meta, Found: true}
+	}
+	return results
+}
 
 func (clusterOnlyRuntime) ApplyMeta(ch.Meta) error { return nil }
 func (clusterOnlyRuntime) Append(context.Context, ch.AppendRequest) (ch.AppendResult, error) {
@@ -3474,8 +3748,9 @@ func (s *rpcErrorServer) HandleNotify(context.Context, channeltransport.NotifyRe
 }
 
 type appendStageEvent struct {
-	stage  string
-	result string
+	stage    string
+	result   string
+	duration time.Duration
 }
 
 type appendStageObserver struct {
@@ -3489,8 +3764,8 @@ func (o *appendStageObserver) ObserveAppendBatch(int, int, time.Duration) {
 func (o *appendStageObserver) ObserveAppendLatency(ch.CommitMode, time.Duration) {}
 func (o *appendStageObserver) ObserveWorkerResult(worker.TaskKind, error, time.Duration) {
 }
-func (o *appendStageObserver) ObserveChannelAppendStage(stage string, result string, _ time.Duration) {
-	o.events = append(o.events, appendStageEvent{stage: stage, result: result})
+func (o *appendStageObserver) ObserveChannelAppendStage(stage string, result string, duration time.Duration) {
+	o.events = append(o.events, appendStageEvent{stage: stage, result: result, duration: duration})
 }
 
 func requireAppendStage(t *testing.T, events []appendStageEvent, stage string, result string) {
@@ -3501,6 +3776,19 @@ func requireAppendStage(t *testing.T, events []appendStageEvent, stage string, r
 		}
 	}
 	t.Fatalf("append stage %s/%s not observed in %#v", stage, result, events)
+}
+
+func requirePositiveAppendStageDuration(t *testing.T, events []appendStageEvent, stage string) {
+	t.Helper()
+	for _, event := range events {
+		if event.stage == stage {
+			if event.duration <= 0 {
+				t.Fatalf("append stage %s duration = %s, want actual positive boundary duration", stage, event.duration)
+			}
+			return
+		}
+	}
+	t.Fatalf("append stage %s not observed in %#v", stage, events)
 }
 
 type countingMetaSource struct {
@@ -3767,10 +4055,32 @@ func (r *validatingRuntime) HandlePullHint(context.Context, channeltransport.Pul
 }
 
 type runtimeMetaReaderFake struct {
-	meta    metadb.ChannelRuntimeMeta
-	err     error
-	upserts int
-	creates int
+	meta       metadb.ChannelRuntimeMeta
+	err        error
+	upserts    int
+	creates    int
+	batchReads int
+}
+
+type alignedRuntimeMetaBatchReader struct {
+	results []RuntimeMetaReadResult
+}
+
+func (r *alignedRuntimeMetaBatchReader) GetChannelRuntimeMeta(context.Context, string, int64) (metadb.ChannelRuntimeMeta, error) {
+	return metadb.ChannelRuntimeMeta{}, errors.New("unexpected point runtime metadata read")
+}
+
+func (r *alignedRuntimeMetaBatchReader) BatchReadChannelRuntimeMetas(context.Context, []metadb.ChannelKey) ([]RuntimeMetaReadResult, error) {
+	return append([]RuntimeMetaReadResult(nil), r.results...), nil
+}
+
+func withTestMetaBatch(store RuntimeMetaBatchStore, opts SlotMetaSourceOptions) SlotMetaSourceOptions {
+	opts.Router = fixedRuntimeMetaBatchRouter{route: routing.Route{
+		HashSlot: 7, SlotID: 3, Leader: 1, LeaderTerm: 4, ConfigEpoch: 2, Revision: 9,
+	}}
+	opts.BatchStore = store
+	opts.metaCreateCollectWait = time.Millisecond
+	return opts
 }
 
 func (f runtimeMetaReaderFake) GetChannelRuntimeMeta(context.Context, string, int64) (metadb.ChannelRuntimeMeta, error) {
@@ -3787,16 +4097,33 @@ func (f *runtimeMetaReaderFake) UpsertChannelRuntimeMeta(_ context.Context, meta
 	return nil
 }
 
-func (f *runtimeMetaReaderFake) CreateChannelRuntimeMeta(_ context.Context, meta metadb.ChannelRuntimeMeta) (RuntimeMetaCreateResult, error) {
+func (f *runtimeMetaReaderFake) CreateChannelRuntimeMetaBatch(_ context.Context, _ routing.Route, items []RuntimeMetaCreateItem) ([]RuntimeMetaCreateResult, error) {
+	if len(items) != 1 {
+		return nil, metadb.ErrInvalidArgument
+	}
 	f.creates++
 	f.err = nil
-	f.meta = metadb.NormalizeChannelRuntimeMeta(meta)
-	return RuntimeMetaCreateResult{Created: true}, nil
+	f.meta = metadb.NormalizeChannelRuntimeMeta(items[0].Meta)
+	return []RuntimeMetaCreateResult{{
+		HashSlot: items[0].HashSlot, ChannelID: f.meta.ChannelID, ChannelType: f.meta.ChannelType, Created: true,
+	}}, nil
+}
+
+func (f *runtimeMetaReaderFake) BatchGetChannelRuntimeMetas(_ context.Context, _ routing.Route, items []RuntimeMetaCreateItem) ([]RuntimeMetaReadResult, error) {
+	f.batchReads++
+	if len(items) != 1 {
+		return nil, metadb.ErrInvalidArgument
+	}
+	if f.err != nil {
+		return []RuntimeMetaReadResult{{Err: f.err}}, nil
+	}
+	return []RuntimeMetaReadResult{{Meta: f.meta}}, nil
 }
 
 type laggingRuntimeMetaStore struct {
 	upserts int
 	creates int
+	reads   int
 }
 
 func (f *laggingRuntimeMetaStore) GetChannelRuntimeMeta(context.Context, string, int64) (metadb.ChannelRuntimeMeta, error) {
@@ -3808,9 +4135,22 @@ func (f *laggingRuntimeMetaStore) UpsertChannelRuntimeMeta(context.Context, meta
 	return nil
 }
 
-func (f *laggingRuntimeMetaStore) CreateChannelRuntimeMeta(context.Context, metadb.ChannelRuntimeMeta) (RuntimeMetaCreateResult, error) {
+func (f *laggingRuntimeMetaStore) CreateChannelRuntimeMetaBatch(_ context.Context, _ routing.Route, items []RuntimeMetaCreateItem) ([]RuntimeMetaCreateResult, error) {
 	f.creates++
-	return RuntimeMetaCreateResult{Created: true}, nil
+	results := make([]RuntimeMetaCreateResult, len(items))
+	for i, item := range items {
+		results[i] = RuntimeMetaCreateResult{HashSlot: item.HashSlot, ChannelID: item.Meta.ChannelID, ChannelType: item.Meta.ChannelType, Created: true}
+	}
+	return results, nil
+}
+
+func (f *laggingRuntimeMetaStore) BatchGetChannelRuntimeMetas(_ context.Context, _ routing.Route, items []RuntimeMetaCreateItem) ([]RuntimeMetaReadResult, error) {
+	f.reads++
+	results := make([]RuntimeMetaReadResult, len(items))
+	for i := range results {
+		results[i].Err = metadb.ErrNotFound
+	}
+	return results, nil
 }
 
 type concurrentCreateRuntimeMetaStore struct {
@@ -3827,9 +4167,22 @@ func (f *concurrentCreateRuntimeMetaStore) GetChannelRuntimeMeta(context.Context
 	return f.authoritative, nil
 }
 
-func (f *concurrentCreateRuntimeMetaStore) CreateChannelRuntimeMeta(context.Context, metadb.ChannelRuntimeMeta) (RuntimeMetaCreateResult, error) {
+func (f *concurrentCreateRuntimeMetaStore) CreateChannelRuntimeMetaBatch(_ context.Context, _ routing.Route, items []RuntimeMetaCreateItem) ([]RuntimeMetaCreateResult, error) {
 	f.creates++
-	return RuntimeMetaCreateResult{Created: false}, nil
+	results := make([]RuntimeMetaCreateResult, len(items))
+	for i, item := range items {
+		results[i] = RuntimeMetaCreateResult{HashSlot: item.HashSlot, ChannelID: item.Meta.ChannelID, ChannelType: item.Meta.ChannelType, Created: false}
+	}
+	return results, nil
+}
+
+func (f *concurrentCreateRuntimeMetaStore) BatchGetChannelRuntimeMetas(_ context.Context, _ routing.Route, items []RuntimeMetaCreateItem) ([]RuntimeMetaReadResult, error) {
+	f.reads += len(items)
+	results := make([]RuntimeMetaReadResult, len(items))
+	for i := range results {
+		results[i].Meta = f.authoritative
+	}
+	return results, nil
 }
 
 type fakeEnsuringMetaSource struct {
@@ -3870,6 +4223,22 @@ func (r fakePlacementResolver) ResolveChannelPlacement(context.Context, ch.Chann
 	return r.placement, nil
 }
 
+func (r fakePlacementResolver) ResolveChannelPlacementBatch(_ context.Context, ids []ch.ChannelID, routes []routing.Route) ([]ChannelPlacement, error) {
+	if r.err != nil {
+		return nil, r.err
+	}
+	if len(ids) != len(routes) {
+		return nil, errors.New("unaligned placement batch")
+	}
+	placements := make([]ChannelPlacement, len(ids))
+	for i := range placements {
+		placements[i] = r.placement
+		placements[i].Replicas = append([]ch.NodeID(nil), r.placement.Replicas...)
+		placements[i].ISR = append([]ch.NodeID(nil), r.placement.ISR...)
+	}
+	return placements, nil
+}
+
 type fakePlacementRouter struct {
 	route routing.Route
 	err   error
@@ -3883,11 +4252,19 @@ func (r fakePlacementRouter) RouteKey(string) (routing.Route, error) {
 }
 
 type fakeDataNodeProvider struct {
-	nodes []uint64
+	revision    uint64
+	active      []uint64
+	schedulable []uint64
 }
 
-func (p fakeDataNodeProvider) DataNodes() []uint64 {
-	return append([]uint64(nil), p.nodes...)
+func (p fakeDataNodeProvider) PlacementDataNodes(_ context.Context, expectedRevision uint64) (PlacementDataNodeSet, error) {
+	if p.revision != expectedRevision {
+		return PlacementDataNodeSet{}, ch.ErrStaleMeta
+	}
+	return PlacementDataNodeSet{
+		Active:      append([]uint64(nil), p.active...),
+		Schedulable: append([]uint64(nil), p.schedulable...),
+	}, nil
 }
 
 type recordingShardCaller struct {

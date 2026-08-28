@@ -74,17 +74,20 @@ const (
 	TaskAppTaskAudit                     TaskID = "app/task_audit"
 	TaskAppPrometheusWait                TaskID = "app/prometheus_wait"
 	TaskAppDeliveryMetadata              TaskID = "app/delivery_metadata"
+	TaskAppBenchTerminalPrepare          TaskID = "app/bench_terminal_prepare"
 	TaskAPIHTTPServe                     TaskID = "api/http_serve"
 	TaskManagerHTTPServe                 TaskID = "manager/http_serve"
 	TaskManagerSnapshotFanout            TaskID = "manager/goroutine_snapshot_fanout"
 	TaskManagerDiagnosticsFanout         TaskID = "manager/diagnostics_fanout"
 	TaskManagerLatestMessagesFanout      TaskID = "manager/latest_messages_fanout"
 	TaskManagerOpsMCPAuditFanout         TaskID = "manager/ops_mcp_audit_fanout"
+	TaskManagerPrometheusQueryFanout     TaskID = "manager/prometheus_query_fanout"
 	TaskGatewayAsyncDispatch             TaskID = "gateway/async_dispatch"
 	TaskGatewayAsyncAuth                 TaskID = "gateway/async_auth"
 	TaskGatewayIdleMonitor               TaskID = "gateway/idle_monitor"
 	TaskGatewayTransportActor            TaskID = "gateway/transport_actor"
 	TaskGatewayTransportServe            TaskID = "gateway/transport_serve"
+	TaskGatewayAsyncDrain                TaskID = "gateway/async_drain"
 	TaskDeliveryManagerAsync             TaskID = "delivery/manager_async"
 	TaskOnlineDeliveryWorker             TaskID = "delivery/worker"
 	TaskOnlineDeliveryLifecycle          TaskID = "delivery/lifecycle"
@@ -112,6 +115,8 @@ const (
 	TaskClusterSlotLeaderRefresh         TaskID = "cluster/slot_leader_refresh"
 	TaskClusterRaftTransport             TaskID = "cluster/raft_transport"
 	TaskClusterObserveLoop               TaskID = "cluster/observe_loop"
+	TaskClusterMembershipBatch           TaskID = "cluster/membership_batch"
+	TaskClusterMetaCreateBatch           TaskID = "cluster/meta_create_batch"
 	TaskControllerRaftRun                TaskID = "controller/raft_run"
 	TaskControllerRaftApply              TaskID = "controller/raft_apply_scheduler"
 	TaskControllerRefresh                TaskID = "controller/refresh_loop"
@@ -120,11 +125,13 @@ const (
 	TaskSlotRaftApplyWorker              TaskID = "slot/raft_apply_worker"
 	TaskSlotConditionWaiter              TaskID = "slot/condition_waiter"
 	TaskSlotPermissionBatch              TaskID = "slot/permission_batch"
+	TaskSlotRuntimeMetaBatch             TaskID = "slot/runtime_meta_batch"
 	TaskChannelReactor                   TaskID = "channel/reactor"
 	TaskChannelReactorClose              TaskID = "channel/reactor_close"
 	TaskChannelStoreClose                TaskID = "channel/store_close"
 	TaskChannelTaskCancellation          TaskID = "channel/task_cancellation"
 	TaskChannelWorkerPool                TaskID = "channel/worker_pool"
+	TaskChannelQuorumOwner               TaskID = "channel/quorum_owner"
 	TaskDatabaseRaftWriteWorker          TaskID = "database/raft_write_worker"
 	TaskDatabaseRaftSnapshotGC           TaskID = "database/raft_snapshot_gc"
 	TaskDatabaseLatestMigration          TaskID = "database/latest_migration"
@@ -133,6 +140,8 @@ const (
 	TaskPresenceBatchResolve             TaskID = "presence/batch_resolve"
 	TaskMessagePermissionBatch           TaskID = "message/permission_batch"
 	TaskMessageDirectoryBatch            TaskID = "message/directory_batch"
+	TaskMessageDirectoryProjector        TaskID = "message/directory_projector"
+	TaskMessageDirectoryWorker           TaskID = "message/directory_worker"
 	TaskChannelAppendRouter              TaskID = "channelappend/router"
 	TaskChannelAppendPoolRelease         TaskID = "channelappend/pool_release"
 	TaskChannelAppendAdvanceScheduler    TaskID = "channelappend/advance_scheduler"
@@ -162,17 +171,20 @@ var defaultTaskCatalog = []TaskSpec{
 	{ID: TaskAppTaskAudit, Module: ModuleApp, Name: "task_audit", Kind: TaskKindSingleton, PanicPolicy: PanicPolicyRepanic, Expected: 1},
 	{ID: TaskAppPrometheusWait, Module: ModuleApp, Name: "prometheus_wait", Kind: TaskKindSingleton, PanicPolicy: PanicPolicyRecover, Expected: 1},
 	{ID: TaskAppDeliveryMetadata, Module: ModuleApp, Name: "delivery_metadata", Kind: TaskKindBurst, PanicPolicy: PanicPolicyRecover},
+	{ID: TaskAppBenchTerminalPrepare, Module: ModuleApp, Name: "bench_terminal_prepare", Kind: TaskKindBurst, PanicPolicy: PanicPolicyRepanic},
 	{ID: TaskAPIHTTPServe, Module: ModuleAPI, Name: "http_serve", Kind: TaskKindSingleton, PanicPolicy: PanicPolicyRepanic, Expected: 1},
 	{ID: TaskManagerHTTPServe, Module: ModuleManager, Name: "http_serve", Kind: TaskKindSingleton, PanicPolicy: PanicPolicyRepanic, Expected: 1},
 	{ID: TaskManagerSnapshotFanout, Module: ModuleManager, Name: "goroutine_snapshot_fanout", Kind: TaskKindBurst, PanicPolicy: PanicPolicyRecover},
 	{ID: TaskManagerDiagnosticsFanout, Module: ModuleManager, Name: "diagnostics_fanout", Kind: TaskKindBurst, PanicPolicy: PanicPolicyRecover},
 	{ID: TaskManagerLatestMessagesFanout, Module: ModuleManager, Name: "latest_messages_fanout", Kind: TaskKindBurst, PanicPolicy: PanicPolicyRecover},
 	{ID: TaskManagerOpsMCPAuditFanout, Module: ModuleManager, Name: "ops_mcp_audit_fanout", Kind: TaskKindBurst, PanicPolicy: PanicPolicyRecover},
+	{ID: TaskManagerPrometheusQueryFanout, Module: ModuleManager, Name: "prometheus_query_fanout", Kind: TaskKindBurst, PanicPolicy: PanicPolicyRecover},
 	{ID: TaskGatewayAsyncDispatch, Module: ModuleGateway, Name: "async_dispatch", Kind: TaskKindPool, PanicPolicy: PanicPolicyRecover},
 	{ID: TaskGatewayAsyncAuth, Module: ModuleGateway, Name: "async_auth", Kind: TaskKindPool, PanicPolicy: PanicPolicyRecover},
 	{ID: TaskGatewayIdleMonitor, Module: ModuleGateway, Name: "idle_monitor", Kind: TaskKindSingleton, PanicPolicy: PanicPolicyRepanic, Expected: 1},
 	{ID: TaskGatewayTransportActor, Module: ModuleGateway, Name: "transport_actor", Kind: TaskKindDynamic, PanicPolicy: PanicPolicyRepanic},
 	{ID: TaskGatewayTransportServe, Module: ModuleGateway, Name: "transport_serve", Kind: TaskKindDynamic, PanicPolicy: PanicPolicyRepanic},
+	{ID: TaskGatewayAsyncDrain, Module: ModuleGateway, Name: "async_drain", Kind: TaskKindBurst, PanicPolicy: PanicPolicyRepanic},
 	{ID: TaskDeliveryManagerAsync, Module: ModuleDelivery, Name: "manager_async", Kind: TaskKindPool, PanicPolicy: PanicPolicyRepanic},
 	{ID: TaskOnlineDeliveryWorker, Module: ModuleDelivery, Name: "worker", Kind: TaskKindPool, PanicPolicy: PanicPolicyRepanic},
 	{ID: TaskOnlineDeliveryLifecycle, Module: ModuleDelivery, Name: "lifecycle", Kind: TaskKindBurst, PanicPolicy: PanicPolicyRepanic},
@@ -200,6 +212,8 @@ var defaultTaskCatalog = []TaskSpec{
 	{ID: TaskClusterSlotLeaderRefresh, Module: ModuleCluster, Name: "slot_leader_refresh", Kind: TaskKindSingleton, PanicPolicy: PanicPolicyRepanic, Expected: 1},
 	{ID: TaskClusterRaftTransport, Module: ModuleCluster, Name: "raft_transport", Kind: TaskKindDynamic, PanicPolicy: PanicPolicyRepanic},
 	{ID: TaskClusterObserveLoop, Module: ModuleCluster, Name: "observe_loop", Kind: TaskKindSingleton, PanicPolicy: PanicPolicyRepanic, Expected: 1},
+	{ID: TaskClusterMembershipBatch, Module: ModuleCluster, Name: "membership_batch", Kind: TaskKindBurst, PanicPolicy: PanicPolicyRepanic},
+	{ID: TaskClusterMetaCreateBatch, Module: ModuleCluster, Name: "meta_create_batch", Kind: TaskKindDynamic, PanicPolicy: PanicPolicyRepanic},
 	{ID: TaskControllerRaftRun, Module: ModuleController, Name: "raft_run", Kind: TaskKindSingleton, PanicPolicy: PanicPolicyRepanic, Expected: 1},
 	{ID: TaskControllerRaftApply, Module: ModuleController, Name: "raft_apply_scheduler", Kind: TaskKindSingleton, PanicPolicy: PanicPolicyRepanic, Expected: 1},
 	{ID: TaskControllerRefresh, Module: ModuleController, Name: "refresh_loop", Kind: TaskKindSingleton, PanicPolicy: PanicPolicyRepanic, Expected: 1},
@@ -208,11 +222,13 @@ var defaultTaskCatalog = []TaskSpec{
 	{ID: TaskSlotRaftApplyWorker, Module: ModuleSlot, Name: "raft_apply_worker", Kind: TaskKindDynamic, PanicPolicy: PanicPolicyRepanic},
 	{ID: TaskSlotConditionWaiter, Module: ModuleSlot, Name: "condition_waiter", Kind: TaskKindDynamic, PanicPolicy: PanicPolicyRecover},
 	{ID: TaskSlotPermissionBatch, Module: ModuleSlot, Name: "permission_batch", Kind: TaskKindBurst, PanicPolicy: PanicPolicyRepanic},
+	{ID: TaskSlotRuntimeMetaBatch, Module: ModuleSlot, Name: "runtime_meta_batch", Kind: TaskKindBurst, PanicPolicy: PanicPolicyRepanic},
 	{ID: TaskChannelReactor, Module: ModuleChannel, Name: "reactor", Kind: TaskKindDynamic, PanicPolicy: PanicPolicyRepanic},
 	{ID: TaskChannelReactorClose, Module: ModuleChannel, Name: "reactor_close", Kind: TaskKindBurst, PanicPolicy: PanicPolicyRecover},
 	{ID: TaskChannelStoreClose, Module: ModuleChannel, Name: "store_close", Kind: TaskKindBurst, PanicPolicy: PanicPolicyRecover},
 	{ID: TaskChannelTaskCancellation, Module: ModuleChannel, Name: "task_cancellation", Kind: TaskKindDynamic, PanicPolicy: PanicPolicyRecover},
 	{ID: TaskChannelWorkerPool, Module: ModuleChannel, Name: "worker_pool", Kind: TaskKindPool, PanicPolicy: PanicPolicyRepanic},
+	{ID: TaskChannelQuorumOwner, Module: ModuleChannel, Name: "quorum_owner", Kind: TaskKindPool, PanicPolicy: PanicPolicyRepanic},
 	{ID: TaskDatabaseRaftWriteWorker, Module: ModuleDatabase, Name: "raft_write_worker", Kind: TaskKindSingleton, PanicPolicy: PanicPolicyRepanic, Expected: 1},
 	{ID: TaskDatabaseRaftSnapshotGC, Module: ModuleDatabase, Name: "raft_snapshot_gc", Kind: TaskKindBurst, PanicPolicy: PanicPolicyRecover},
 	{ID: TaskDatabaseLatestMigration, Module: ModuleDatabase, Name: "latest_migration", Kind: TaskKindBurst, PanicPolicy: PanicPolicyRecover},
@@ -221,6 +237,8 @@ var defaultTaskCatalog = []TaskSpec{
 	{ID: TaskPresenceBatchResolve, Module: ModulePresence, Name: "batch_resolve", Kind: TaskKindBurst, PanicPolicy: PanicPolicyRecover},
 	{ID: TaskMessagePermissionBatch, Module: ModuleMessage, Name: "permission_batch", Kind: TaskKindBurst, PanicPolicy: PanicPolicyRepanic},
 	{ID: TaskMessageDirectoryBatch, Module: ModuleMessage, Name: "directory_batch", Kind: TaskKindBurst, PanicPolicy: PanicPolicyRepanic},
+	{ID: TaskMessageDirectoryProjector, Module: ModuleMessage, Name: "directory_projector", Kind: TaskKindSingleton, PanicPolicy: PanicPolicyRepanic, Expected: 1},
+	{ID: TaskMessageDirectoryWorker, Module: ModuleMessage, Name: "directory_worker", Kind: TaskKindFixed, PanicPolicy: PanicPolicyRepanic, Expected: 8},
 	{ID: TaskChannelAppendRouter, Module: ModuleChannelAppend, Name: "router", Kind: TaskKindBurst, PanicPolicy: PanicPolicyRepanic},
 	{ID: TaskChannelAppendPoolRelease, Module: ModuleChannelAppend, Name: "pool_release", Kind: TaskKindBurst, PanicPolicy: PanicPolicyRecover},
 	{ID: TaskChannelAppendAdvanceScheduler, Module: ModuleChannelAppend, Name: "advance_scheduler", Kind: TaskKindSingleton, PanicPolicy: PanicPolicyRepanic, Expected: 1},

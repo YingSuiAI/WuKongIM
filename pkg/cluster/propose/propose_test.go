@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -322,7 +323,13 @@ func TestServiceProposeRemoteLeaderObservesStage(t *testing.T) {
 
 func TestServiceProposeRemoteNotLeader(t *testing.T) {
 	forward := &fakeForward{err: ErrNotLeader}
-	svc := NewService(Config{LocalNode: 1, Router: fakeRouter{route: routing.Route{HashSlot: 3, SlotID: 11, Leader: 2}}, Slots: &fakeSlots{}, Forward: forward})
+	svc := NewService(Config{
+		LocalNode:                1,
+		Router:                   fakeRouter{route: routing.Route{HashSlot: 3, SlotID: 11, Leader: 2}},
+		Slots:                    &fakeSlots{},
+		Forward:                  forward,
+		LeaderChangeRetryTimeout: 20 * time.Millisecond,
+	})
 	if err := svc.Propose(context.Background(), Request{Key: "u1", Command: []byte("cmd")}); !errors.Is(err, ErrNotLeader) {
 		t.Fatalf("Propose() error = %v, want ErrNotLeader", err)
 	}
@@ -373,6 +380,108 @@ func TestServiceProposeFallsBackToRoutePeerAfterRemoteNotLeader(t *testing.T) {
 	}
 	if forward.calls != 2 || forward.nodeID != 3 {
 		t.Fatalf("forward calls=%d node=%d, want peer fallback to node 3", forward.calls, forward.nodeID)
+	}
+}
+
+func TestServiceProposeFallsBackToRoutePeerAfterDefiniteDialFailure(t *testing.T) {
+	router := fakeRouter{route: routing.Route{HashSlot: 3, SlotID: 11, Leader: 2, Peers: []uint64{2, 3}}}
+	forward := &fakeForward{errs: []error{fmt.Errorf("dial node 2: %w", transport.ErrDialFailed), nil}}
+	svc := NewService(Config{LocalNode: 1, Router: router, Slots: &fakeSlots{}, Forward: forward})
+
+	if err := svc.Propose(context.Background(), Request{Key: "u1", Command: []byte("cmd")}); err != nil {
+		t.Fatalf("Propose() error = %v", err)
+	}
+	if forward.calls != 2 || forward.nodeID != 3 {
+		t.Fatalf("forward calls=%d node=%d, want definite dial failure fallback to node 3", forward.calls, forward.nodeID)
+	}
+}
+
+func TestServiceProposeReroutesAfterAllRouteTargetsWereDefinitelyNotDelivered(t *testing.T) {
+	router := &sequenceRouter{routes: []routing.Route{
+		{HashSlot: 3, SlotID: 11, Leader: 2, Peers: []uint64{2, 3}},
+		{HashSlot: 3, SlotID: 11, Leader: 4, Peers: []uint64{4}},
+	}}
+	forward := &fakeForward{errs: []error{
+		fmt.Errorf("dial node 2: %w", transport.ErrDialFailed),
+		fmt.Errorf("resolve node 3: %w", clusternet.ErrNodeNotFound),
+		nil,
+	}}
+	svc := NewService(Config{LocalNode: 1, Router: router, Slots: &fakeSlots{}, Forward: forward})
+
+	if err := svc.Propose(context.Background(), Request{Key: "u1", Command: []byte("cmd")}); err != nil {
+		t.Fatalf("Propose() error = %v", err)
+	}
+	if router.calls != 2 || forward.calls != 3 || forward.nodeID != 4 {
+		t.Fatalf("router calls=%d forward calls=%d node=%d, want peer fallback then reroute to node 4", router.calls, forward.calls, forward.nodeID)
+	}
+}
+
+func TestServiceProposeDoesNotRetryAmbiguousTransportFailure(t *testing.T) {
+	for _, retryUnsafe := range []error{
+		transport.ErrTimeout,
+		transport.ErrStopped,
+		errors.New("connection reset after request write"),
+	} {
+		t.Run(retryUnsafe.Error(), func(t *testing.T) {
+			router := &sequenceRouter{routes: []routing.Route{{HashSlot: 3, SlotID: 11, Leader: 2, Peers: []uint64{2, 3}}}}
+			forward := &fakeForward{err: retryUnsafe}
+			svc := NewService(Config{LocalNode: 1, Router: router, Slots: &fakeSlots{}, Forward: forward})
+
+			err := svc.Propose(context.Background(), Request{Key: "u1", Command: []byte("cmd")})
+			if !errors.Is(err, retryUnsafe) {
+				t.Fatalf("Propose() error = %v, want exact ambiguous failure %v", err, retryUnsafe)
+			}
+			if router.calls != 1 || forward.calls != 1 {
+				t.Fatalf("router calls=%d forward calls=%d, want no retry for ambiguous failure", router.calls, forward.calls)
+			}
+		})
+	}
+}
+
+func TestServiceProposeConfiguredRetryTimeoutBoundsLeaderElectionWait(t *testing.T) {
+	retryTimeout := 35 * time.Millisecond
+	forward := &fakeForward{err: ErrNotLeader}
+	svc := NewService(Config{
+		LocalNode:                1,
+		Router:                   fakeRouter{route: routing.Route{HashSlot: 3, SlotID: 11, Leader: 2}},
+		Slots:                    &fakeSlots{},
+		Forward:                  forward,
+		LeaderChangeRetryTimeout: retryTimeout,
+	})
+
+	started := time.Now()
+	err := svc.Propose(context.Background(), Request{Key: "u1", Command: []byte("cmd")})
+	elapsed := time.Since(started)
+	if !errors.Is(err, ErrNotLeader) {
+		t.Fatalf("Propose() error = %v, want ErrNotLeader", err)
+	}
+	if elapsed < retryTimeout || elapsed > 250*time.Millisecond {
+		t.Fatalf("retry elapsed = %s, want configured election wait %s", elapsed, retryTimeout)
+	}
+	if forward.calls < 2 {
+		t.Fatalf("forward calls = %d, want repeated reroutes during configured election wait", forward.calls)
+	}
+}
+
+func TestServiceProposeCallerContextShortensLeaderElectionWait(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+	forward := &fakeForward{err: ErrNotLeader}
+	svc := NewService(Config{
+		LocalNode:                1,
+		Router:                   fakeRouter{route: routing.Route{HashSlot: 3, SlotID: 11, Leader: 2}},
+		Slots:                    &fakeSlots{},
+		Forward:                  forward,
+		LeaderChangeRetryTimeout: time.Second,
+	})
+
+	started := time.Now()
+	err := svc.Propose(ctx, Request{Key: "u1", Command: []byte("cmd")})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Propose() error = %v, want caller deadline", err)
+	}
+	if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
+		t.Fatalf("Propose() elapsed = %s, caller deadline did not win", elapsed)
 	}
 }
 

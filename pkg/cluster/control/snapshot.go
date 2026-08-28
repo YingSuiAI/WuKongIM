@@ -187,6 +187,10 @@ type Snapshot struct {
 	Revision uint64
 	// ControllerID is the best-known Controller leader or owner node ID.
 	ControllerID uint64
+	// SlotReplicaCount is the last cluster-wide fully converged Slot voter count.
+	SlotReplicaCount uint16
+	// SlotReplicaCountTransition is present while Slots are being expanded.
+	SlotReplicaCountTransition *SlotReplicaCountTransition
 	// Nodes lists known cluster members.
 	Nodes []Node
 	// Slots lists desired physical Slot assignments.
@@ -201,6 +205,15 @@ type Snapshot struct {
 	OpsMCP *OpsMCPState
 	// ChannelDataPlaneLease is this node's local append-admission visibility lease.
 	ChannelDataPlaneLease ChannelDataPlaneLease
+}
+
+// SlotReplicaCountTransition is the read-model projection of the durable,
+// forward-only Slot voter-count transition.
+type SlotReplicaCountTransition struct {
+	SourceReplicaCount uint16   `json:"source_replica_count"`
+	TargetReplicaCount uint16   `json:"target_replica_count"`
+	StartedAtRevision  uint64   `json:"started_at_revision"`
+	TargetNodeIDs      []uint64 `json:"target_node_ids"`
 }
 
 // Node describes one cluster member in the control snapshot.
@@ -221,13 +234,19 @@ type Node struct {
 	CapacityWeight uint32
 }
 
-// NodeSchedulableForPlacement reports whether a node can receive new data placement.
-// A schedulable node must be data-role, effectively active, fresh alive, and runtime-ready.
-func NodeSchedulableForPlacement(node Node) bool {
+// NodeActiveDataMember reports whether a node remains an active durable member
+// of the data plane, independently of its current runtime health.
+func NodeActiveDataMember(node Node) bool {
 	if !hasRole(node.Roles, RoleData) {
 		return false
 	}
-	if effectiveJoinState(node.JoinState) != NodeJoinStateActive {
+	return effectiveJoinState(node.JoinState) == NodeJoinStateActive
+}
+
+// NodeSchedulableForPlacement reports whether a node can lead or acknowledge
+// new data placement. A schedulable node must also be a durable active member.
+func NodeSchedulableForPlacement(node Node) bool {
+	if !NodeActiveDataMember(node) {
 		return false
 	}
 	return node.Health.Freshness == NodeHealthFresh &&

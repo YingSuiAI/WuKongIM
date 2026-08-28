@@ -13,6 +13,24 @@
 
 `bun run build` writes the production bundle to `internal/access/manager/webui/dist`. The complete generated directory is committed because `cmd/wukongim` embeds it at Go build time. Commit the regenerated bundle with every production web source change; CI rebuilds it and rejects drift.
 
+## Browser release smoke
+
+The opt-in browser scenario builds the embedded production bundle, starts a
+real three-node cluster with 256 Hash Slots and ephemeral Manager credentials,
+then runs the desktop/mobile Chromium matrix against the public Manager URL:
+
+```bash
+(bun install --frozen-lockfile && bunx playwright install chromium && bun run build)
+cd ..
+WK_E2E_MANAGER_BROWSER=1 GOWORK=off go test -tags=e2e ./test/e2e/cluster/manager_browser_smoke -count=1 -timeout 5m -p=1 -v
+```
+
+The scenario rejects failed HTTP responses, browser console warnings/errors,
+and uncaught page errors. The
+[`manager-browser-smoke.yml`](../.github/workflows/manager-browser-smoke.yml)
+Safety Automation runs the same gate for relevant pull-request changes and
+uploads Playwright screenshots, video, and traces when it fails.
+
 ## Runtime Scope
 
 The web app provides the authenticated manager shell for WuKongIM operations:
@@ -33,7 +51,7 @@ The web app provides the authenticated manager shell for WuKongIM operations:
 | `/cluster/dashboard` | `GET /manager/overview`, `GET /manager/tasks`, `GET /manager/nodes`, `GET /manager/channel-cluster/summary`, `GET /manager/network/summary` | Implemented |
 | `/cluster/monitor` | `GET /manager/realtime-monitor`, optional `node_id` and `category` filters | Implemented |
 | `/cluster/nodes` | `GET /manager/nodes`, `GET /manager/nodes/:id`, `POST /manager/nodes/join`, `POST /manager/nodes/:id/activate`, per-node onboarding APIs, per-node scale-in APIs, and `GET /manager/nodes/:id/diagnostics` | Implemented |
-| `/cluster/slots` | `GET /manager/nodes`, `GET /manager/slots`, `GET /manager/slots/:id`, Slot leader single/batch transfer, recovery, and rebalance APIs | Implemented |
+| `/cluster/slots` | `GET /manager/nodes`, `GET /manager/slots`, and Controller-backed Slot leader single/batch transfer APIs. The list response is the detail read model; physical Slot add/remove, recovery, and hash-slot rebalance are not exposed without current Manager contracts. | Implemented |
 | `/cluster/channels?tab=overview` | `GET /manager/channel-cluster/summary` | Implemented |
 | `/cluster/channels?tab=list` | `GET /manager/channel-runtime-meta`, `GET /manager/channel-runtime-meta/:type/:id` | Implemented |
 | `/cluster/channels?tab=unhealthy` | `GET /manager/channel-cluster/unhealthy`, `GET /manager/channel-cluster/:type/:id/replicas`, `POST /manager/channel-cluster/:type/:id/repair`, `POST /manager/channel-cluster/:type/:id/leader/transfer` | Implemented |

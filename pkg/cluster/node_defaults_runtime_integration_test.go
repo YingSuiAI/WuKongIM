@@ -134,7 +134,7 @@ func TestNodeProbeWriteReadyProposesOneNoopPerPhysicalSlot(t *testing.T) {
 	}
 	node.router.UpdateSlotLeaders([]routing.SlotStatus{{SlotID: 1, Leader: 1}, {SlotID: 2, Leader: 2}})
 	node.snapshot = Snapshot{NodeID: 1, RoutesReady: true, SlotsReady: true, ChannelsReady: true, SlotCount: 2, HashSlotCount: 4}
-	node.channelDataNodes.Update([]uint64{1})
+	node.channelDataNodes.UpdateAtRevision(node.router.Table().Revision, []uint64{1}, []uint64{1})
 	node.started.Store(true)
 
 	if err := node.ProbeWriteReady(context.Background()); err != nil {
@@ -193,7 +193,7 @@ func TestNodeProbeWriteReadyBoundsPhysicalSlotProbes(t *testing.T) {
 	}
 	node.router.UpdateSlotLeaders(statuses)
 	node.snapshot = Snapshot{NodeID: 1, RoutesReady: true, SlotsReady: true, ChannelsReady: true, SlotCount: 6, HashSlotCount: 6}
-	node.channelDataNodes.Update([]uint64{1})
+	node.channelDataNodes.UpdateAtRevision(node.router.Table().Revision, []uint64{1}, []uint64{1})
 	node.started.Store(true)
 
 	if err := node.ProbeWriteReady(context.Background()); err != nil {
@@ -239,7 +239,7 @@ func TestNodeProbeWriteReadyRequiresChannelPlacementDataNodes(t *testing.T) {
 	node.started.Store(true)
 
 	err = node.ProbeWriteReady(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "channel placement candidates 0 below replica count 1") {
+	if err == nil || !strings.Contains(err.Error(), "active channel placement candidates 0 below replica count 1") {
 		t.Fatalf("ProbeWriteReady() error = %v, want channel placement candidate readiness error", err)
 	}
 	if proposer.calls != 0 {
@@ -271,7 +271,7 @@ func TestNodeProbeWriteReadyMarksChannelDataPlaneLeaseAfterSuccessfulProbe(t *te
 	}
 	node.router.UpdateSlotLeaders([]routing.SlotStatus{{SlotID: 1, Leader: 1}})
 	node.snapshot = Snapshot{NodeID: 1, RoutesReady: true, SlotsReady: true, ChannelsReady: true, SlotCount: 1, HashSlotCount: 1}
-	node.channelDataNodes.Update([]uint64{1})
+	node.channelDataNodes.UpdateAtRevision(node.router.Table().Revision, []uint64{1}, []uint64{1})
 	node.channels = noopChannelService{}
 	node.started.Store(true)
 
@@ -324,7 +324,7 @@ func TestNodeProbeWriteReadyRefreshesControlSnapshotForChannelPlacementDataNodes
 	if proposer.calls != 1 {
 		t.Fatalf("proposer calls = %d, want Slot probe after refreshed channel placement candidates", proposer.calls)
 	}
-	if got := node.channelDataNodes.DataNodes(); !reflect.DeepEqual(got, []uint64{1}) {
+	if got := node.channelDataNodes.SchedulableDataNodes(); !reflect.DeepEqual(got, []uint64{1}) {
 		t.Fatalf("channel data nodes = %v, want refreshed candidate", got)
 	}
 }
@@ -383,15 +383,16 @@ func TestNodeDefaultChannelsReceiveDataPlaneLeaseGuard(t *testing.T) {
 		t.Fatalf("default channels = %T, want *channels.Service", node.channels)
 	}
 	meta := channelruntime.Meta{
-		Key:         channelruntime.ChannelKey("1:lease-default"),
-		ID:          channelruntime.ChannelID{ID: "lease-default", Type: 1},
-		Epoch:       1,
-		LeaderEpoch: 1,
-		Leader:      1,
-		Replicas:    []channelruntime.NodeID{1},
-		ISR:         []channelruntime.NodeID{1},
-		MinISR:      1,
-		Status:      channelruntime.StatusActive,
+		Key:             channelruntime.ChannelKey("1:lease-default"),
+		ID:              channelruntime.ChannelID{ID: "lease-default", Type: 1},
+		Epoch:           1,
+		LeaderEpoch:     1,
+		RouteGeneration: 1,
+		Leader:          1,
+		Replicas:        []channelruntime.NodeID{1},
+		ISR:             []channelruntime.NodeID{1},
+		MinISR:          1,
+		Status:          channelruntime.StatusActive,
 	}
 	if err := service.ApplyMeta(meta); err != nil {
 		t.Fatalf("ApplyMeta() error = %v", err)
@@ -408,7 +409,7 @@ func TestNodeDefaultChannelsReceiveDataPlaneLeaseGuard(t *testing.T) {
 		t.Fatalf("Append() after lease mark error = %v", err)
 	}
 	if res.MessageSeq != 1 {
-		t.Fatalf("Append() seq = %d, want 1", res.MessageSeq)
+		t.Fatalf("Append() seq = %d, want first business proposal at 1", res.MessageSeq)
 	}
 }
 

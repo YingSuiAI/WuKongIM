@@ -102,13 +102,20 @@ describe('documentation navigation contract', () => {
       ['use-cases', 'published'],
     ]);
     expect(coreConcepts?.children.map((page) => [page.slug, page.status])).toEqual([
-      ['cluster-and-nodes', 'published'],
       ['messages', 'published'],
       ['channels', 'published'],
-      ['users-and-devices', 'published'],
+      ['users', 'published'],
+      ['devices', 'published'],
       ['conversations', 'published'],
     ]);
-    expect(integration?.children.find((page) => page.slug === 'plugins')?.status).toBe('published');
+    expect(
+      integration?.children
+        .filter((page) => ['plugins', 'acceptance'].includes(page.slug))
+        .map((page) => [page.slug, page.status]),
+    ).toEqual([
+      ['plugins', 'published'],
+      ['acceptance', 'published'],
+    ]);
   });
 
   test('publishes the complete scenario tutorial set', () => {
@@ -122,6 +129,81 @@ describe('documentation navigation contract', () => {
       ['push', 'published'],
       ['ai-and-iot', 'published'],
     ]);
+  });
+
+  test('publishes the Phase 12 JavaScript golden path and only its supporting API slice', () => {
+    const published = getIndexedNavigationEntries('en').map((entry) => entry.url);
+    const phase12Routes = [
+      '/en/sdk/compatibility',
+      '/en/sdk/javascript',
+      '/en/sdk/javascript/installation',
+      '/en/sdk/javascript/quickstart',
+      '/en/api/conventions',
+      '/en/api/authentication',
+      '/en/api/compatibility',
+      '/en/api/product-http',
+      '/en/api/product-http/users',
+      '/en/api/product-http/messages',
+      '/en/api/product-http/routing',
+      '/en/api/product-http/errors',
+      '/en/api/dictionaries',
+      '/en/api/dictionaries/reason-codes',
+    ];
+
+    expect(published).toEqual(expect.arrayContaining(phase12Routes));
+    expect(getNavigationEntry('en', 'sdk', ['javascript', 'api-reference'])?.status).toBe(
+      'planned',
+    );
+    expect(getNavigationEntry('en', 'api', ['specifications', 'openapi'])?.status).toBe(
+      'planned',
+    );
+  });
+
+  test('publishes the SDK chooser and integrator foundations without claiming new platform support', () => {
+    const published = getIndexedNavigationEntries('en').map((entry) => entry.url);
+    const phase13Routes = [
+      '/en/sdk/choose-sdk',
+      '/en/sdk/common-guides',
+      '/en/sdk/common-guides/identity-and-token',
+      '/en/sdk/common-guides/initialization-and-connection',
+      '/en/sdk/common-guides/messaging',
+      '/en/sdk/common-guides/custom-messages',
+      '/en/sdk/common-guides/conversations-and-unread',
+      '/en/sdk/common-guides/offline-and-push',
+      '/en/sdk/common-guides/multi-device',
+      '/en/sdk/common-guides/reconnect-and-errors',
+      '/en/api/dictionaries/channel-types',
+      '/en/api/dictionaries/device-flags',
+      '/en/api/dictionaries/message-flags',
+    ];
+
+    expect(published).toEqual(expect.arrayContaining(phase13Routes));
+    expect(getNavigationEntry('en', 'sdk', ['choose-sdk'])?.status).toBe('published');
+    for (const platform of ['android', 'ios', 'flutter', 'uniapp', 'harmonyos']) {
+      expect(getNavigationEntry('en', 'sdk', [platform])?.status).toBe('planned');
+    }
+    expect(getNavigationEntry('en', 'sdk', ['javascript'])?.status).toBe('published');
+  });
+
+  test('publishes the Phase 14 acceptance loop without broadening SDK support', () => {
+    const published = getIndexedNavigationEntries('en').map((entry) => entry.url);
+
+    expect(published).toEqual(
+      expect.arrayContaining([
+        '/en/guide/integration/acceptance',
+        '/en/sdk/javascript/platform-capabilities',
+      ]),
+    );
+    expect(
+      getNavigationEntry('en', 'sdk', ['javascript', 'platform-capabilities'])?.status,
+    ).toBe('published');
+    expect(getNavigationEntry('en', 'sdk', ['javascript', 'api-reference'])?.status).toBe(
+      'planned',
+    );
+    expect(getNavigationEntry('en', 'sdk', ['javascript', 'upgrade'])?.status).toBe('planned');
+    for (const platform of ['android', 'ios', 'flutter', 'uniapp', 'harmonyos']) {
+      expect(getNavigationEntry('en', 'sdk', [platform])?.status).toBe('planned');
+    }
   });
 
   test('gives every bilingual menu item a unique canonical route', () => {
@@ -154,10 +236,10 @@ describe('documentation navigation contract', () => {
         `/${locale}/guide/quick-start/chat-demo`,
         `/${locale}/guide/quick-start/next-steps`,
         `/${locale}/guide/core-concepts`,
-        `/${locale}/guide/core-concepts/cluster-and-nodes`,
         `/${locale}/guide/core-concepts/messages`,
         `/${locale}/guide/core-concepts/channels`,
-        `/${locale}/guide/core-concepts/users-and-devices`,
+        `/${locale}/guide/core-concepts/users`,
+        `/${locale}/guide/core-concepts/devices`,
         `/${locale}/guide/core-concepts/conversations`,
         `/${locale}/guide/integration`,
         `/${locale}/guide/integration/architecture`,
@@ -165,6 +247,7 @@ describe('documentation navigation contract', () => {
         `/${locale}/guide/integration/messaging`,
         `/${locale}/guide/integration/webhooks`,
         `/${locale}/guide/integration/plugins`,
+        `/${locale}/guide/integration/acceptance`,
         `/${locale}/guide/tutorials`,
         `/${locale}/guide/tutorials/direct-chat`,
         `/${locale}/guide/tutorials/large-groups`,
@@ -204,7 +287,35 @@ describe('documentation navigation contract', () => {
         `/${locale}/server/architecture/message-flow`,
         `/${locale}/server/architecture/user-routing`,
         `/${locale}/sdk`,
+        `/${locale}/sdk/choose-sdk`,
+        `/${locale}/sdk/compatibility`,
+        `/${locale}/sdk/common-guides`,
+        `/${locale}/sdk/common-guides/identity-and-token`,
+        `/${locale}/sdk/common-guides/initialization-and-connection`,
+        `/${locale}/sdk/common-guides/messaging`,
+        `/${locale}/sdk/common-guides/custom-messages`,
+        `/${locale}/sdk/common-guides/conversations-and-unread`,
+        `/${locale}/sdk/common-guides/offline-and-push`,
+        `/${locale}/sdk/common-guides/multi-device`,
+        `/${locale}/sdk/common-guides/reconnect-and-errors`,
+        `/${locale}/sdk/javascript`,
+        `/${locale}/sdk/javascript/installation`,
+        `/${locale}/sdk/javascript/quickstart`,
+        `/${locale}/sdk/javascript/platform-capabilities`,
         `/${locale}/api`,
+        `/${locale}/api/conventions`,
+        `/${locale}/api/authentication`,
+        `/${locale}/api/compatibility`,
+        `/${locale}/api/product-http`,
+        `/${locale}/api/product-http/users`,
+        `/${locale}/api/product-http/messages`,
+        `/${locale}/api/product-http/routing`,
+        `/${locale}/api/product-http/errors`,
+        `/${locale}/api/dictionaries`,
+        `/${locale}/api/dictionaries/channel-types`,
+        `/${locale}/api/dictionaries/device-flags`,
+        `/${locale}/api/dictionaries/message-flags`,
+        `/${locale}/api/dictionaries/reason-codes`,
       ]);
       expect(indexed.every((entry) => entry.status === 'published')).toBe(true);
     }
@@ -276,18 +387,26 @@ describe('documentation navigation contract', () => {
     expect(isPublishedContentPath('guide/product-overview/capabilities.en.mdx')).toBe(true);
     expect(isPublishedContentPath('guide/product-overview/use-cases.mdx')).toBe(true);
     expect(isPublishedContentPath('guide/product-overview/use-cases.en.mdx')).toBe(true);
-    expect(isPublishedContentPath('guide/core-concepts/cluster-and-nodes.mdx')).toBe(true);
-    expect(isPublishedContentPath('guide/core-concepts/cluster-and-nodes.en.mdx')).toBe(true);
     expect(isPublishedContentPath('guide/core-concepts/messages.mdx')).toBe(true);
     expect(isPublishedContentPath('guide/core-concepts/messages.en.mdx')).toBe(true);
     expect(isPublishedContentPath('guide/core-concepts/channels.mdx')).toBe(true);
     expect(isPublishedContentPath('guide/core-concepts/channels.en.mdx')).toBe(true);
-    expect(isPublishedContentPath('guide/core-concepts/users-and-devices.mdx')).toBe(true);
-    expect(isPublishedContentPath('guide/core-concepts/users-and-devices.en.mdx')).toBe(true);
+    expect(isPublishedContentPath('guide/core-concepts/users.mdx')).toBe(true);
+    expect(isPublishedContentPath('guide/core-concepts/users.en.mdx')).toBe(true);
+    expect(isPublishedContentPath('guide/core-concepts/devices.mdx')).toBe(true);
+    expect(isPublishedContentPath('guide/core-concepts/devices.en.mdx')).toBe(true);
     expect(isPublishedContentPath('guide/core-concepts/conversations.mdx')).toBe(true);
     expect(isPublishedContentPath('guide/core-concepts/conversations.en.mdx')).toBe(true);
+    expect(isPublishedContentPath('guide/core-concepts/cluster-and-nodes.mdx')).toBe(false);
+    expect(isPublishedContentPath('guide/core-concepts/users-and-devices.mdx')).toBe(false);
     expect(isPublishedContentPath('guide/integration/plugins.mdx')).toBe(true);
     expect(isPublishedContentPath('guide/integration/plugins.en.mdx')).toBe(true);
+    expect(isPublishedContentPath('guide/integration/acceptance.mdx')).toBe(true);
+    expect(isPublishedContentPath('guide/integration/acceptance.en.mdx')).toBe(true);
+    expect(isPublishedContentPath('sdk/choose-sdk.mdx')).toBe(true);
+    expect(isPublishedContentPath('sdk/choose-sdk.en.mdx')).toBe(true);
+    expect(isPublishedContentPath('sdk/javascript/platform-capabilities.mdx')).toBe(true);
+    expect(isPublishedContentPath('sdk/javascript/platform-capabilities.en.mdx')).toBe(true);
     expect(isPublishedContentPath('server/deployment/docker.mdx')).toBe(true);
     expect(isPublishedContentPath('server/deployment/docker.en.mdx')).toBe(true);
     expect(isPublishedContentPath('server/deployment/kubernetes.mdx')).toBe(false);

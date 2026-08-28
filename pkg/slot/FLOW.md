@@ -159,6 +159,11 @@ Channel migration active task scan:
   `Store.ListActiveChannelMigrationTasksForNode` 按 Slot 权威 leader 扫描 active task，仅以 `SourceNode` / `TargetNode` 判断节点参与关系；`OwnerNodeID` 只表示当前 executor，不算节点参与。NodeScaleIn 会把该结果与当前 `ChannelRuntimeMeta` 扫描结果再 join，用于统计 channel metadata 仍引用目标节点的 active task。
 ```
 
+权威 RPC 服务端是否本地执行只信本地 Multi-Raft Runtime 的实时
+`RoleLeader` 状态；异步刷新的前台 `LeaderOf` 仅用于给非 Leader 返回远端
+leader hint，不能授权本地读取。Slot 已完成新一轮选举但路由快照仍滞后时，
+新 Leader 会直接服务，不会继续把请求提示到旧 Leader。
+
 ### 5.3 Raft Ready 处理循环
 
 入口: `multiraft/runtime.go:runWorker` → `slot.go:processReady`

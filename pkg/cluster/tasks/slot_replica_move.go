@@ -167,7 +167,7 @@ func (e *SlotReplicaMoveExecutor) addLearner(ctx context.Context, task control.R
 		e.observePhase(task.Step, result, started)
 	}()
 	if containsNodeID(status.CurrentVoters, task.TargetNode) {
-		return e.advancePhase(ctx, task, control.TaskStepRemoveVoter, status)
+		return e.advancePhase(ctx, task, nextStepAfterReplicaPromotion(task), status)
 	}
 	if containsNodeID(status.CurrentLearners, task.TargetNode) {
 		return e.advancePhase(ctx, task, control.TaskStepPromoteLearner, status)
@@ -190,7 +190,7 @@ func (e *SlotReplicaMoveExecutor) addLearner(ctx context.Context, task control.R
 		return e.failTask(ctx, task, "slot replica move add learner observation timed out")
 	}
 	if containsNodeID(observed.CurrentVoters, task.TargetNode) {
-		return e.advancePhase(ctx, task, control.TaskStepRemoveVoter, observed)
+		return e.advancePhase(ctx, task, nextStepAfterReplicaPromotion(task), observed)
 	}
 	return e.advancePhase(ctx, task, control.TaskStepPromoteLearner, observed)
 }
@@ -205,7 +205,7 @@ func (e *SlotReplicaMoveExecutor) promoteLearner(ctx context.Context, task contr
 		e.observePhase(task.Step, result, started)
 	}()
 	if containsNodeID(status.CurrentVoters, task.TargetNode) {
-		return e.advancePhase(ctx, task, control.TaskStepRemoveVoter, status)
+		return e.advancePhase(ctx, task, nextStepAfterReplicaPromotion(task), status)
 	}
 	caughtUp, latest, err := e.waitLearnerCaughtUp(ctx, task, status)
 	if err != nil {
@@ -234,7 +234,14 @@ func (e *SlotReplicaMoveExecutor) promoteLearner(ctx context.Context, task contr
 		result = "timeout"
 		return e.failTask(ctx, task, "slot replica move promote learner observation timed out")
 	}
-	return e.advancePhase(ctx, task, control.TaskStepRemoveVoter, observed)
+	return e.advancePhase(ctx, task, nextStepAfterReplicaPromotion(task), observed)
+}
+
+func nextStepAfterReplicaPromotion(task control.ReconcileTask) control.TaskStep {
+	if task.SourceNode == 0 {
+		return control.TaskStepCommitAssignment
+	}
+	return control.TaskStepRemoveVoter
 }
 
 func (e *SlotReplicaMoveExecutor) removeVoter(ctx context.Context, task control.ReconcileTask, status multiraft.Status) (err error) {

@@ -5,10 +5,14 @@ import (
 	"sort"
 
 	ch "github.com/WuKongIM/WuKongIM/pkg/channel"
+	channelreplication "github.com/WuKongIM/WuKongIM/pkg/channel/replication"
 	channelwrapper "github.com/WuKongIM/WuKongIM/pkg/cluster/channels"
 	"github.com/WuKongIM/WuKongIM/pkg/cluster/control"
 	metadb "github.com/WuKongIM/WuKongIM/pkg/db/meta"
+	metafsm "github.com/WuKongIM/WuKongIM/pkg/slot/fsm"
 )
+
+const minimumMigrationTaskScanBudget = 16
 
 // ListRunnableMigrationTasks lists active migration tasks owned by locally led physical Slots.
 func (n *Node) ListRunnableMigrationTasks(ctx context.Context, localNode uint64, limit int) ([]metadb.ChannelMigrationTask, error) {
@@ -21,30 +25,106 @@ func (n *Node) ListRunnableMigrationTasks(ctx context.Context, localNode uint64,
 	if n.defaultSlotMetaDB == nil {
 		return nil, ErrNotStarted
 	}
-	slotIDs, err := n.LocalLeaderSlotIDs(ctx)
+	hashSlots, err := n.LocalLeaderHashSlots(ctx)
 	if err != nil {
 		return nil, err
 	}
-	snapshot, err := n.LocalControlSnapshot(ctx)
-	if err != nil {
-		return nil, err
+	n.channelMigrationScanMu.Lock()
+	defer n.channelMigrationScanMu.Unlock()
+	if len(hashSlots) == 0 {
+		n.clearChannelMigrationScanResume()
+		return nil, nil
 	}
+	n.pruneChannelMigrationScanCursors(hashSlots)
+	startIndex := n.channelMigrationScanStart(hashSlots)
+	scanBudget := limit
+	if scanBudget < minimumMigrationTaskScanBudget {
+		scanBudget = minimumMigrationTaskScanBudget
+	}
+	inspected := 0
 	out := make([]metadb.ChannelMigrationTask, 0, limit)
-	for _, slotID := range slotIDs {
-		hashSlots := hashSlotsOfPhysicalSlot(snapshot.HashSlots, slotID)
-		for _, hashSlot := range hashSlots {
-			remaining := limit - len(out)
-			if remaining <= 0 {
-				return out, nil
+	for visited := 0; visited < len(hashSlots) && inspected < scanBudget; visited++ {
+		index := (startIndex + visited) % len(hashSlots)
+		hashSlot := hashSlots[index]
+		cursor := n.channelMigrationScanCursors[hashSlot]
+		for inspected < scanBudget {
+			pageLimit := limit - len(out)
+			if remaining := scanBudget - inspected; pageLimit > remaining {
+				pageLimit = remaining
 			}
-			tasks, err := n.defaultSlotMetaDB.ForHashSlot(hashSlot).ListActiveChannelMigrationTasks(ctx, remaining)
+			tasks, next, done, scanned, err := n.defaultSlotMetaDB.ForHashSlot(uint16(hashSlot)).ScanActiveChannelMigrationTasks(ctx, cursor, pageLimit)
 			if err != nil {
 				return nil, err
 			}
-			out = append(out, tasks...)
+			inspected += scanned
+			cursor = next
+			n.setChannelMigrationTaskCursor(hashSlot, cursor)
+			for _, task := range tasks {
+				if task.IsTerminal() || task.Status == metadb.ChannelMigrationStatusBlocked {
+					continue
+				}
+				out = append(out, task)
+				if len(out) >= limit {
+					if done {
+						n.clearChannelMigrationTaskCursor(hashSlot)
+					}
+					n.setChannelMigrationScanNext(hashSlots[(index+1)%len(hashSlots)])
+					return out, nil
+				}
+			}
+			if done {
+				n.clearChannelMigrationTaskCursor(hashSlot)
+				break
+			}
+			if scanned == 0 {
+				break
+			}
 		}
+		n.setChannelMigrationScanNext(hashSlots[(index+1)%len(hashSlots)])
 	}
 	return out, nil
+}
+
+func (n *Node) channelMigrationScanStart(hashSlots []metadb.HashSlot) int {
+	if !n.channelMigrationScanSet {
+		return 0
+	}
+	index := sort.Search(len(hashSlots), func(i int) bool { return hashSlots[i] >= n.channelMigrationScanHashSlot })
+	if index == len(hashSlots) {
+		index = 0
+	}
+	return index
+}
+
+func (n *Node) setChannelMigrationScanNext(hashSlot metadb.HashSlot) {
+	n.channelMigrationScanSet = true
+	n.channelMigrationScanHashSlot = hashSlot
+}
+
+func (n *Node) setChannelMigrationTaskCursor(hashSlot metadb.HashSlot, cursor metadb.ChannelMigrationTaskCursor) {
+	if n.channelMigrationScanCursors == nil {
+		n.channelMigrationScanCursors = make(map[metadb.HashSlot]metadb.ChannelMigrationTaskCursor)
+	}
+	n.channelMigrationScanCursors[hashSlot] = cursor
+}
+
+func (n *Node) clearChannelMigrationTaskCursor(hashSlot metadb.HashSlot) {
+	delete(n.channelMigrationScanCursors, hashSlot)
+}
+
+func (n *Node) pruneChannelMigrationScanCursors(hashSlots []metadb.HashSlot) {
+	for hashSlot := range n.channelMigrationScanCursors {
+		index := sort.Search(len(hashSlots), func(i int) bool { return hashSlots[i] >= hashSlot })
+		if index == len(hashSlots) || hashSlots[index] != hashSlot {
+			delete(n.channelMigrationScanCursors, hashSlot)
+		}
+	}
+}
+
+func (n *Node) clearChannelMigrationScanResume() {
+	n.channelMigrationScanSet = false
+	n.channelMigrationScanHashSlot = 0
+	n.channelMigrationScanCursors = nil
 }
 
 // LocalLeaderSlotIDs returns physical Slot IDs currently led by this node.
@@ -68,6 +148,202 @@ func (n *Node) LocalLeaderSlotIDs(ctx context.Context) ([]uint32, error) {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
 	return out, nil
+}
+
+// LocalLeaderHashSlots returns physical hash slots whose logical Slot Raft
+// groups are currently led by this node.
+func (n *Node) LocalLeaderHashSlots(ctx context.Context) ([]metadb.HashSlot, error) {
+	slotIDs, err := n.LocalLeaderSlotIDs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	snapshot, err := n.LocalControlSnapshot(ctx)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]metadb.HashSlot, 0, int(snapshot.HashSlots.Count))
+	for _, slotID := range slotIDs {
+		for _, hashSlot := range hashSlotsOfPhysicalSlot(snapshot.HashSlots, slotID) {
+			result = append(result, metadb.HashSlot(hashSlot))
+		}
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i] < result[j] })
+	return result, nil
+}
+
+// IsLocalLeaderHashSlot reports whether this node currently leads the logical
+// Slot Raft group that owns hashSlot.
+func (n *Node) IsLocalLeaderHashSlot(ctx context.Context, hashSlot metadb.HashSlot) (bool, error) {
+	if err := ctxErr(ctx); err != nil {
+		return false, err
+	}
+	if err := n.ensureForeground(); err != nil {
+		return false, err
+	}
+	if n.defaultSlotProposer == nil {
+		return false, ErrNotStarted
+	}
+	route, err := n.RouteHashSlot(uint16(hashSlot))
+	if err != nil {
+		return false, err
+	}
+	return n.defaultSlotProposer.IsLocalLeader(route.SlotID), nil
+}
+
+// ListPersonDirectoryTaskPage reads one locally led source hash-slot page.
+func (n *Node) ListPersonDirectoryTaskPage(ctx context.Context, hashSlot metadb.HashSlot, after metadb.PersonDirectoryTaskCursor, limit int) ([]metadb.PersonDirectoryTask, metadb.PersonDirectoryTaskCursor, bool, error) {
+	if err := ctxErr(ctx); err != nil {
+		return nil, metadb.PersonDirectoryTaskCursor{}, false, err
+	}
+	if err := n.ensureForeground(); err != nil {
+		return nil, metadb.PersonDirectoryTaskCursor{}, false, err
+	}
+	if n.defaultSlotMetaDB == nil || n.defaultSlotProposer == nil {
+		return nil, metadb.PersonDirectoryTaskCursor{}, false, ErrNotStarted
+	}
+	route, err := n.RouteHashSlot(uint16(hashSlot))
+	if err != nil {
+		return nil, metadb.PersonDirectoryTaskCursor{}, false, err
+	}
+	if !n.defaultSlotProposer.IsLocalLeader(route.SlotID) {
+		return nil, metadb.PersonDirectoryTaskCursor{}, false, ErrNotLeader
+	}
+	return n.defaultSlotMetaDB.ForHashSlot(uint16(hashSlot)).ListPersonDirectoryTaskPage(ctx, after, limit)
+}
+
+// ValidatePersonDirectoryTasks rechecks exact source generations immediately
+// before UID-owned membership writes. Results remain aligned so one stale
+// source task cannot suppress independent projections in the same worker page.
+func (n *Node) ValidatePersonDirectoryTasks(ctx context.Context, tasks []metadb.PersonDirectoryTaskLocation) []error {
+	results := make([]error, len(tasks))
+	if err := ctxErr(ctx); err != nil {
+		return fillPersonDirectoryTaskErrors(results, err)
+	}
+	if err := n.ensureForeground(); err != nil {
+		return fillPersonDirectoryTaskErrors(results, err)
+	}
+	if len(tasks) == 0 || len(tasks) > metafsm.MaxPersonDirectoryBatchItems || n.defaultSlotMetaDB == nil || n.defaultSlotProposer == nil {
+		return fillPersonDirectoryTaskErrors(results, metadb.ErrInvalidArgument)
+	}
+	channelIDs := make([]string, len(tasks))
+	for i, task := range tasks {
+		if task.ChannelID == "" || task.ChannelType != 1 || task.Generation == 0 {
+			results[i] = metadb.ErrInvalidArgument
+		}
+		channelIDs[i] = task.ChannelID
+	}
+	routes, err := n.RouteKeysPartial(channelIDs)
+	if err != nil {
+		return fillUnsetPersonDirectoryTaskErrors(results, err)
+	}
+	for i, routed := range routes {
+		if results[i] != nil {
+			continue
+		}
+		if routed.Err != nil {
+			results[i] = routed.Err
+			continue
+		}
+		route := routed.Route
+		if route.HashSlot != uint16(tasks[i].HashSlot) || !n.defaultSlotProposer.IsLocalLeader(route.SlotID) {
+			results[i] = metadb.ErrStaleMeta
+			continue
+		}
+		current, ok, readErr := n.defaultSlotMetaDB.ForHashSlot(route.HashSlot).GetPersonDirectoryTask(ctx, tasks[i].ChannelID, tasks[i].ChannelType)
+		switch {
+		case readErr != nil:
+			results[i] = readErr
+		case !ok || current.Generation != tasks[i].Generation:
+			results[i] = metadb.ErrStaleMeta
+		}
+	}
+	return results
+}
+
+// CompletePersonDirectoryTasks commits task deletion and ready state in
+// bounded commands grouped by the current source Slot leaders.
+func (n *Node) CompletePersonDirectoryTasks(ctx context.Context, tasks []metadb.PersonDirectoryTaskLocation) []error {
+	results := make([]error, len(tasks))
+	if err := ctxErr(ctx); err != nil {
+		return fillPersonDirectoryTaskErrors(results, err)
+	}
+	if err := n.ensureForeground(); err != nil {
+		return fillPersonDirectoryTaskErrors(results, err)
+	}
+	if len(tasks) == 0 || len(tasks) > metafsm.MaxPersonDirectoryBatchItems {
+		return fillPersonDirectoryTaskErrors(results, metadb.ErrInvalidArgument)
+	}
+	channelIDs := make([]string, len(tasks))
+	for i, task := range tasks {
+		if task.ChannelID == "" || task.ChannelType != 1 || task.Generation == 0 {
+			results[i] = metadb.ErrInvalidArgument
+		}
+		channelIDs[i] = task.ChannelID
+	}
+	routes, err := n.RouteKeysPartial(channelIDs)
+	if err != nil {
+		return fillUnsetPersonDirectoryTaskErrors(results, err)
+	}
+	type completionItem struct {
+		item  metafsm.PersonDirectoryCompletionBatchItem
+		index int
+	}
+	groups := make(map[uint32][]completionItem)
+	for i, routed := range routes {
+		if results[i] != nil {
+			continue
+		}
+		if routed.Err != nil {
+			results[i] = routed.Err
+			continue
+		}
+		route := routed.Route
+		if route.HashSlot != uint16(tasks[i].HashSlot) {
+			results[i] = metadb.ErrStaleMeta
+			continue
+		}
+		groups[route.SlotID] = append(groups[route.SlotID], completionItem{
+			item: metafsm.PersonDirectoryCompletionBatchItem{HashSlot: route.HashSlot, ChannelID: tasks[i].ChannelID, ChannelType: tasks[i].ChannelType, Generation: tasks[i].Generation}, index: i,
+		})
+	}
+	slotIDs := make([]uint32, 0, len(groups))
+	for slotID := range groups {
+		slotIDs = append(slotIDs, slotID)
+	}
+	sort.Slice(slotIDs, func(i, j int) bool { return slotIDs[i] < slotIDs[j] })
+	for _, slotID := range slotIDs {
+		group := groups[slotID]
+		items := make([]metafsm.PersonDirectoryCompletionBatchItem, len(group))
+		for i := range group {
+			items[i] = group[i].item
+		}
+		command, err := metafsm.EncodeCompletePersonDirectoryTaskBatchCommandChecked(items)
+		if err == nil {
+			err = n.Propose(ctx, ProposeRequest{Command: command, Target: ProposeTarget{
+				HashSlot: items[0].HashSlot, HasHashSlot: true, SlotID: slotID, HasSlotID: true,
+			}})
+		}
+		for _, grouped := range group {
+			results[grouped.index] = err
+		}
+	}
+	return results
+}
+
+func fillPersonDirectoryTaskErrors(results []error, err error) []error {
+	for i := range results {
+		results[i] = err
+	}
+	return results
+}
+
+func fillUnsetPersonDirectoryTaskErrors(results []error, err error) []error {
+	for i := range results {
+		if results[i] == nil {
+			results[i] = err
+		}
+	}
+	return results
 }
 
 // ListChannelRuntimeMetaPage reads runtime metadata rows for legacy callers that do not need hash-slot provenance.
@@ -121,6 +397,34 @@ func (n *Node) ProbeChannel(ctx context.Context, nodeID uint64, channelID string
 	return *resp.RuntimeProbe, nil
 }
 
+// ProbeChannelReplica reads the exact durable quorum-replica frontier used by
+// dead-leader recovery. It never loads or mutates a Channel reactor runtime.
+func (n *Node) ProbeChannelReplica(ctx context.Context, nodeID uint64, meta metadb.ChannelRuntimeMeta) (ch.RuntimeProbeChannel, error) {
+	if err := ctxErr(ctx); err != nil {
+		return ch.RuntimeProbeChannel{}, err
+	}
+	meta = metadb.NormalizeChannelRuntimeMeta(meta)
+	if n == nil || nodeID == 0 || meta.ChannelID == "" || meta.ChannelType < 0 {
+		return ch.RuntimeProbeChannel{}, ErrNotStarted
+	}
+	if nodeID == n.cfg.NodeID {
+		return n.probeLocalChannelReplica(ctx, meta)
+	}
+	resp, err := n.callChannelMigrationMetaRPC(ctx, nodeID, channelMigrationMetaRPCRequest{
+		Op:          channelMigrationMetaOpReplicaProbe,
+		ChannelID:   meta.ChannelID,
+		ChannelType: meta.ChannelType,
+		RuntimeMeta: &meta,
+	})
+	if err != nil {
+		return ch.RuntimeProbeChannel{}, err
+	}
+	if resp.RuntimeProbe == nil {
+		return ch.RuntimeProbeChannel{}, ch.ErrChannelNotFound
+	}
+	return *resp.RuntimeProbe, nil
+}
+
 // DrainChannel reads one local or remote Channel drain proof.
 func (n *Node) DrainChannel(ctx context.Context, nodeID uint64, req ch.DrainChannelRequest) (ch.DrainChannelResult, error) {
 	if err := ctxErr(ctx); err != nil {
@@ -163,6 +467,54 @@ func (n *Node) ApplyChannelMeta(ctx context.Context, nodeID uint64, meta metadb.
 	return err
 }
 
+// CatchUpChannelReplica asks the authoritative Channel leader to install its
+// durable prefix on a replacement target before Slot metadata promotes it.
+func (n *Node) CatchUpChannelReplica(ctx context.Context, leaderNode, targetNode uint64, meta metadb.ChannelRuntimeMeta, through uint64) error {
+	if err := ctxErr(ctx); err != nil {
+		return err
+	}
+	if n == nil || leaderNode == 0 || targetNode == 0 || through == 0 {
+		return ErrNotStarted
+	}
+	if leaderNode == n.cfg.NodeID {
+		return n.catchUpLocalChannelReplica(ctx, targetNode, meta, through)
+	}
+	_, err := n.callChannelMigrationMetaRPC(ctx, leaderNode, channelMigrationMetaRPCRequest{
+		Op: channelMigrationMetaOpReplicaCatchUp, RuntimeMeta: &meta, TargetNode: targetNode, Through: through,
+	})
+	return err
+}
+
+func (n *Node) catchUpLocalChannelReplica(ctx context.Context, targetNode uint64, meta metadb.ChannelRuntimeMeta, through uint64) error {
+	if err := ctxErr(ctx); err != nil {
+		return err
+	}
+	if n == nil || n.defaultChannelReplication == nil {
+		return ErrNotStarted
+	}
+	meta = metadb.NormalizeChannelRuntimeMeta(meta)
+	id := ch.ChannelID{ID: meta.ChannelID, Type: uint8(meta.ChannelType)}
+	if id.ID == "" || meta.Leader != n.cfg.NodeID || targetNode == 0 || targetNode == n.cfg.NodeID ||
+		!containsNodeID(meta.Replicas, targetNode) || through == 0 {
+		return ch.ErrInvalidConfig
+	}
+	authority := channelreplication.Authority{
+		Key: ch.ChannelKeyForID(id), ChannelID: id,
+		ID:     channelreplication.AuthorityID{ChannelEpoch: meta.ChannelEpoch, LeaderTerm: meta.LeaderEpoch, FenceVersion: meta.RouteGeneration},
+		Leader: ch.NodeID(meta.Leader), Voters: channelMigrationNodeIDs(meta.ISR), WriteQuorum: int(meta.MinISR),
+		WriteFence: channelwrapper.ProjectRuntimeMeta(meta).WriteFence,
+	}
+	return n.defaultChannelReplication.CatchUpReplica(ctx, authority, ch.NodeID(targetNode), through)
+}
+
+func channelMigrationNodeIDs(nodes []uint64) []ch.NodeID {
+	result := make([]ch.NodeID, len(nodes))
+	for index, node := range nodes {
+		result[index] = ch.NodeID(node)
+	}
+	return result
+}
+
 func (n *Node) probeLocalChannelRuntime(ctx context.Context, channelID string, channelType uint8) (ch.RuntimeProbeChannel, error) {
 	id := ch.ChannelID{ID: channelID, Type: channelType}
 	result, err := n.ChannelRuntimeProbe(ctx, ch.RuntimeSelector{ChannelIDs: []ch.ChannelID{id}})
@@ -175,6 +527,37 @@ func (n *Node) probeLocalChannelRuntime(ctx context.Context, channelID string, c
 		}
 	}
 	return ch.RuntimeProbeChannel{}, ch.ErrChannelNotFound
+}
+
+func (n *Node) probeLocalChannelReplica(ctx context.Context, meta metadb.ChannelRuntimeMeta) (ch.RuntimeProbeChannel, error) {
+	if n == nil || n.defaultChannelReplication == nil {
+		return ch.RuntimeProbeChannel{}, ErrNotStarted
+	}
+	meta = metadb.NormalizeChannelRuntimeMeta(meta)
+	id := ch.ChannelID{ID: meta.ChannelID, Type: uint8(meta.ChannelType)}
+	if id.ID == "" || !containsNodeID(meta.Replicas, n.cfg.NodeID) {
+		return ch.RuntimeProbeChannel{}, ch.ErrChannelNotFound
+	}
+	state, err := n.defaultChannelReplication.ProbeReplica(ctx, ch.ChannelKeyForID(id), id)
+	if err != nil {
+		return ch.RuntimeProbeChannel{}, err
+	}
+	// An empty store carries no durable authority identity. Treat it as missing
+	// instead of projecting the caller's metadata into a synthetic proof.
+	if state.LEO == 0 {
+		return ch.RuntimeProbeChannel{}, ch.ErrChannelNotFound
+	}
+	channelEpoch := state.Manifest.ChannelEpoch
+	leaderEpoch := state.Manifest.LeaderTerm
+	role := ch.RoleFollower
+	if meta.Leader == n.cfg.NodeID {
+		role = ch.RoleLeader
+	}
+	return ch.RuntimeProbeChannel{
+		ChannelID: id, ChannelEpoch: channelEpoch, LeaderEpoch: leaderEpoch,
+		Role: role, Status: ch.Status(meta.Status), LEO: state.LEO, HW: state.Committed,
+		CheckpointHW: state.Committed, WriteFence: channelwrapper.ProjectRuntimeMeta(meta).WriteFence,
+	}, nil
 }
 
 func (n *Node) applyChannelMigrationLocalRuntimeMeta(ctx context.Context, meta metadb.ChannelRuntimeMeta) error {

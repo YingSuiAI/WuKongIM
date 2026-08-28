@@ -45,11 +45,29 @@ func TestConfigDefaultsSingleNodeControl(t *testing.T) {
 	if cfg.Channel.TickInterval != 50*time.Millisecond {
 		t.Fatalf("Channel.TickInterval default = %s, want 50ms", cfg.Channel.TickInterval)
 	}
-	if cfg.Channel.RPCWorkers != 160 || cfg.Channel.RPCBatchMaxItems != 16 {
-		t.Fatalf("Channel RPC defaults = %d/%d, want 160/16", cfg.Channel.RPCWorkers, cfg.Channel.RPCBatchMaxItems)
+	if cfg.Channel.RPCWorkers != 96 || cfg.Channel.RPCBatchMaxItems != 8 {
+		t.Fatalf("Channel RPC defaults = %d/%d, want 96/8", cfg.Channel.RPCWorkers, cfg.Channel.RPCBatchMaxItems)
 	}
 	if cfg.Storage.CommitShards != 1 {
 		t.Fatalf("Storage.CommitShards default = %d, want 1", cfg.Storage.CommitShards)
+	}
+}
+
+func TestConfigDefaultSlotRaftTimingUsesResilientCloudProfile(t *testing.T) {
+	cfg := Config{NodeID: 1, ListenAddr: "127.0.0.1:0", DataDir: t.TempDir()}
+	cfg.applyDefaults()
+
+	if cfg.Slots.TickInterval != 50*time.Millisecond || cfg.Slots.ElectionTick != 40 || cfg.Slots.HeartbeatTick != 2 {
+		t.Fatalf("Slot Raft timing defaults = %s/%d/%d, want 50ms/40/2", cfg.Slots.TickInterval, cfg.Slots.ElectionTick, cfg.Slots.HeartbeatTick)
+	}
+	if electionFloor := cfg.Slots.TickInterval * time.Duration(cfg.Slots.ElectionTick); electionFloor != 2*time.Second {
+		t.Fatalf("Slot Raft election floor = %s, want 2s", electionFloor)
+	}
+	if heartbeatInterval := cfg.Slots.TickInterval * time.Duration(cfg.Slots.HeartbeatTick); heartbeatInterval != 100*time.Millisecond {
+		t.Fatalf("Slot Raft heartbeat interval = %s, want 100ms", heartbeatInterval)
+	}
+	if retryTimeout := slotLeaderChangeRetryTimeout(cfg.Slots.TickInterval, cfg.Slots.ElectionTick); retryTimeout != 4010*time.Millisecond {
+		t.Fatalf("Slot leader-change retry timeout = %s, want 4.01s maximum election window plus route publication", retryTimeout)
 	}
 }
 

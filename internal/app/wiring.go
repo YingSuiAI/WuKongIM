@@ -22,6 +22,7 @@ import (
 	"github.com/WuKongIM/WuKongIM/internal/runtime/channelappend"
 	"github.com/WuKongIM/WuKongIM/internal/runtime/online"
 	runtimeops "github.com/WuKongIM/WuKongIM/internal/runtime/opsmcp"
+	"github.com/WuKongIM/WuKongIM/internal/runtime/persondirectory"
 	authoritypresence "github.com/WuKongIM/WuKongIM/internal/runtime/presence"
 	channelusecase "github.com/WuKongIM/WuKongIM/internal/usecase/channel"
 	cmdsyncusecase "github.com/WuKongIM/WuKongIM/internal/usecase/cmdsync"
@@ -278,11 +279,51 @@ func (a *App) wireDeliveryMetadata() {
 	}
 }
 
+func (a *App) wirePersonDirectoryProjector() error {
+	if a.personDirectoryProjector != nil {
+		return nil
+	}
+	source, sourceOK := a.cluster.(persondirectory.TaskSource)
+	memberships, membershipsOK := a.cluster.(clusterinfra.PersonDirectoryMembershipNode)
+	if !sourceOK && !membershipsOK {
+		return nil
+	}
+	if !sourceOK || !membershipsOK {
+		return fmt.Errorf("internal/app: incomplete person-directory cluster ports")
+	}
+	projector, err := persondirectory.New(persondirectory.Options{
+		Source:      source,
+		Memberships: clusterinfra.NewPersonDirectoryMembershipWriter(memberships),
+		Goroutines:  a.goroutines,
+		Observer:    personDirectoryPressureMetricsObserver{metrics: a.metrics},
+	})
+	if err != nil {
+		return fmt.Errorf("internal/app: wire person-directory projector: %w", err)
+	}
+	a.personDirectoryProjector = projector
+	return nil
+}
+
+type personDirectoryPressureMetricsObserver struct {
+	metrics *obsmetrics.Registry
+}
+
+func (o personDirectoryPressureMetricsObserver) ObservePersonDirectoryPressure(observation persondirectory.PressureObservation) {
+	if o.metrics == nil {
+		return
+	}
+	o.metrics.RuntimePressure.SetPoolWorkers("message", "person_directory", observation.Workers)
+	o.metrics.RuntimePressure.SetPoolInflight("message", "person_directory", observation.Inflight)
+	o.metrics.RuntimePressure.SetQueue("message", "person_directory", "task", "none", obsmetrics.RuntimePressureQueueObservation{
+		Depth: observation.Pending, Capacity: observation.Capacity,
+	})
+}
+
 func (a *App) wireChannels() {
 	if a.channels == nil {
 		if node, ok := a.cluster.(clusterinfra.ChannelMetadataNode); ok {
 			metadata := a.ensureChannelAppendMetadataCache()
-			store := clusterinfra.NewChannelMetadataStore(node, metadata)
+			store := clusterinfra.NewChannelMetadataStore(node, metadata, a.goroutines)
 			channelOptions := channelusecase.Options{
 				Store:                         store,
 				LargeGroupSubscriberThreshold: a.cfg.Channel.LargeGroupSubscriberThreshold,
@@ -316,7 +357,7 @@ func (a *App) wireConversations(conversationReadStore *clusterinfra.Conversation
 				_, hasBatch := channelNode.(clusterinfra.AuthoritativePermissionBatchNode)
 				_, hasRepair := channelNode.(clusterinfra.ChannelMembershipNode)
 				if hasBatch && hasRepair {
-					options.MembershipAuthority = clusterinfra.NewChannelMetadataStore(channelNode, a.ensureChannelAppendMetadataCache())
+					options.MembershipAuthority = clusterinfra.NewChannelMetadataStore(channelNode, a.ensureChannelAppendMetadataCache(), a.goroutines)
 				}
 			}
 			a.conversations = conversationusecase.New(options)
@@ -612,7 +653,7 @@ func (a *App) wireUsers() {
 			userStore := clusterinfra.NewUserMetadataStore(node)
 			var systemUIDs userusecase.SystemUIDStore
 			if channelNode, ok := a.cluster.(clusterinfra.ChannelMetadataNode); ok {
-				systemUIDs = clusterinfra.NewChannelMetadataStore(channelNode, nil)
+				systemUIDs = clusterinfra.NewChannelMetadataStore(channelNode, nil, a.goroutines)
 			}
 			a.users = userusecase.New(userusecase.Options{
 				Users:        userStore,
@@ -729,7 +770,8 @@ func (a *App) wireMessages() {
 			messageOpts.SendHook = a.plugins
 		}
 		if channelNode, ok := a.cluster.(clusterinfra.ChannelMetadataNode); ok {
-			channelStore := clusterinfra.NewChannelMetadataStore(channelNode, a.ensureChannelAppendMetadataCache())
+			channelStore := clusterinfra.NewChannelMetadataStore(channelNode, a.ensureChannelAppendMetadataCache(), a.goroutines)
+			a.messageChannelStore = channelStore
 			messageOpts.PermissionStore = channelStore
 			if _, ok := channelNode.(clusterinfra.AuthoritativePermissionBatchNode); ok {
 				messageOpts.PermissionBatchStore = channelStore
@@ -738,8 +780,8 @@ func (a *App) wireMessages() {
 				}
 			}
 			messageOpts.ChannelState = channelStore
-			if _, ok := a.cluster.(clusterinfra.PersonDirectoryNode); ok {
-				messageOpts.PersonDirectory = channelStore
+			if _, ok := a.cluster.(clusterinfra.PersonDirectoryNode); ok && a.personDirectoryProjector != nil {
+				channelStore.SetPersonDirectoryWake(a.personDirectoryProjector.Wake)
 			}
 		}
 		if readNode, ok := a.cluster.(clusterinfra.ChannelMessageReadNode); ok {
@@ -807,6 +849,7 @@ func (a *App) wireAPI() {
 			Gateway:                  apiGatewayAddresses(a.cfg.API, a.cfg.Gateway.Listeners),
 			BenchRuntime:             a.benchRuntimeController(),
 			BenchPresence:            a.benchPresenceController(),
+			BenchTerminalFence:       a.benchTerminalController(),
 			BenchData:                a.deliveryMeta,
 			Channels:                 a.channels,
 			Users:                    a.users,
@@ -960,11 +1003,12 @@ func (a *App) newManagerMonitorProvider(control managerClusterControlReader) acc
 		nodeID = a.cfg.Cluster.NodeID
 	}
 	base := newManagerPrometheusMonitorProvider(managerPrometheusMonitorOptions{
-		Enabled:  a.cfg.Observability.MetricsEnabled && strings.TrimSpace(prometheusBaseURL) != "",
-		BaseURL:  prometheusBaseURL,
-		NodeID:   nodeID,
-		NodeName: fmt.Sprintf("node-%d", nodeID),
-		Control:  control,
+		Enabled:    a.cfg.Observability.MetricsEnabled && strings.TrimSpace(prometheusBaseURL) != "",
+		BaseURL:    prometheusBaseURL,
+		NodeID:     nodeID,
+		NodeName:   fmt.Sprintf("node-%d", nodeID),
+		Control:    control,
+		Goroutines: a.goroutines,
 	})
 	var remote managerGoroutineSnapshotReader
 	if node, ok := a.cluster.(accessnode.PresenceRPCNode); ok {

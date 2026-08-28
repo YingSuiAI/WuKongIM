@@ -73,7 +73,15 @@ func normalizeNodeHealthReportTTL(ttl time.Duration) time.Duration {
 }
 
 func snapshotFromControllerState(st controller.ClusterState, leaderID uint64, now time.Time, healthTTL time.Duration) Snapshot {
-	snap := Snapshot{ClusterID: st.ClusterID, Revision: st.Revision, ControllerID: leaderID, Nodes: make([]Node, 0, len(st.Nodes)), Slots: make([]SlotAssignment, 0, len(st.Slots)), Tasks: make([]ReconcileTask, 0, len(st.Tasks))}
+	snap := Snapshot{ClusterID: st.ClusterID, Revision: st.Revision, ControllerID: leaderID, SlotReplicaCount: st.Config.ReplicaCount, Nodes: make([]Node, 0, len(st.Nodes)), Slots: make([]SlotAssignment, 0, len(st.Slots)), Tasks: make([]ReconcileTask, 0, len(st.Tasks))}
+	if st.SlotReplicaCountTransition != nil {
+		snap.SlotReplicaCountTransition = &SlotReplicaCountTransition{
+			SourceReplicaCount: st.SlotReplicaCountTransition.SourceReplicaCount,
+			TargetReplicaCount: st.SlotReplicaCountTransition.TargetReplicaCount,
+			StartedAtRevision:  st.SlotReplicaCountTransition.StartedAtRevision,
+			TargetNodeIDs:      append([]uint64(nil), st.SlotReplicaCountTransition.TargetNodeIDs...),
+		}
+	}
 	if st.ScheduledBackup != nil &&
 		st.ScheduledBackup.ActiveRestore != nil &&
 		st.ScheduledBackup.ActiveRestore.MaintenanceEntered {

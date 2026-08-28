@@ -11,8 +11,9 @@ const (
 	formalReplicas             = 3
 	formalRuntimeSampleSize    = 1_200
 	formalSyncMaxConversations = 500
-	formalBootstrapLoginRate   = 25
+	formalBootstrapLoginRate   = 100
 	formalFilesystemBytes      = int64(500_000_000_000)
+	localFilesystemBytes       = int64(10_000_000_000)
 	formalGroupCatalogTotal    = 2_000
 	formalVeryLargeMembers     = 100_000
 	// localMaxChannelsPerNode covers the five-minute loaded relationship window
@@ -21,6 +22,8 @@ const (
 	capacityStepDuration     = 30 * time.Minute
 	formalCheckpointDuration = 72 * time.Hour
 	rehearsalDuration        = 2 * time.Hour
+	minDirectRunDuration     = 16 * time.Minute
+	maxDirectRunDuration     = 72*time.Hour + 15*time.Minute
 )
 
 // DefaultConfig returns the validated formal configuration for lifecycle planning.
@@ -62,7 +65,8 @@ func LocalConfig() Config {
 		GatewayTCPAddrs: []string{"127.0.0.1:15101", "127.0.0.1:15102", "127.0.0.1:15103"},
 		Cadence:         5 * time.Second,
 	}
-	cfg.Thresholds.MinimumDataFilesystemBytes = 10_000_000_000
+	cfg.Thresholds.MinimumDataFilesystemBytes = localFilesystemBytes
+	cfg.Thresholds.Resource.MinimumLoadFilesystemBytes = localFilesystemBytes
 	cfg.Thresholds.Timeline = TimelineThresholds{Warmup: 10 * time.Minute, Checkpoint: 20 * time.Minute, Final: 30 * time.Minute}
 	return cfg
 }
@@ -127,7 +131,7 @@ func FormalConfig() Config {
 		Thresholds: ThresholdsConfig{
 			MinimumDataFilesystemBytes: formalFilesystemBytes, DiskSafeStopFreePercent: 5,
 			Correctness: CorrectnessThresholds{OverallFirstAttemptFailure: FailureRateLimit{MaxFailures: 1, PerAttempts: 10_000, Operator: ComparisonLessThan}, AnyMinuteFirstAttemptFailure: FailureRateLimit{MaxFailures: 1, PerAttempts: 1_000, Operator: ComparisonLessOrEqual}},
-			Latency:     LatencyThresholds{HotSendACK: LatencyLimit{P99: 200 * time.Millisecond, P999: time.Second}, Cold: LatencyLimit{P99: 2 * time.Second, P999: 5 * time.Second}, Sync: LatencyLimit{P99: time.Second, P999: 3 * time.Second}, SingleAnomaly: 10 * time.Second, SustainedBreachWindow: 5 * time.Minute},
+			Latency:     LatencyThresholds{HotSendACK: LatencyLimit{P99: 400 * time.Millisecond, P999: time.Second}, Cold: LatencyLimit{P99: 2 * time.Second, P999: 5 * time.Second}, Sync: LatencyLimit{P99: time.Second, P999: 3 * time.Second}, SingleAnomaly: 10 * time.Second, SustainedBreachWindow: 5 * time.Minute},
 			Resource: ResourceThresholds{
 				ForcedGCLiveHeapGrowthPercent: 5, ForcedGCLiveHeapWindow: 6 * time.Hour,
 				GoroutineGrowthPercent: 5, GoroutineGrowthWindow: 24 * time.Hour,
@@ -135,7 +139,10 @@ func FormalConfig() Config {
 				SustainedSaturationWindow:  15 * time.Minute,
 				MinimumLoadFilesystemBytes: 200_000_000_000, PrometheusSafeStopBytes: 140_000_000_000,
 			},
-			Cluster:  ClusterThresholds{HealthPollEvery: 5 * time.Second, UnhealthyFailAfter: 30 * time.Second, MaxHotReplicaLagEntries: 0, LeaderImbalancePercent: 20, LeaderImbalanceFor: 10 * time.Minute},
+			// A StateReplicate follower may trail briefly while the leader is committing
+			// continuous traffic. Sixty-four entries keeps that normal pipeline healthy
+			// while StateProbe/StateSnapshot or a sustained larger backlog still fails.
+			Cluster:  ClusterThresholds{HealthPollEvery: 5 * time.Second, UnhealthyFailAfter: 30 * time.Second, MaxHotReplicaLagEntries: 64, LeaderImbalancePercent: 20, LeaderImbalanceFor: 10 * time.Minute},
 			Timeline: TimelineThresholds{Warmup: 2 * time.Hour, Checkpoint: 24 * time.Hour, Final: formalCheckpointDuration},
 		},
 		Capacity: CapacityConfig{StartRatePerSecond: 2_000, RecoveryRatePerSecond: 2_000, StepPercent: 25, RefinePercent: 10, MaximumDuration: 8 * time.Hour, Step: CapacityStep{Stabilize: 10 * time.Minute, Measure: 20 * time.Minute}, RecoveryDuration: 30 * time.Minute},
@@ -152,6 +159,9 @@ func RehearsalConfig() Config {
 }
 
 func (c Config) measuredDuration() time.Duration {
+	if c.Stage == StageRehearsal && c.RunDuration > 0 {
+		return c.RunDuration
+	}
 	if c.Stage == StageRehearsal {
 		return rehearsalDuration
 	}

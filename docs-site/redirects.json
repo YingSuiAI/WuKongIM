@@ -28,6 +28,22 @@
       "destination": "/en/server/deployment/linux"
     },
     {
+      "source": "/zh/sdk/overview",
+      "destination": "/zh/sdk/choose-sdk"
+    },
+    {
+      "source": "/en/sdk/overview",
+      "destination": "/en/sdk/choose-sdk"
+    },
+    {
+      "source": "/zh/sdk/easy/overview",
+      "destination": "/zh/sdk/choose-sdk"
+    },
+    {
+      "source": "/en/sdk/easy/overview",
+      "destination": "/en/sdk/choose-sdk"
+    },
+    {
       "source": "/zh/sdk/source-code",
       "destination": "/zh/sdk/choose-sdk"
     },
@@ -50,6 +66,22 @@
     {
       "source": "/en/api/introduction",
       "destination": "/en/api/conventions"
+    },
+    {
+      "source": "/zh/guide/core-concepts/cluster-and-nodes",
+      "destination": "/zh/server/architecture"
+    },
+    {
+      "source": "/en/guide/core-concepts/cluster-and-nodes",
+      "destination": "/en/server/architecture"
+    },
+    {
+      "source": "/zh/guide/core-concepts/users-and-devices",
+      "destination": "/zh/guide/core-concepts/users"
+    },
+    {
+      "source": "/en/guide/core-concepts/users-and-devices",
+      "destination": "/en/guide/core-concepts/users"
     }
   ]
 }

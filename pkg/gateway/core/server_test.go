@@ -148,6 +148,7 @@ func TestServer(t *testing.T) {
 		proto.encodedBytes = []byte("connack-success")
 		proto.pushDecode(decodeResult{
 			frames: []frame.Frame{&frame.ConnectPacket{
+				Version:    frame.LatestVersion,
 				UID:        "u1",
 				DeviceID:   "d-1",
 				DeviceFlag: frame.APP,
@@ -231,6 +232,7 @@ func TestServer(t *testing.T) {
 		}
 		proto.pushDecode(decodeResult{
 			frames: []frame.Frame{&frame.ConnectPacket{
+				Version:    frame.LatestVersion,
 				UID:        "u1",
 				DeviceID:   "d-1",
 				DeviceFlag: frame.APP,
@@ -281,6 +283,7 @@ func TestServer(t *testing.T) {
 		}
 		proto.pushDecode(decodeResult{
 			frames: []frame.Frame{&frame.ConnectPacket{
+				Version:    frame.LatestVersion,
 				UID:        "u1",
 				DeviceID:   "d-1",
 				DeviceFlag: frame.APP,
@@ -676,7 +679,7 @@ func TestServer(t *testing.T) {
 		proto := newScriptedProtocol("wkproto")
 		proto.encodedBytes = []byte("connack-success")
 		proto.pushDecode(decodeResult{
-			frames:   []frame.Frame{&frame.ConnectPacket{UID: "u1", DeviceID: "d-1", DeviceFlag: frame.APP}},
+			frames:   []frame.Frame{&frame.ConnectPacket{Version: frame.LatestVersion, UID: "u1", DeviceID: "d-1", DeviceFlag: frame.APP}},
 			consumed: 1,
 		})
 
@@ -785,7 +788,7 @@ func TestServer(t *testing.T) {
 		proto := newScriptedProtocol("wkproto")
 		proto.encodedBytes = []byte("connack-success")
 		proto.pushDecode(decodeResult{
-			frames:   []frame.Frame{&frame.ConnectPacket{UID: "u1", DeviceID: "d-1", DeviceFlag: frame.APP}},
+			frames:   []frame.Frame{&frame.ConnectPacket{Version: frame.LatestVersion, UID: "u1", DeviceID: "d-1", DeviceFlag: frame.APP}},
 			consumed: 1,
 		})
 
@@ -874,7 +877,7 @@ func TestServer(t *testing.T) {
 		proto := newScriptedProtocol("wkproto")
 		proto.encodedBytes = []byte("connack-success")
 		proto.pushDecode(decodeResult{
-			frames:   []frame.Frame{&frame.ConnectPacket{UID: "u1", DeviceID: "d-1", DeviceFlag: frame.APP}},
+			frames:   []frame.Frame{&frame.ConnectPacket{Version: frame.LatestVersion, UID: "u1", DeviceID: "d-1", DeviceFlag: frame.APP}},
 			consumed: 1,
 		})
 
@@ -935,7 +938,7 @@ func TestServer(t *testing.T) {
 		proto.encodedBytes = []byte("connack-success")
 		proto.closeErr = protocolCloseErr
 		proto.pushDecode(decodeResult{
-			frames:   []frame.Frame{&frame.ConnectPacket{UID: "u1", DeviceID: "d-1", DeviceFlag: frame.APP}},
+			frames:   []frame.Frame{&frame.ConnectPacket{Version: frame.LatestVersion, UID: "u1", DeviceID: "d-1", DeviceFlag: frame.APP}},
 			consumed: 1,
 		})
 
@@ -2025,6 +2028,7 @@ func TestServerRollsBackActivationWhenCONNACKWriteFails(t *testing.T) {
 	}
 	proto.pushDecode(decodeResult{
 		frames: []frame.Frame{&frame.ConnectPacket{
+			Version:    frame.LatestVersion,
 			UID:        "u1",
 			DeviceID:   "d1",
 			DeviceFlag: frame.APP,
@@ -2059,6 +2063,7 @@ func TestServerDoesNotRollbackWhenCONNACKWriteFailsWithoutActivation(t *testing.
 	}
 	proto.pushDecode(decodeResult{
 		frames: []frame.Frame{&frame.ConnectPacket{
+			Version:    frame.LatestVersion,
 			UID:        "u1",
 			DeviceID:   "d1",
 			DeviceFlag: frame.APP,
@@ -2100,6 +2105,7 @@ func TestServerDoesNotRollbackWhenActivationFailsAndCONNACKWriteFails(t *testing
 	}
 	proto.pushDecode(decodeResult{
 		frames: []frame.Frame{&frame.ConnectPacket{
+			Version:    frame.LatestVersion,
 			UID:        "u1",
 			DeviceID:   "d1",
 			DeviceFlag: frame.APP,
@@ -2153,6 +2159,7 @@ func TestServerDoesNotRollbackWhenActivationReturnsNonSuccessCONNACKAndWriteFail
 	}
 	proto.pushDecode(decodeResult{
 		frames: []frame.Frame{&frame.ConnectPacket{
+			Version:    frame.LatestVersion,
 			UID:        "u1",
 			DeviceID:   "d1",
 			DeviceFlag: frame.APP,

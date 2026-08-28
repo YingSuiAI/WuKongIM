@@ -30,6 +30,12 @@ func (sm *StateMachine) applyUpsertNode(next *state.ClusterState, cmd command.Co
 	if next.Revision == 0 || cmd.Node == nil {
 		return reject(ReasonInvalidCommand)
 	}
+	if next.SlotReplicaCountTransition != nil {
+		nodeIdx := findNode(next.Nodes, cmd.Node.NodeID)
+		if nodeIdx < 0 || !reflect.DeepEqual(next.Nodes[nodeIdx], *cmd.Node) {
+			return reject(ReasonSlotReplicaCountTransitionActive)
+		}
+	}
 	before := next.Clone()
 	node := cloneNode(*cmd.Node)
 	upsertNode(next, node)
@@ -53,10 +59,40 @@ func (sm *StateMachine) applyUpdateControllerVoters(next *state.ClusterState, cm
 	return validateChanged(next, before, cmd)
 }
 
+func (sm *StateMachine) applyReserveControllerVoterPromotion(next *state.ClusterState, cmd command.Command) ApplyResult {
+	promotion := cmd.ControllerVoterPromotion
+	if next.Revision == 0 || promotion == nil || promotion.TargetNodeID == 0 || promotion.TargetAddr == "" {
+		return reject(ReasonInvalidCommand)
+	}
+	if next.SlotReplicaCountTransition != nil {
+		return reject(ReasonSlotReplicaCountTransitionActive)
+	}
+	reservation := &state.ControllerVoterPromotion{
+		TargetNodeID: promotion.TargetNodeID, TargetAddr: promotion.TargetAddr,
+		PreviousVoters: append([]uint64(nil), promotion.ExpectedPreviousVoters...),
+	}
+	if next.ControllerVoterPromotion != nil {
+		if reflect.DeepEqual(next.ControllerVoterPromotion, reservation) {
+			return noop(ReasonNoChange)
+		}
+		return reject(ReasonControllerVoterPromotionActive)
+	}
+	before := next.Clone()
+	next.ControllerVoterPromotion = reservation
+	return validateChanged(next, before, cmd)
+}
+
 func (sm *StateMachine) applyPromoteControllerVoter(next *state.ClusterState, cmd command.Command) ApplyResult {
 	promotion := cmd.ControllerVoterPromotion
 	if next.Revision == 0 || promotion == nil || promotion.TargetNodeID == 0 || promotion.TargetAddr == "" {
 		return reject(ReasonInvalidCommand)
+	}
+	if next.SlotReplicaCountTransition != nil {
+		return reject(ReasonSlotReplicaCountTransitionActive)
+	}
+	if reservation := next.ControllerVoterPromotion; reservation != nil &&
+		(reservation.TargetNodeID != promotion.TargetNodeID || reservation.TargetAddr != promotion.TargetAddr) {
+		return reject(ReasonControllerVoterPromotionActive)
 	}
 	currentVoters := controllerVoterNodeIDs(next.Controllers)
 	controller, controllerExists := controllerVoterByNodeID(next.Controllers, promotion.TargetNodeID)
@@ -97,6 +133,7 @@ func (sm *StateMachine) applyPromoteControllerVoter(next *state.ClusterState, cm
 		})
 	}
 	next.Nodes[nodeIdx].Roles = appendNodeRoleIfMissing(next.Nodes[nodeIdx].Roles, state.NodeRoleControllerVoter)
+	next.ControllerVoterPromotion = nil
 	next.Normalize()
 	if reflect.DeepEqual(before.Controllers, next.Controllers) && reflect.DeepEqual(before.Nodes, next.Nodes) {
 		return noop(ReasonNoChange)
@@ -170,6 +207,17 @@ func (sm *StateMachine) applyUpsertSlotReplicaMoveTask(next *state.ClusterState,
 		return reject(ReasonInvalidCommand)
 	}
 	before := next.Clone()
+	if cmd.SlotReplicaCountTransition != nil {
+		if next.ControllerVoterPromotion != nil {
+			return reject(ReasonControllerVoterPromotionActive)
+		}
+		if next.SlotReplicaCountTransition == nil {
+			transition := *cmd.SlotReplicaCountTransition
+			next.SlotReplicaCountTransition = &transition
+		} else if !reflect.DeepEqual(next.SlotReplicaCountTransition, cmd.SlotReplicaCountTransition) {
+			return reject(ReasonInvalidState)
+		}
+	}
 	upsertTask(next, cloneTask(*cmd.Task))
 	next.Normalize()
 	if reflect.DeepEqual(before.Tasks, next.Tasks) {
@@ -267,11 +315,21 @@ func (sm *StateMachine) applyCommitSlotReplicaMove(next *state.ClusterState, cmd
 	if assignment.ConfigEpoch != task.ConfigEpoch {
 		return reject(ReasonTaskEpochMismatch)
 	}
-	if !containsUint64(assignment.DesiredPeers, task.SourceNode) || containsUint64(assignment.DesiredPeers, task.TargetNode) {
+	if containsUint64(assignment.DesiredPeers, task.TargetNode) {
 		return reject(ReasonInvalidState)
 	}
-	if !sameUint64Set(task.TargetPeers, replacePeer(assignment.DesiredPeers, task.SourceNode, task.TargetNode)) {
-		return reject(ReasonInvalidState)
+	if task.SourceNode == 0 {
+		if next.SlotReplicaCountTransition == nil ||
+			len(task.TargetPeers) != len(assignment.DesiredPeers)+1 ||
+			len(task.TargetPeers) > int(next.SlotReplicaCountTransition.TargetReplicaCount) ||
+			!sameUint64Set(task.TargetPeers, append(append([]uint64(nil), assignment.DesiredPeers...), task.TargetNode)) {
+			return reject(ReasonInvalidState)
+		}
+	} else {
+		if !containsUint64(assignment.DesiredPeers, task.SourceNode) ||
+			!sameUint64Set(task.TargetPeers, replacePeer(assignment.DesiredPeers, task.SourceNode, task.TargetNode)) {
+			return reject(ReasonInvalidState)
+		}
 	}
 	before := next.Clone()
 	next.Slots[assignmentIdx].DesiredPeers = append([]uint64(nil), task.TargetPeers...)
@@ -280,6 +338,10 @@ func (sm *StateMachine) applyCommitSlotReplicaMove(next *state.ClusterState, cmd
 		next.Slots[assignmentIdx].PreferredLeader = task.TargetNode
 	}
 	next.Tasks = append(next.Tasks[:idx], next.Tasks[idx+1:]...)
+	if task.SourceNode == 0 && slotReplicaCountTransitionComplete(*next) {
+		next.Config.ReplicaCount = next.SlotReplicaCountTransition.TargetReplicaCount
+		next.SlotReplicaCountTransition = nil
+	}
 	next.Normalize()
 	return validateChanged(next, before, cmd)
 }
@@ -292,7 +354,7 @@ func validateSlotReplicaMovePhaseAdvance(task state.ReconcileTask, phase *comman
 		}
 		return ""
 	case state.TaskStepAddLearner:
-		if phase.NextStep != state.TaskStepPromoteLearner && phase.NextStep != state.TaskStepRemoveVoter {
+		if phase.NextStep != state.TaskStepPromoteLearner && phase.NextStep != state.TaskStepRemoveVoter && phase.NextStep != state.TaskStepCommitAssignment {
 			return ReasonTaskStepMismatch
 		}
 		if phase.ObservedConfigIndex == 0 {
@@ -310,9 +372,16 @@ func validateSlotReplicaMovePhaseAdvance(task state.ReconcileTask, phase *comman
 		if !containsUint64(phase.ObservedVoters, task.TargetNode) {
 			return ReasonTaskObservedVotersMismatch
 		}
+		if task.SourceNode == 0 && phase.NextStep != state.TaskStepCommitAssignment {
+			return ReasonTaskStepMismatch
+		}
 		return ""
 	case state.TaskStepPromoteLearner:
-		if phase.NextStep != state.TaskStepRemoveVoter {
+		wantNext := state.TaskStepRemoveVoter
+		if task.SourceNode == 0 {
+			wantNext = state.TaskStepCommitAssignment
+		}
+		if phase.NextStep != wantNext {
 			return ReasonTaskStepMismatch
 		}
 		if phase.ObservedConfigIndex == 0 {
@@ -344,7 +413,28 @@ func validateSlotReplicaMovePhaseAdvance(task state.ReconcileTask, phase *comman
 	}
 }
 
+func slotReplicaCountTransitionComplete(next state.ClusterState) bool {
+	if next.SlotReplicaCountTransition == nil {
+		return false
+	}
+	for _, assignment := range next.Slots {
+		if len(assignment.DesiredPeers) != int(next.SlotReplicaCountTransition.TargetReplicaCount) {
+			return false
+		}
+	}
+	return len(next.Slots) == int(next.Config.SlotCount)
+}
+
 func sourcePeersForSlotReplicaMove(task state.ReconcileTask) []uint64 {
+	if task.SourceNode == 0 {
+		out := make([]uint64, 0, len(task.TargetPeers)-1)
+		for _, peer := range task.TargetPeers {
+			if peer != task.TargetNode {
+				out = append(out, peer)
+			}
+		}
+		return out
+	}
 	return replacePeer(task.TargetPeers, task.TargetNode, task.SourceNode)
 }
 

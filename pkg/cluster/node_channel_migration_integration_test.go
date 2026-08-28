@@ -5,6 +5,7 @@ package cluster
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -56,6 +57,73 @@ func TestClusterChannelMigrationStoreReadsSlotLeaderState(t *testing.T) {
 	}
 	if len(list) != 1 || list[0].TaskID != task.TaskID {
 		t.Fatalf("active list = %+v, want seeded task", list)
+	}
+}
+
+func TestClusterChannelMigrationRunnableScanRotatesPastStuckAndBlockedTasks(t *testing.T) {
+	node := newDefaultSingleNode(t)
+	node.cfg.ChannelMigration.Enabled = false
+	startNode(t, node)
+	t.Cleanup(func() { stopNodes(t, node) })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	firstID := "migration-fair-same-slot-0"
+	firstRoute := waitRouteKeyLeaderReady(t, node, firstID)
+	secondID := ""
+	thirdID := ""
+	for i := 1; i < 4096; i++ {
+		candidate := fmt.Sprintf("migration-fair-same-slot-%d", i)
+		route, err := node.RouteKey(candidate)
+		if err != nil {
+			continue
+		}
+		if secondID == "" && route.HashSlot == firstRoute.HashSlot {
+			secondID = candidate
+		}
+		if thirdID == "" && route.HashSlot != firstRoute.HashSlot {
+			thirdID = candidate
+		}
+		if secondID != "" && thirdID != "" {
+			break
+		}
+	}
+	if secondID == "" || thirdID == "" {
+		t.Fatal("failed to find same-slot and cross-slot migration channels")
+	}
+
+	tasks := []metadb.ChannelMigrationTask{
+		migrationNodeTestTask(channelruntime.ChannelID{ID: firstID, Type: 1}, "task-fair-a"),
+		migrationNodeTestTask(channelruntime.ChannelID{ID: secondID, Type: 1}, "task-fair-b"),
+		migrationNodeTestTask(channelruntime.ChannelID{ID: thirdID, Type: 1}, "task-fair-c"),
+		migrationNodeTestTask(channelruntime.ChannelID{ID: "migration-fair-blocked", Type: 1}, "task-fair-blocked"),
+	}
+	tasks[3].Status = metadb.ChannelMigrationStatusBlocked
+	for _, task := range tasks {
+		route := waitRouteKeyLeaderReady(t, node, task.ChannelID)
+		if err := node.defaultSlotMetaDB.ForHashSlot(route.HashSlot).CreateChannelMigrationTask(ctx, task); err != nil {
+			t.Fatalf("CreateChannelMigrationTask(%s): %v", task.TaskID, err)
+		}
+	}
+
+	seen := make(map[string]bool)
+	for i := 0; i < 8 && len(seen) < 3; i++ {
+		page, err := node.ListRunnableMigrationTasks(ctx, node.cfg.NodeID, 1)
+		if err != nil {
+			t.Fatalf("ListRunnableMigrationTasks(call %d): %v", i+1, err)
+		}
+		if len(page) > 1 {
+			t.Fatalf("ListRunnableMigrationTasks(call %d) len = %d, want <= 1", i+1, len(page))
+		}
+		for _, task := range page {
+			if task.Status == metadb.ChannelMigrationStatusBlocked {
+				t.Fatalf("ListRunnableMigrationTasks returned blocked task %q", task.TaskID)
+			}
+			seen[task.TaskID] = true
+		}
+	}
+	if !seen["task-fair-a"] || !seen["task-fair-b"] || !seen["task-fair-c"] {
+		t.Fatalf("rotating scan saw tasks %v, want same-slot and cross-slot runnable tasks", seen)
 	}
 }
 

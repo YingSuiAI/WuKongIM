@@ -38,12 +38,32 @@ func TestPebbleOpenOptionsDefaultExternalSnapshotRoot(t *testing.T) {
 	if db.options.SnapshotChunkSize != uint64(8<<20) {
 		t.Fatalf("SnapshotChunkSize = %d, want %d", db.options.SnapshotChunkSize, uint64(8<<20))
 	}
+	if db.options.WriteBatchMaxWait != 5*time.Millisecond {
+		t.Fatalf("WriteBatchMaxWait = %v, want %v", db.options.WriteBatchMaxWait, 5*time.Millisecond)
+	}
+	if db.options.WriteBatchMaxItems != 128 {
+		t.Fatalf("WriteBatchMaxItems = %d, want 128", db.options.WriteBatchMaxItems)
+	}
 }
 
 func TestPebbleOpenRejectsNegativeSnapshotGCGrace(t *testing.T) {
 	_, err := Open(filepath.Join(t.TempDir(), "raft"), Options{SnapshotGCGrace: -time.Second})
 	if err == nil {
 		t.Fatal("Open() error = nil, want error")
+	}
+}
+
+func TestPebbleOpenRejectsInvalidWriteBatchBounds(t *testing.T) {
+	for _, opts := range []Options{
+		{WriteBatchMaxWait: -time.Nanosecond},
+		{WriteBatchMaxItems: -1},
+		{WriteBatchMaxItems: maxWriteBatchItems + 1},
+	} {
+		db, err := Open(filepath.Join(t.TempDir(), "raft"), opts)
+		if err == nil {
+			_ = db.Close()
+			t.Fatalf("Open(%+v) error = nil, want invalid write batch bound", opts)
+		}
 	}
 }
 
@@ -198,6 +218,62 @@ func TestPebbleEntryOverwriteStagesRangeDelete(t *testing.T) {
 	}
 	if rangeDeletes != 1 {
 		t.Fatalf("range deletes = %d, want 1 for a suffix overwrite", rangeDeletes)
+	}
+}
+
+func TestPebbleLaterSnapshotDeletesOnlyCurrentEntryPrefix(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "raft"), Options{})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+	})
+
+	scope := SlotScope(7)
+	oldManifest := validSnapshotManifest(scope)
+	oldManifest.Index = 6
+	oldManifest.Term = 1
+	newManifest := validSnapshotManifest(scope)
+	newManifest.Index = 8
+	newManifest.Term = 2
+	state := &scopeWriteState{
+		snapshot:         raftpb.Snapshot{Metadata: raftpb.SnapshotMetadata{Index: 6, Term: 1}},
+		snapshotManifest: &oldManifest,
+		entries:          benchEntries(7, 4, 2, 8),
+		meta:             logMeta{FirstIndex: 7, LastIndex: 10, SnapshotIndex: 6, SnapshotTerm: 1},
+	}
+	batch := db.db.NewBatch()
+	defer batch.Close()
+	op := saveOp{state: persistentWriteState{
+		Snapshot:         &raftpb.SnapshotMetadata{Index: 8, Term: 2},
+		SnapshotManifest: &newManifest,
+	}}
+	if err := op.apply(batch, state, &pebbleStore{db: db, scope: scope}); err != nil {
+		t.Fatalf("apply() error = %v", err)
+	}
+
+	reader := batchrepr.Read(batch.Repr())
+	for {
+		kind, start, end, ok, err := reader.Next()
+		if err != nil {
+			t.Fatalf("read batch: %v", err)
+		}
+		if !ok {
+			t.Fatal("snapshot batch has no range delete")
+		}
+		if kind != pebble.InternalKeyKindRangeDelete {
+			continue
+		}
+		if want := encodeEntryKey(scope, 7); !bytes.Equal(start, want) {
+			t.Fatalf("range delete start = %x, want current FirstIndex %x", start, want)
+		}
+		if want := encodeEntryKey(scope, 9); !bytes.Equal(end, want) {
+			t.Fatalf("range delete end = %x, want snapshot successor %x", end, want)
+		}
+		break
 	}
 }
 

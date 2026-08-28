@@ -127,15 +127,44 @@ func TestReviewAgentPolicy(t *testing.T) {
 		},
 		proxyCheck.Arguments,
 	)
+	flowCheck, ok := policy.TrustedChecks["flow-doc-contracts"]
+	require.True(t, ok)
+	require.Equal(
+		t,
+		[]string{"go", "run", "./scripts/flowcheck", "--mode", "check"},
+		flowCheck.Arguments,
+	)
+	docsCheck, ok := policy.TrustedChecks["docs-contracts"]
+	require.True(t, ok)
+	require.Equal(t, []string{"review-agent-check", "docs"}, docsCheck.Arguments)
+	require.Equal(t, 600, docsCheck.TimeoutSeconds)
+	docsIntegrationCheck, ok := policy.TrustedChecks["docs-integration"]
+	require.True(t, ok)
+	require.Equal(
+		t,
+		[]string{"review-agent-check", "docs-integration"},
+		docsIntegrationCheck.Arguments,
+	)
+	require.Equal(t, 600, docsIntegrationCheck.TimeoutSeconds)
+	require.LessOrEqual(t, docsCheck.TimeoutSeconds+docsIntegrationCheck.TimeoutSeconds, 1200)
 	require.NotEmpty(t, policy.PathRules)
 	var javascriptRule *reviewAgentPathRule
 	var documentationRule *reviewAgentPathRule
+	var flowDocumentsRule *reviewAgentPathRule
+	var flowToolingRule *reviewAgentPathRule
+	var documentationIntegrationRule *reviewAgentPathRule
 	for index := range policy.PathRules {
 		switch policy.PathRules[index].Name {
 		case "review-agent-javascript":
 			javascriptRule = &policy.PathRules[index]
 		case "documentation-only":
 			documentationRule = &policy.PathRules[index]
+		case "flow-documents":
+			flowDocumentsRule = &policy.PathRules[index]
+		case "flow-tooling":
+			flowToolingRule = &policy.PathRules[index]
+		case "documentation-golden-path-integration":
+			documentationIntegrationRule = &policy.PathRules[index]
 		}
 	}
 	require.NotNil(t, javascriptRule)
@@ -150,6 +179,89 @@ func TestReviewAgentPolicy(t *testing.T) {
 		documentationRule.Paths,
 	)
 	require.Equal(t, []string{"docs-contracts"}, documentationRule.Checks)
+	require.Empty(t, documentationRule.Suffixes)
+	require.NotNil(t, flowDocumentsRule)
+	require.ElementsMatch(
+		t,
+		[]string{
+			"AGENTS.md",
+			".github/issue-agent/prompts/engineer.md",
+			".github/issue-agent/prompts/review.md",
+			"docs/development/FLOW_INDEX.md",
+			"docs/development/PROJECT_KNOWLEDGE.md",
+			"internal/infra/issueagentgithub/instructions.go",
+			"internal/infra/issueagentgithub/instructions_test.go",
+			"internal/infra/reviewagentgithub/reader.go",
+			"internal/infra/reviewagentgithub/reader_budget_test.go",
+			"internal/infra/reviewagentgithub/reader_test.go",
+			"internal/runtime/reviewagentverify/instructions.go",
+			"internal/runtime/reviewagentverify/context_test.go",
+		},
+		flowDocumentsRule.Paths,
+	)
+	require.Equal(t, []string{""}, flowDocumentsRule.Prefixes)
+	require.Equal(t, []string{"FLOW.md"}, flowDocumentsRule.Suffixes)
+	require.Equal(t, []string{"flow-doc-contracts"}, flowDocumentsRule.Checks)
+	require.True(t, flowDocumentsRule.Always)
+	require.NotNil(t, flowToolingRule)
+	require.ElementsMatch(
+		t,
+		[]string{"pkg/flowdoc/", "scripts/flowcheck/"},
+		flowToolingRule.Prefixes,
+	)
+	require.Empty(t, flowToolingRule.Suffixes)
+	require.Equal(t, []string{"flow-doc-contracts"}, flowToolingRule.Checks)
+	require.True(t, flowToolingRule.Always)
+	require.NotNil(t, documentationIntegrationRule)
+	require.True(t, documentationIntegrationRule.Always)
+	require.False(t, documentationIntegrationRule.Exclusive)
+	require.Equal(
+		t,
+		[]string{"docs-integration"},
+		documentationIntegrationRule.Checks,
+	)
+	require.Contains(
+		t,
+		documentationIntegrationRule.Prefixes,
+		"docs-site/examples/javascript-web-quickstart/",
+	)
+	require.Contains(
+		t,
+		documentationIntegrationRule.Paths,
+		"internal/access/api/channel_messagesync.go",
+	)
+	for _, path := range []string{
+		"docs-site/app/(root)/layout.tsx",
+		"docs-site/app/global.css",
+		"docs-site/content/docs/api/authentication.en.mdx",
+		"docs-site/content/docs/api/authentication.mdx",
+		"docs-site/content/docs/api/conventions.en.mdx",
+		"docs-site/content/docs/api/conventions.mdx",
+		"docs-site/content/docs/api/dictionaries/index.en.mdx",
+		"docs-site/content/docs/api/dictionaries/index.mdx",
+		"internal/access/api/user_legacy.go",
+		"pkg/gateway/core/async_auth.go",
+	} {
+		require.Contains(t, documentationIntegrationRule.Paths, path)
+	}
+	for _, prefix := range []string{
+		"docs-site/app/[lang]/",
+		"docs-site/components/",
+	} {
+		require.Contains(t, documentationIntegrationRule.Prefixes, prefix)
+	}
+	require.Contains(t, documentationIntegrationRule.Paths, "internal/access/gateway/error_map.go")
+	require.Contains(t, documentationIntegrationRule.Paths, "internal/infra/cluster/user_metadata.go")
+	require.Contains(t, documentationIntegrationRule.Paths, "pkg/cluster/node.go")
+	require.Contains(t, documentationIntegrationRule.Paths, "pkg/cluster/node_meta.go")
+	require.Contains(t, documentationIntegrationRule.Paths, "pkg/gateway/auth.go")
+	require.Contains(t, documentationIntegrationRule.Paths, "pkg/gateway/core/server.go")
+	require.Contains(t, documentationIntegrationRule.Prefixes, "pkg/gateway/protocol/wkproto/")
+	require.Contains(t, documentationIntegrationRule.Prefixes, "pkg/gateway/protocol/wsmux/")
+	require.Contains(t, documentationIntegrationRule.Prefixes, "internal/usecase/message/")
+	require.Contains(t, documentationIntegrationRule.Prefixes, "internal/usecase/user/")
+	require.Contains(t, documentationIntegrationRule.Prefixes, "pkg/cluster/channels/")
+	require.Contains(t, documentationIntegrationRule.Prefixes, "test/e2e/suite/")
 	require.NotEmpty(t, policy.Network.BlockedCIDRs)
 	require.Contains(t, policy.Credentials.Denied, "github")
 	require.Contains(t, policy.Credentials.Denied, "cloud")
@@ -188,6 +300,8 @@ func TestReviewAgentPolicy(t *testing.T) {
 		"unresolved_uncertainty",
 		"must not modify",
 		"Check MCP",
+		"advisory `FLOW.md`",
+		"higher-authority source",
 	} {
 		require.Contains(t, string(prompt), required)
 	}
@@ -504,4 +618,5 @@ type reviewAgentPathRule struct {
 	Suffixes  []string `json:"suffixes"`
 	Checks    []string `json:"checks"`
 	Exclusive bool     `json:"exclusive"`
+	Always    bool     `json:"always"`
 }

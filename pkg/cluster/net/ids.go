@@ -121,6 +121,8 @@ const (
 	RPCSlotPermissionMetadataBatch
 	// RPCSlotIdentityMetadata serves Slot-leader user and device identity metadata reads.
 	RPCSlotIdentityMetadata
+	// RPCChannelQuorumExchange carries bounded quorum replication, probe, and repair batches.
+	RPCChannelQuorumExchange
 )
 
 func transportServiceAlias(serviceID uint8) string {
@@ -233,6 +235,8 @@ func transportServiceAlias(serviceID uint8) string {
 		return "slot permission metadata batch"
 	case RPCSlotIdentityMetadata:
 		return "slot identity metadata"
+	case RPCChannelQuorumExchange:
+		return "channel quorum exchange"
 	case RPCChannelMigrationMeta:
 		return "channel migration meta"
 	case RPCMessageEventAppend:

@@ -3,9 +3,12 @@ package proxy
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/WuKongIM/WuKongIM/pkg/slot/multiraft"
 )
+
+const authoritativeReadRPCAttemptTimeout = time.Second
 
 const (
 	rpcStatusOK        = "ok"
@@ -32,8 +35,7 @@ func (s *Store) shouldServeSlotLocally(slotID multiraft.SlotID) bool {
 	if s == nil || s.cluster == nil {
 		return false
 	}
-	leaderID, err := s.cluster.LeaderOf(slotID)
-	return err == nil && s.cluster.IsLocal(leaderID)
+	return s.cluster.IsLocalSlotLeader(slotID)
 }
 
 func callAuthoritativeRPC[T authoritativeRPCResponse](
@@ -44,7 +46,21 @@ func callAuthoritativeRPC[T authoritativeRPCResponse](
 	payload []byte,
 	decode func([]byte) (T, error),
 ) (T, error) {
-	return callAuthoritativeRPCWithStatuses(ctx, s, slotID, serviceID, payload, decode, defaultAuthoritativeRPCStatuses)
+	return callAuthoritativeRPCWithStatusesAndAttemptTimeout(ctx, s, slotID, serviceID, payload, decode, defaultAuthoritativeRPCStatuses, 0)
+}
+
+// callAuthoritativeReadRPC keeps an unavailable stale leader from consuming
+// the entire foreground read deadline. Reads are safe to retry against the
+// remaining Slot peers; mutation RPCs retain their existing outcome boundary.
+func callAuthoritativeReadRPC[T authoritativeRPCResponse](
+	ctx context.Context,
+	s *Store,
+	slotID multiraft.SlotID,
+	serviceID uint8,
+	payload []byte,
+	decode func([]byte) (T, error),
+) (T, error) {
+	return callAuthoritativeRPCWithStatusesAndAttemptTimeout(ctx, s, slotID, serviceID, payload, decode, defaultAuthoritativeRPCStatuses, authoritativeReadRPCAttemptTimeout)
 }
 
 func callAuthoritativeRPCWithStatuses[T authoritativeRPCResponse](
@@ -55,6 +71,19 @@ func callAuthoritativeRPCWithStatuses[T authoritativeRPCResponse](
 	payload []byte,
 	decode func([]byte) (T, error),
 	acceptedStatuses map[string]struct{},
+) (T, error) {
+	return callAuthoritativeRPCWithStatusesAndAttemptTimeout(ctx, s, slotID, serviceID, payload, decode, acceptedStatuses, 0)
+}
+
+func callAuthoritativeRPCWithStatusesAndAttemptTimeout[T authoritativeRPCResponse](
+	ctx context.Context,
+	s *Store,
+	slotID multiraft.SlotID,
+	serviceID uint8,
+	payload []byte,
+	decode func([]byte) (T, error),
+	acceptedStatuses map[string]struct{},
+	attemptTimeout time.Duration,
 ) (T, error) {
 	var zero T
 
@@ -89,8 +118,17 @@ func callAuthoritativeRPCWithStatuses[T authoritativeRPCResponse](
 		}
 		tried[peer] = struct{}{}
 
-		body, err := s.cluster.RPCService(ctx, peer, slotID, serviceID, payload)
+		attemptCtx := ctx
+		cancelAttempt := func() {}
+		if attemptTimeout > 0 {
+			attemptCtx, cancelAttempt = context.WithTimeout(ctx, attemptTimeout)
+		}
+		body, err := s.cluster.RPCService(attemptCtx, peer, slotID, serviceID, payload)
+		cancelAttempt()
 		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return zero, ctxErr
+			}
 			lastErr = err
 			continue
 		}
@@ -132,6 +170,9 @@ func callAuthoritativeRPCWithStatuses[T authoritativeRPCResponse](
 }
 
 func (s *Store) handleAuthoritativeRPC(slotID multiraft.SlotID, encode rpcStatusEncoder) ([]byte, bool, error) {
+	if s.cluster.IsLocalSlotLeader(slotID) {
+		return nil, false, nil
+	}
 	leaderID, err := s.cluster.LeaderOf(slotID)
 	switch {
 	case isSlotNotFound(err):
@@ -144,6 +185,10 @@ func (s *Store) handleAuthoritativeRPC(slotID multiraft.SlotID, encode rpcStatus
 		body, encodeErr := encode(rpcStatusNotLeader, uint64(leaderID))
 		return body, true, encodeErr
 	default:
-		return nil, false, nil
+		// The foreground router still names this node, but the local Raft
+		// runtime does not. Do not serve stale local state or point the caller
+		// back to this same non-leader node.
+		body, encodeErr := encode(rpcStatusNoLeader, 0)
+		return body, true, encodeErr
 	}
 }

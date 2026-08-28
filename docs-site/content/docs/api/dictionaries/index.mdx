@@ -1,0 +1,45 @@
+---
+title: 公共数据字典
+description: 查阅与当前源码校准的 Channel Type、Device Flag、Message Flags 和 Reason Code。
+---
+
+## 目标与完成标准
+
+本区域集中维护客户端 SDK、Gateway 和兼容 HTTP 响应复用的 Wire 值。Phase 13 在 Reason Code 之外发布 Channel Type、Device Flag / Level 与 Message Flags，帮助集成者跨语言核对数值和行为边界。
+
+## 兼容目标
+
+所有表都与当前 Go 权威定义对齐并由测试检查名称、值或位序。它们属于当前源码快照；[兼容性快照](/zh/api/compatibility)仍只证明 JavaScript 黄金场景，不自动证明每个 SDK 平台。
+
+## 前置条件
+
+- 数值是 Wire 合同，名称用于可读诊断；
+- 不把“枚举中存在”解释为“当前 SDK 已发布完整能力”；
+- 遇到未知值时保留原始数字并 fail closed。
+
+## 已发布字典
+
+<Cards>
+  <Card title="Channel Type" description="当前 1–12 类型及基础、专用与旧类型边界。" href="/zh/api/dictionaries/channel-types" />
+  <Card title="Device Flag" description="APP、WEB、PC、SYSTEM 与同类连接冲突级别。" href="/zh/api/dictionaries/device-flags" />
+  <Card title="Message Flags" description="固定 Header 与 Setting 位的真实行为。" href="/zh/api/dictionaries/message-flags" />
+  <Card title="Reason Code" description="完整列出当前 0–29 名称、适用阶段、重试建议与可达性。" href="/zh/api/dictionaries/reason-codes" />
+</Cards>
+
+## 预期结果
+
+开发者应按数值匹配，并同时记录字典名称、协议阶段与兼容快照。应用代码不手写分散的魔法数字；由 SDK 类型或一个内部共享模块映射。
+
+## 失败诊断
+
+- **名称与数值不一致**：让校验失败并重新校准，不要手工维护第二张表。
+- **功能存在于字典但 SDK 找不到入口**：该平台能力可能仍未发布，按精确版本文档确认。
+- **收到表外数值**：记录数值和兼容快照，升级字典前保持 fail closed。
+
+## 安全与责任边界
+
+Wire 字典不是授权，也不是适合直接展示给最终用户的本地化文案。业务服务应映射安全含义，避免暴露内部拓扑、权限策略或敏感请求内容。
+
+## 下一步
+
+从 [Channel Type](/zh/api/dictionaries/channel-types) 与 [Device Flag](/zh/api/dictionaries/device-flags)建立身份，再用 [Message Flags](/zh/api/dictionaries/message-flags)和 [Reason Code](/zh/api/dictionaries/reason-codes)解释消息结果。

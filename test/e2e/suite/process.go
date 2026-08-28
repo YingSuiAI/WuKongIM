@@ -23,8 +23,10 @@ const (
 	diagnosticsTailBytes = 4096
 	diagnosticsTailLines = 16
 	e2eHarnessEnvPrefix  = "WK_E2E_"
-	redactedConfigValue  = "[REDACTED]"
-	omittedConfigValue   = "[invalid or unsupported TOML; content omitted]"
+	// The Review helper must keep its receipt destination out of product configuration.
+	docsGoldenPathAttestationOutputEnv = "WK_DOCS_GOLDEN_PATH_ATTESTATION_OUTPUT"
+	redactedConfigValue                = "[REDACTED]"
+	omittedConfigValue                 = "[invalid or unsupported TOML; content omitted]"
 )
 
 var sensitiveConfigKeyMarkers = [...]string{
@@ -68,6 +70,19 @@ type NodeProcess struct {
 	cleanupErr    error
 	stopMu        sync.Mutex
 	closeLogsOnce sync.Once
+}
+
+// PrepareCommandProcessTree makes cmd the leader of a process tree owned by the caller.
+func PrepareCommandProcessTree(cmd *exec.Cmd) {
+	if cmd == nil {
+		return
+	}
+	configureProcessTree(cmd)
+}
+
+// ReapCommandProcessTree escalates TERM to KILL and waits for all owned descendants to exit.
+func ReapCommandProcessTree(process *os.Process, timeout time.Duration) error {
+	return reapProcessTree(process, normalizedStopTimeout(timeout))
 }
 
 // Start launches the child process and redirects stdout and stderr to files.
@@ -151,7 +166,8 @@ func (p *NodeProcess) waitForExit(cmd *exec.Cmd, done, cleanupDone chan struct{}
 
 func appendChildEnvironment(dst, src []string) []string {
 	for _, entry := range src {
-		if strings.HasPrefix(entry, e2eHarnessEnvPrefix) {
+		key, _, _ := strings.Cut(entry, "=")
+		if strings.HasPrefix(key, e2eHarnessEnvPrefix) || key == docsGoldenPathAttestationOutputEnv {
 			continue
 		}
 		dst = append(dst, entry)

@@ -160,6 +160,67 @@ func TestChannelAppendClientCallsExpectedServiceAndLeader(t *testing.T) {
 	}
 }
 
+func TestChannelAppendClientBoundsRemoteAttemptAndMarksChildDeadlineOutcomeUnknown(t *testing.T) {
+	node := &deadlineChannelAppendRPCNode{}
+	client := NewClient(node)
+	client.channelAppendAttemptTimeout = 10 * time.Millisecond
+	outerCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	got := client.ForwardSendBatch(outerCtx, channelAppendTestTarget(), []channelappend.SendBatchItem{{
+		Deadline: time.Now().Add(time.Second),
+		Command:  channelAppendTestCommand(),
+	}})
+
+	if len(got) != 1 || !errors.Is(got[0].Err, channelappend.ErrAppendOutcomeUnknown) {
+		t.Fatalf("ForwardSendBatch() = %#v, want ErrAppendOutcomeUnknown", got)
+	}
+	if outerCtx.Err() != nil {
+		t.Fatalf("outer context error = %v, want live retry budget", outerCtx.Err())
+	}
+	if !errors.Is(node.callErr, context.DeadlineExceeded) {
+		t.Fatalf("CallRPC context error = %v, want context.DeadlineExceeded", node.callErr)
+	}
+}
+
+func TestChannelAppendClientMarksTimedOutTransportCancellationOutcomeUnknown(t *testing.T) {
+	node := &canceledDeadlineChannelAppendRPCNode{}
+	client := NewClient(node)
+	client.channelAppendAttemptTimeout = 10 * time.Millisecond
+	outerCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	got := client.ForwardSendBatch(outerCtx, channelAppendTestTarget(), []channelappend.SendBatchItem{{
+		Deadline: time.Now().Add(time.Second),
+		Command:  channelAppendTestCommand(),
+	}})
+
+	if len(got) != 1 || !errors.Is(got[0].Err, channelappend.ErrAppendOutcomeUnknown) {
+		t.Fatalf("ForwardSendBatch() = %#v, want ErrAppendOutcomeUnknown", got)
+	}
+	if outerCtx.Err() != nil {
+		t.Fatalf("outer context error = %v, want live retry budget", outerCtx.Err())
+	}
+}
+
+func TestChannelAppendClientPreservesExpiredOuterDeadline(t *testing.T) {
+	node := &deadlineChannelAppendRPCNode{}
+	client := NewClient(node)
+	outerCtx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+
+	got := client.ForwardSendBatch(outerCtx, channelAppendTestTarget(), []channelappend.SendBatchItem{{
+		Command: channelAppendTestCommand(),
+	}})
+
+	if len(got) != 1 || !errors.Is(got[0].Err, context.DeadlineExceeded) {
+		t.Fatalf("ForwardSendBatch() = %#v, want context.DeadlineExceeded", got)
+	}
+	if errors.Is(got[0].Err, channelappend.ErrRouteNotReady) {
+		t.Fatalf("ForwardSendBatch() error = %v, outer deadline must remain terminal", got[0].Err)
+	}
+}
+
 func TestChannelAppendClientMapsStatusesAndErrorsToItemAlignedResults(t *testing.T) {
 	items := []channelappend.SendBatchItem{
 		{Command: channelAppendTestCommand()},
@@ -167,10 +228,11 @@ func TestChannelAppendClientMapsStatusesAndErrorsToItemAlignedResults(t *testing
 	}
 
 	tests := []struct {
-		name       string
-		node       *fakeChannelAppendRPCNode
-		wantIs     error
-		wantString string
+		name            string
+		node            *fakeChannelAppendRPCNode
+		wantIs          error
+		wantString      string
+		wantUnavailable bool
 	}{
 		{name: "not leader status", node: &fakeChannelAppendRPCNode{response: channelAppendResponse{Status: rpcStatusNotLeader}}, wantIs: channelappend.ErrNotLeader},
 		{name: "not channel authority status", node: &fakeChannelAppendRPCNode{response: channelAppendResponse{Status: "not_channel_authority"}}, wantIs: channelappend.ErrNotChannelAuthority},
@@ -183,12 +245,13 @@ func TestChannelAppendClientMapsStatusesAndErrorsToItemAlignedResults(t *testing
 		{name: "rejected status", node: &fakeChannelAppendRPCNode{response: channelAppendResponse{Status: rpcStatusRejected}}, wantString: "internal/access/node: channel append rpc rejected"},
 		{name: "transport canceled", node: &fakeChannelAppendRPCNode{err: transport.ErrCanceled}, wantIs: context.Canceled},
 		{name: "transport timeout", node: &fakeChannelAppendRPCNode{err: transport.ErrTimeout}, wantIs: context.DeadlineExceeded},
-		{name: "transport dial failed", node: &fakeChannelAppendRPCNode{err: fmt.Errorf("%w: connection refused", transport.ErrDialFailed)}, wantIs: channelappend.ErrRouteNotReady},
+		{name: "transport dial failed", node: &fakeChannelAppendRPCNode{err: fmt.Errorf("%w: connection refused", transport.ErrDialFailed)}, wantIs: channelappend.ErrRouteNotReady, wantUnavailable: true},
 		{name: "transport node not found", node: &fakeChannelAppendRPCNode{err: transport.ErrNodeNotFound}, wantIs: channelappend.ErrRouteNotReady},
-		{name: "transport stopped", node: &fakeChannelAppendRPCNode{err: transport.ErrStopped}, wantIs: channelappend.ErrRouteNotReady},
-		{name: "transport connection reset", node: &fakeChannelAppendRPCNode{err: channelAppendNetOpError(syscall.ECONNRESET)}, wantIs: channelappend.ErrRouteNotReady},
-		{name: "transport connection refused", node: &fakeChannelAppendRPCNode{err: channelAppendNetOpError(syscall.ECONNREFUSED)}, wantIs: channelappend.ErrRouteNotReady},
-		{name: "transport broken pipe", node: &fakeChannelAppendRPCNode{err: channelAppendNetOpError(syscall.EPIPE)}, wantIs: channelappend.ErrRouteNotReady},
+		{name: "transport stopped", node: &fakeChannelAppendRPCNode{err: transport.ErrStopped}, wantIs: channelappend.ErrAppendOutcomeUnknown},
+		{name: "remote transport stopped", node: &fakeChannelAppendRPCNode{err: transport.RemoteError{Code: transport.RemoteErrorCodeGeneric, Message: transport.ErrStopped.Error()}}, wantIs: channelappend.ErrAppendOutcomeUnknown},
+		{name: "transport connection reset", node: &fakeChannelAppendRPCNode{err: channelAppendNetOpError(syscall.ECONNRESET)}, wantIs: channelappend.ErrAppendOutcomeUnknown},
+		{name: "transport connection refused", node: &fakeChannelAppendRPCNode{err: channelAppendNetOpError(syscall.ECONNREFUSED)}, wantIs: channelappend.ErrRouteNotReady, wantUnavailable: true},
+		{name: "transport broken pipe", node: &fakeChannelAppendRPCNode{err: channelAppendNetOpError(syscall.EPIPE)}, wantIs: channelappend.ErrAppendOutcomeUnknown},
 		{name: "transport error", node: &fakeChannelAppendRPCNode{err: errors.New("transport down")}, wantString: "transport down"},
 		{name: "short response", node: &fakeChannelAppendRPCNode{response: channelAppendResponse{Status: rpcStatusOK, Results: []channelappend.SendBatchItemResult{{}}}}, wantIs: channelappend.ErrAppendResultMissing},
 		{name: "item error", node: &fakeChannelAppendRPCNode{response: channelAppendResponse{Status: rpcStatusOK, Results: []channelappend.SendBatchItemResult{{Err: channelappend.ErrChannelBusy}, {Err: channelappend.ErrChannelBusy}}}}, wantIs: channelappend.ErrChannelBusy},
@@ -212,6 +275,9 @@ func TestChannelAppendClientMapsStatusesAndErrorsToItemAlignedResults(t *testing
 				}
 				if !errors.Is(got[i].Err, tt.wantIs) {
 					t.Fatalf("result[%d].Err = %v, want %v", i, got[i].Err, tt.wantIs)
+				}
+				if unavailable := errors.Is(got[i].Err, channelappend.ErrAppendAuthorityUnavailable); unavailable != tt.wantUnavailable {
+					t.Fatalf("result[%d].Err = %v, authority unavailable = %t, want %t", i, got[i].Err, unavailable, tt.wantUnavailable)
 				}
 			}
 		})
@@ -323,6 +389,23 @@ type fakeChannelAppendRPCNode struct {
 	serviceID uint8
 	payload   []byte
 	called    bool
+}
+
+type deadlineChannelAppendRPCNode struct {
+	callErr error
+}
+
+type canceledDeadlineChannelAppendRPCNode struct{}
+
+func (n *deadlineChannelAppendRPCNode) CallRPC(ctx context.Context, _ uint64, _ uint8, _ []byte) ([]byte, error) {
+	<-ctx.Done()
+	n.callErr = ctx.Err()
+	return nil, ctx.Err()
+}
+
+func (n *canceledDeadlineChannelAppendRPCNode) CallRPC(ctx context.Context, _ uint64, _ uint8, _ []byte) ([]byte, error) {
+	<-ctx.Done()
+	return nil, transport.ErrCanceled
 }
 
 func (f *fakeChannelAppendRPCNode) CallRPC(_ context.Context, nodeID uint64, serviceID uint8, payload []byte) ([]byte, error) {

@@ -694,6 +694,22 @@ func TestValidateRejectsDesiredPeersLengthPastUint16Boundary(t *testing.T) {
 	require.ErrorIs(t, st.Validate(), ErrInvalidState)
 }
 
+func TestControllerVoterPromotionReservationRoundTripAndClone(t *testing.T) {
+	st := testState()
+	st.ControllerVoterPromotion = &ControllerVoterPromotion{TargetNodeID: 3, TargetAddr: "n3", PreviousVoters: []uint64{2, 1}}
+	encoded, err := Encode(st)
+	require.NoError(t, err)
+	decoded, err := Decode(encoded)
+	require.NoError(t, err)
+	require.Equal(t, []uint64{1, 2}, decoded.ControllerVoterPromotion.PreviousVoters)
+	clone := decoded.Clone()
+	clone.ControllerVoterPromotion.PreviousVoters[0] = 99
+	require.Equal(t, uint64(1), decoded.ControllerVoterPromotion.PreviousVoters[0])
+	clone = decoded.Clone()
+	clone.ControllerVoterPromotion.TargetAddr = "replacement"
+	require.Error(t, clone.Validate())
+}
+
 func testState() ClusterState {
 	now := time.Date(2026, 5, 24, 10, 0, 0, 0, time.UTC)
 	table, _ := BuildInitialHashSlotTable(1, 16)

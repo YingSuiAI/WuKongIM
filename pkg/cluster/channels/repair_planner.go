@@ -126,7 +126,10 @@ func chooseReplicaRepairTarget(meta metadb.ChannelRuntimeMeta, nodes []control.N
 		}
 		candidates = append(candidates, node.NodeID)
 	}
-	selected, err := selectChannelReplicas(string(ch.ChannelKeyForID(ch.ChannelID{ID: meta.ChannelID, Type: uint8(meta.ChannelType)})), candidates, 1)
+	selected, _, err := selectChannelReplicas(
+		string(ch.ChannelKeyForID(ch.ChannelID{ID: meta.ChannelID, Type: uint8(meta.ChannelType)})),
+		candidates, candidates, 1,
+	)
 	if err != nil || len(selected) == 0 {
 		return 0, false
 	}

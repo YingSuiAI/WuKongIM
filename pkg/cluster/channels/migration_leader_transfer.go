@@ -196,7 +196,7 @@ func (e *MigrationExecutor) advanceLeaderTransferDrainProof(ctx context.Context,
 }
 
 func (e *MigrationExecutor) runLeaderFailoverProbeTarget(ctx context.Context, task metadb.ChannelMigrationTask, meta metadb.ChannelRuntimeMeta, id ch.ChannelID) error {
-	probe, err := e.runtime.ProbeChannel(ctx, task.TargetNode, id.ID, id.Type)
+	probe, err := e.runtime.ProbeChannelReplica(ctx, task.TargetNode, meta)
 	if err != nil {
 		return err
 	}
@@ -210,7 +210,7 @@ func (e *MigrationExecutor) runLeaderFailoverProbeTarget(ctx context.Context, ta
 }
 
 func (e *MigrationExecutor) advanceLeaderFailoverTargetProof(ctx context.Context, task metadb.ChannelMigrationTask, meta metadb.ChannelRuntimeMeta, id ch.ChannelID) error {
-	probe, err := e.runtime.ProbeChannel(ctx, task.TargetNode, id.ID, id.Type)
+	probe, err := e.runtime.ProbeChannelReplica(ctx, task.TargetNode, meta)
 	if err != nil {
 		return err
 	}

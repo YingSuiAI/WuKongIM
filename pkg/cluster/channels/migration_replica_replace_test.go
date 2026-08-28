@@ -61,7 +61,7 @@ func TestReplicaReplaceExecutorRunsNonLeaderSourcePhaseOrder(t *testing.T) {
 		"promote_learner",
 		"clear_fence",
 	}, store.ops)
-	require.Equal(t, []string{"apply_meta:1", "apply_meta:4", "probe:4", "apply_meta:1", "apply_meta:4", "drain:1", "probe:4", "apply_meta:1", "apply_meta:4", "probe:4"}, runtime.ops)
+	require.Equal(t, []string{"apply_meta:1", "apply_meta:4", "probe:4", "apply_meta:1", "apply_meta:4", "drain:1", "catch_up:1:4:9", "probe:4", "apply_meta:1", "apply_meta:4", "probe:4"}, runtime.ops)
 	require.Equal(t, []uint64{1, 2, 4}, meta.Replicas)
 	require.Equal(t, []uint64{1, 2, 4}, meta.ISR)
 }

@@ -10,7 +10,7 @@ import (
 )
 
 func TestReplicaRepairPlannerBlocksNewPlacementWhenCandidatesBelowReplicaCount(t *testing.T) {
-	_, err := selectChannelReplicas("repair-new-channel", []uint64{1, 2}, 3)
+	_, _, err := selectChannelReplicas("repair-new-channel", []uint64{1, 2}, []uint64{1, 2}, 3)
 
 	require.ErrorIs(t, err, ch.ErrInvalidConfig)
 }

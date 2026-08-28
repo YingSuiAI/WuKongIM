@@ -8,6 +8,7 @@ import (
 	"time"
 
 	channelruntime "github.com/WuKongIM/WuKongIM/pkg/channel"
+	channelreplication "github.com/WuKongIM/WuKongIM/pkg/channel/replication"
 	channelstore "github.com/WuKongIM/WuKongIM/pkg/channel/store"
 	"github.com/WuKongIM/WuKongIM/pkg/cluster/channels"
 	"github.com/WuKongIM/WuKongIM/pkg/cluster/control"
@@ -41,6 +42,8 @@ type channelService interface {
 	Append(context.Context, channelruntime.AppendRequest) (channelruntime.AppendResult, error)
 	AppendBatch(context.Context, channelruntime.AppendBatchRequest) (channelruntime.AppendBatchResult, error)
 	ResolveAppendAuthority(context.Context, channelruntime.ChannelID) (channelruntime.Meta, error)
+	InvalidateAppendAuthority(channelruntime.ChannelID, channelruntime.NodeID, uint64, uint64, uint64)
+	MarkAppendAuthorityFailed(channelruntime.ChannelID, channelruntime.NodeID, uint64, uint64, uint64)
 	ReadChannelLastVisible(context.Context, channelruntime.ChannelID, uint64) (channelruntime.Message, bool, error)
 	RetentionView(context.Context, channelruntime.ChannelID) (channelruntime.RetentionView, error)
 	ApplyRetentionBoundary(context.Context, channelruntime.RetentionApplyRequest) (channelruntime.RetentionApplyResult, error)
@@ -95,7 +98,7 @@ type Node struct {
 	// invoked synchronously by Start, applySnapshot, or the control watch loop.
 	preferredLeaderReconciler taskExecutor
 	channels                  channelService
-	// channelDataNodes tracks health-schedulable data nodes for default Channel placement.
+	// channelDataNodes tracks active and health-schedulable data nodes for default Channel placement.
 	channelDataNodes dataNodeView
 	// channelDataPlaneLease gates local Channel leader appends on fresh control visibility.
 	channelDataPlaneLease *channelDataPlaneLeaseGuard
@@ -110,6 +113,10 @@ type Node struct {
 	// channelRPCGateway is registered once per transport server and atomically
 	// follows Channel runtime rebuilds after a restore activation.
 	channelRPCGateway *channels.ServiceGateway
+	// channelQuorumGateway is registered once and follows node-owned quorum runtime rebuilds.
+	channelQuorumGateway *channels.QuorumExchangeGateway
+	// defaultChannelReplication owns local durability, peer batches, and recovery workers.
+	defaultChannelReplication *channelreplication.Runtime
 	// defaultChannelStore owns the Node-created message DB factory.
 	defaultChannelStore *channelstore.MessageDBFactory
 	// channelStoreFactory is the narrow acquisition surface used by local message read facades.
@@ -185,6 +192,11 @@ type Node struct {
 	channelMigrationMu              sync.Mutex
 	channelMigrationCancel          context.CancelFunc
 	channelMigrationWG              sync.WaitGroup
+	// channelMigrationScanMu protects the bounded round-robin active-task cursor.
+	channelMigrationScanMu       sync.Mutex
+	channelMigrationScanSet      bool
+	channelMigrationScanHashSlot metadb.HashSlot
+	channelMigrationScanCursors  map[metadb.HashSlot]metadb.ChannelMigrationTaskCursor
 	// healthReportCancel stops the low-frequency Controller health reporter.
 	healthReportCancel context.CancelFunc
 	// healthReporter sends low-frequency Controller node health reports.
@@ -820,13 +832,16 @@ func (n *Node) InvalidateChannelAppendAuthority(id channelruntime.ChannelID, lea
 	if n == nil || n.channels == nil {
 		return
 	}
-	invalidator, ok := n.channels.(interface {
-		InvalidateAppendAuthority(channelruntime.ChannelID, channelruntime.NodeID, uint64, uint64, uint64)
-	})
-	if !ok {
+	n.channels.InvalidateAppendAuthority(id, channelruntime.NodeID(leader), epoch, leaderEpoch, routeGeneration)
+}
+
+// MarkChannelAppendAuthorityFailed records definitive unavailability of one
+// exact Channel authority version for foreground failover recovery.
+func (n *Node) MarkChannelAppendAuthorityFailed(id channelruntime.ChannelID, leader uint64, epoch uint64, leaderEpoch uint64, routeGeneration uint64) {
+	if n == nil || n.channels == nil {
 		return
 	}
-	invalidator.InvalidateAppendAuthority(id, channelruntime.NodeID(leader), epoch, leaderEpoch, routeGeneration)
+	n.channels.MarkAppendAuthorityFailed(id, channelruntime.NodeID(leader), epoch, leaderEpoch, routeGeneration)
 }
 
 // ReadChannelCommitted reads locally committed channel messages from the Node-created Channel store.
@@ -1110,12 +1125,14 @@ func (n *Node) ReadChannelConversationHeads(ctx context.Context, ids []channelru
 	results := make([]channels.ConversationHeadResult, len(ids))
 	eligibleIDs := make([]channelruntime.ChannelID, 0, len(ids))
 	eligibleIndexes := make([]int, 0, len(ids))
+	metadataResults := n.readConversationChannelMetadataBatch(ctx, ids)
 	for index, id := range ids {
-		metadata, err := n.GetChannelMetadata(ctx, id.ID, int64(id.Type))
+		metadata := metadataResults[index].Channel
+		err := metadataResults[index].Err
 		switch {
-		case err == nil && metadata.Disband != 0:
+		case err == nil && metadataResults[index].Found && metadata.Disband != 0:
 			results[index].Err = channelruntime.ErrChannelNotFound
-		case err == nil || errors.Is(err, metadb.ErrNotFound):
+		case err == nil:
 			eligibleIDs = append(eligibleIDs, id)
 			eligibleIndexes = append(eligibleIndexes, index)
 		default:
@@ -1136,6 +1153,29 @@ func (n *Node) ReadChannelConversationHeads(ctx context.Context, ids []channelru
 		results[eligibleIndexes[index]] = result
 	}
 	return results, nil
+}
+
+func (n *Node) readConversationChannelMetadataBatch(ctx context.Context, ids []channelruntime.ChannelID) []slotproxy.PermissionMetadataReadResult {
+	results := make([]slotproxy.PermissionMetadataReadResult, len(ids))
+	if n != nil && n.defaultSlotProxy != nil {
+		reads := make([]slotproxy.PermissionMetadataRead, len(ids))
+		for i, id := range ids {
+			reads[i] = slotproxy.PermissionMetadataRead{
+				Kind: slotproxy.PermissionMetadataReadChannel, ChannelID: id.ID, ChannelType: int64(id.Type),
+			}
+		}
+		return n.defaultSlotProxy.ReadPermissionMetadataBatch(ctx, reads)
+	}
+	for i, id := range ids {
+		metadata, err := n.GetChannelMetadata(ctx, id.ID, int64(id.Type))
+		if errors.Is(err, metadb.ErrNotFound) {
+			continue
+		}
+		results[i].Channel = metadata
+		results[i].Found = err == nil
+		results[i].Err = err
+	}
+	return results
 }
 
 func minAvailableSeq(retentionThroughSeq uint64) uint64 {

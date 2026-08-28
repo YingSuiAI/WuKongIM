@@ -27,7 +27,7 @@ func (n *Node) ProbeWriteReady(ctx context.Context) error {
 	if !snapshot.RoutesReady || !snapshot.SlotsReady || snapshot.HashSlotCount == 0 {
 		return fmt.Errorf("%w: routes=%t slots=%t hashSlotCount=%d", ErrRouteNotReady, snapshot.RoutesReady, snapshot.SlotsReady, snapshot.HashSlotCount)
 	}
-	if err := n.probeChannelPlacementReady(); err != nil {
+	if err := n.probeChannelPlacementReady(ctx); err != nil {
 		if refreshErr := n.refreshControlSnapshot(ctx); refreshErr != nil {
 			return fmt.Errorf("%w: refresh control snapshot: %v", err, refreshErr)
 		}
@@ -35,7 +35,7 @@ func (n *Node) ProbeWriteReady(ctx context.Context) error {
 		if !snapshot.RoutesReady || !snapshot.SlotsReady || snapshot.HashSlotCount == 0 {
 			return fmt.Errorf("%w: routes=%t slots=%t hashSlotCount=%d", ErrRouteNotReady, snapshot.RoutesReady, snapshot.SlotsReady, snapshot.HashSlotCount)
 		}
-		if err := n.probeChannelPlacementReady(); err != nil {
+		if err := n.probeChannelPlacementReady(ctx); err != nil {
 			return err
 		}
 	}
@@ -420,15 +420,37 @@ func selectWriteProbeSlotIDs(slotHashSlots map[uint32]uint16, slotLeaders map[ui
 	return out
 }
 
-func (n *Node) probeChannelPlacementReady() error {
+func (n *Node) probeChannelPlacementReady(ctx context.Context) error {
 	replicaCount := int(n.cfg.Channel.ReplicaCount)
-	candidates := n.channelDataNodes.DataNodes()
-	seen := make(map[uint64]struct{}, len(candidates))
-	for _, nodeID := range candidates {
-		seen[nodeID] = struct{}{}
+	table := n.router.Table()
+	if table == nil {
+		return ErrRouteNotReady
 	}
-	if len(seen) < replicaCount {
-		return fmt.Errorf("%w: channel placement candidates %d below replica count %d", ErrRouteNotReady, len(seen), replicaCount)
+	candidates, err := n.channelDataNodes.PlacementDataNodes(ctx, table.Revision)
+	if err != nil {
+		return fmt.Errorf("%w: channel placement data nodes: %v", ErrRouteNotReady, err)
+	}
+	active := uniqueNodeIDs(candidates.Active)
+	if len(active) < replicaCount {
+		return fmt.Errorf("%w: active channel placement candidates %d below replica count %d", ErrRouteNotReady, len(active), replicaCount)
+	}
+	minISR := replicaCount/2 + 1
+	schedulable := uniqueNodeIDs(candidates.Schedulable)
+	for nodeID := range schedulable {
+		if _, ok := active[nodeID]; !ok {
+			delete(schedulable, nodeID)
+		}
+	}
+	if len(schedulable) < minISR {
+		return fmt.Errorf("%w: schedulable channel placement candidates %d below MinISR %d", ErrRouteNotReady, len(schedulable), minISR)
 	}
 	return nil
+}
+
+func uniqueNodeIDs(nodes []uint64) map[uint64]struct{} {
+	unique := make(map[uint64]struct{}, len(nodes))
+	for _, nodeID := range nodes {
+		unique[nodeID] = struct{}{}
+	}
+	return unique
 }

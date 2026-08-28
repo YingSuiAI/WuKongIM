@@ -47,6 +47,18 @@ func TestLocalSessionWriterClassifiesExactSessionWritesWithoutAckState(t *testin
 	if session.writes.Load() != 1 {
 		t.Fatalf("stale route reached physical session; writes = %d", session.writes.Load())
 	}
+	for name, mutate := range map[string]func(*onlinedelivery.Route){
+		"installation generation": func(route *onlinedelivery.Route) { route.InstallationGeneration++ },
+		"authorization fence":     func(route *onlinedelivery.Route) { route.AuthorizationFence++ },
+	} {
+		t.Run(name, func(t *testing.T) {
+			stale := write
+			mutate(&stale.Route)
+			if result := writer.WriteSession(context.Background(), stale); result.Disposition != runtimedelivery.SessionWriteDropped {
+				t.Fatalf("stale write result = %#v, want dropped", result)
+			}
+		})
+	}
 
 	session.writeErr = errors.New("temporary")
 	if result := writer.WriteSession(context.Background(), write); result.Disposition != runtimedelivery.SessionWriteRetryable {
@@ -171,7 +183,8 @@ func registerLocalSessionWriterTestSession(
 	route := online.OwnerRoute{
 		UID: uid, OwnerNodeID: ownerNodeID, OwnerBootID: 7,
 		OwnerSeq: sessionID + 100, SessionID: sessionID, ConnectedUnix: 100,
-		AppInstanceID: "app-1", SessionGeneration: 1, ProtocolVersion: uint8(frame.LatestVersion),
+		AppInstanceID: "app-1", InstallationGeneration: 2, SessionGeneration: 1,
+		AuthorizationFence: 3, ProtocolVersion: uint8(frame.LatestVersion),
 	}
 	if err := registry.RegisterPending(online.LocalSession{Route: route, Session: session}); err != nil {
 		t.Fatalf("RegisterPending(%d) error = %v", sessionID, err)
@@ -182,6 +195,8 @@ func registerLocalSessionWriterTestSession(
 	return onlinedelivery.Route{
 		UID: uid, OwnerNodeID: ownerNodeID, OwnerBootID: route.OwnerBootID,
 		OwnerSeq: route.OwnerSeq, SessionID: sessionID,
-		AppInstanceID: route.AppInstanceID, SessionGeneration: route.SessionGeneration, ProtocolVersion: route.ProtocolVersion,
+		AppInstanceID: route.AppInstanceID, InstallationGeneration: route.InstallationGeneration,
+		SessionGeneration: route.SessionGeneration, AuthorizationFence: route.AuthorizationFence,
+		ProtocolVersion: route.ProtocolVersion,
 	}
 }

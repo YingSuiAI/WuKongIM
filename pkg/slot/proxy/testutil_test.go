@@ -439,6 +439,11 @@ func (c *proxyTestCluster) HashSlotTableVersion() uint64 {
 	return c.layout.version
 }
 
+func (c *proxyTestCluster) IsLocalSlotLeader(slotID multiraft.SlotID) bool {
+	leaderID, err := c.LeaderOf(slotID)
+	return err == nil && c.IsLocal(leaderID)
+}
+
 func (c *proxyTestCluster) LeaderOf(slotID multiraft.SlotID) (multiraft.NodeID, error) {
 	if c == nil {
 		return 0, ErrSlotNotFound

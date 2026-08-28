@@ -90,6 +90,41 @@ func TestChannelMigrationTaskListActiveUsesActiveIndexLimit(t *testing.T) {
 	}
 }
 
+func TestChannelMigrationTaskActiveIndexScanResumesAfterExactEntry(t *testing.T) {
+	store := openTestMetaStore(t)
+	defer store.close(t)
+	shard := store.db.HashSlot(8)
+	ctx := context.Background()
+	want := []ChannelMigrationTask{
+		testChannelMigrationTask("task-scan-a", "channel-scan-a"),
+		testChannelMigrationTask("task-scan-b", "channel-scan-b"),
+		testChannelMigrationTask("task-scan-c", "channel-scan-c"),
+	}
+	for _, task := range want {
+		if err := shard.CreateChannelMigrationTask(ctx, task); err != nil {
+			t.Fatalf("CreateChannelMigrationTask(%s): %v", task.TaskID, err)
+		}
+	}
+
+	var cursor ChannelMigrationTaskCursor
+	for i, expected := range want {
+		page, next, done, scanned, err := shard.ScanActiveChannelMigrationTasks(ctx, cursor, 1)
+		if err != nil {
+			t.Fatalf("ScanActiveChannelMigrationTasks(page %d): %v", i+1, err)
+		}
+		if len(page) != 1 || page[0].TaskID != expected.TaskID || scanned != 1 {
+			t.Fatalf("page %d = %+v scanned=%d, want %s", i+1, page, scanned, expected.TaskID)
+		}
+		if next.ChannelID != expected.ChannelID || next.ChannelType != expected.ChannelType {
+			t.Fatalf("page %d cursor = %+v, want channel %s", i+1, next, expected.ChannelID)
+		}
+		if done != (i == len(want)-1) {
+			t.Fatalf("page %d done = %t, want %t", i+1, done, i == len(want)-1)
+		}
+		cursor = next
+	}
+}
+
 func TestChannelMigrationTaskKeepsLegacyRowIndexLayouts(t *testing.T) {
 	store := openTestMetaStore(t)
 	defer store.close(t)

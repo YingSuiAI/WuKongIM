@@ -75,6 +75,25 @@ func rpcServiceIDsForTest() map[string]uint8 {
 		"slot_runtime_metadata":          RPCSlotRuntimeMetadata,
 		"slot_permission_metadata_batch": RPCSlotPermissionMetadataBatch,
 		"slot_identity_metadata":         RPCSlotIdentityMetadata,
+		"channel_quorum_exchange":        RPCChannelQuorumExchange,
+	}
+}
+
+func TestCenterIMRPCServiceIDsRemainStable(t *testing.T) {
+	want := map[string]struct {
+		got  uint8
+		want uint8
+	}{
+		"delivery event push":      {got: RPCDeliveryEventPush, want: 84},
+		"slot runtime metadata":    {got: RPCSlotRuntimeMetadata, want: 85},
+		"slot permission metadata": {got: RPCSlotPermissionMetadataBatch, want: 86},
+		"slot identity metadata":   {got: RPCSlotIdentityMetadata, want: 87},
+		"channel quorum exchange":  {got: RPCChannelQuorumExchange, want: 88},
+	}
+	for name, serviceID := range want {
+		if serviceID.got != serviceID.want {
+			t.Fatalf("%s service id = %d, want %d", name, serviceID.got, serviceID.want)
+		}
 	}
 }
 

@@ -17,13 +17,15 @@ import (
 const (
 	channelMigrationMetaRPCVersion = uint8(1)
 
-	channelMigrationMetaOpGetRuntime   = "get_runtime"
-	channelMigrationMetaOpGetActive    = "get_active"
-	channelMigrationMetaOpGetTask      = "get_task"
-	channelMigrationMetaOpListActive   = "list_active"
-	channelMigrationMetaOpRuntimeProbe = "runtime_probe"
-	channelMigrationMetaOpRuntimeDrain = "runtime_drain"
-	channelMigrationMetaOpRuntimeApply = "runtime_apply_meta"
+	channelMigrationMetaOpGetRuntime     = "get_runtime"
+	channelMigrationMetaOpGetActive      = "get_active"
+	channelMigrationMetaOpGetTask        = "get_task"
+	channelMigrationMetaOpListActive     = "list_active"
+	channelMigrationMetaOpRuntimeProbe   = "runtime_probe"
+	channelMigrationMetaOpReplicaProbe   = "replica_probe"
+	channelMigrationMetaOpRuntimeDrain   = "runtime_drain"
+	channelMigrationMetaOpRuntimeApply   = "runtime_apply_meta"
+	channelMigrationMetaOpReplicaCatchUp = "replica_catch_up"
 )
 
 func (n *Node) readChannelMigrationRuntimeMeta(ctx context.Context, hashSlot uint16, channelID string, channelType int64) (metadb.ChannelRuntimeMeta, error) {
@@ -331,6 +333,15 @@ func (h channelMigrationMetaHandler) HandleRPC(ctx context.Context, payload []by
 			return nil, err
 		}
 		resp.RuntimeProbe = &probe
+	case channelMigrationMetaOpReplicaProbe:
+		if req.RuntimeMeta == nil {
+			return nil, fmt.Errorf("%w: runtime meta is required", metadb.ErrInvalidArgument)
+		}
+		probe, err := h.node.probeLocalChannelReplica(ctx, *req.RuntimeMeta)
+		if err != nil {
+			return nil, err
+		}
+		resp.RuntimeProbe = &probe
 	case channelMigrationMetaOpRuntimeDrain:
 		if req.DrainRequest == nil {
 			return nil, fmt.Errorf("%w: drain request is required", metadb.ErrInvalidArgument)
@@ -345,6 +356,13 @@ func (h channelMigrationMetaHandler) HandleRPC(ctx context.Context, payload []by
 			return nil, fmt.Errorf("%w: runtime meta is required", metadb.ErrInvalidArgument)
 		}
 		if err := h.node.applyChannelMigrationLocalRuntimeMeta(ctx, *req.RuntimeMeta); err != nil {
+			return nil, err
+		}
+	case channelMigrationMetaOpReplicaCatchUp:
+		if req.RuntimeMeta == nil {
+			return nil, fmt.Errorf("%w: runtime meta is required", metadb.ErrInvalidArgument)
+		}
+		if err := h.node.catchUpLocalChannelReplica(ctx, req.TargetNode, *req.RuntimeMeta, req.Through); err != nil {
 			return nil, err
 		}
 	default:
@@ -363,6 +381,8 @@ type channelMigrationMetaRPCRequest struct {
 	Limit        int                        `json:"limit,omitempty"`
 	DrainRequest *ch.DrainChannelRequest    `json:"drain_request,omitempty"`
 	RuntimeMeta  *metadb.ChannelRuntimeMeta `json:"runtime_meta,omitempty"`
+	TargetNode   uint64                     `json:"target_node,omitempty"`
+	Through      uint64                     `json:"through,omitempty"`
 }
 
 type channelMigrationMetaRPCResponse struct {

@@ -110,6 +110,9 @@ func TestMemoryBackedGroupDoesNotRecoverDeletedSlotDataAfterOpenGroup(t *testing
 	if err := db.DeleteSlotData(ctx, uint64(slotID)); err != nil {
 		t.Fatalf("DeleteSlotData() error = %v", err)
 	}
+	if applied, err := db.SlotAppliedIndex(ctx, uint64(slotID)); err != nil || applied != 0 {
+		t.Fatalf("SlotAppliedIndex() after delete = %d, %v; want 0, nil", applied, err)
+	}
 	if _, err := db.ForSlot(uint64(slotID)).GetUser(ctx, "u1"); !errors.Is(err, metadb.ErrNotFound) {
 		t.Fatalf("GetUser() after delete err = %v, want ErrNotFound", err)
 	}
@@ -544,6 +547,35 @@ func TestStoreGetChannelRuntimeMetaReadsAuthoritativeRemoteSlot(t *testing.T) {
 	require.Equal(t, metadb.NormalizeChannelRuntimeMeta(meta), got)
 }
 
+func TestStoreReadChannelRuntimeMetadataBatchPreservesSlotAndMissingAlignment(t *testing.T) {
+	ctx := context.Background()
+	nodes := startTwoNodeShardedStores(t)
+	local := metadb.ChannelRuntimeMeta{
+		ChannelID: findChannelIDForSlot(t, nodes[0].cluster, 1, "batch-local-runtime"), ChannelType: 2,
+		ChannelEpoch: 1, LeaderEpoch: 1, Leader: 1, Replicas: []uint64{1}, ISR: []uint64{1}, MinISR: 1, Status: 2,
+	}
+	remote := metadb.ChannelRuntimeMeta{
+		ChannelID: findChannelIDForSlot(t, nodes[0].cluster, 2, "batch-remote-runtime"), ChannelType: 2,
+		ChannelEpoch: 2, LeaderEpoch: 2, Leader: 2, Replicas: []uint64{2}, ISR: []uint64{2}, MinISR: 1, Status: 2,
+	}
+	missing := metadb.ChannelKey{ChannelID: findChannelIDForSlot(t, nodes[0].cluster, 1, "batch-missing-runtime"), ChannelType: 2}
+	require.NoError(t, nodes[0].db.ForHashSlot(mustHashSlotForKey(t, nodes[0].cluster, local.ChannelID)).UpsertChannelRuntimeMeta(ctx, local))
+	require.NoError(t, nodes[1].db.ForHashSlot(mustHashSlotForKey(t, nodes[1].cluster, remote.ChannelID)).UpsertChannelRuntimeMeta(ctx, remote))
+
+	results, err := nodes[0].store.ReadChannelRuntimeMetadataBatch(ctx, []metadb.ChannelKey{
+		{ChannelID: local.ChannelID, ChannelType: local.ChannelType}, missing,
+		{ChannelID: remote.ChannelID, ChannelType: remote.ChannelType},
+	})
+
+	require.NoError(t, err)
+	require.Len(t, results, 3)
+	require.NoError(t, results[0].Err)
+	require.Equal(t, metadb.NormalizeChannelRuntimeMeta(local), results[0].Meta)
+	require.ErrorIs(t, results[1].Err, metadb.ErrNotFound)
+	require.NoError(t, results[2].Err)
+	require.Equal(t, metadb.NormalizeChannelRuntimeMeta(remote), results[2].Meta)
+}
+
 func TestStoreGetChannelForPermissionReadsAuthoritativeSlot(t *testing.T) {
 	ctx := context.Background()
 	nodes := startTwoNodeShardedStores(t)
@@ -551,7 +583,7 @@ func TestStoreGetChannelForPermissionReadsAuthoritativeSlot(t *testing.T) {
 	channelID := findChannelIDForSlot(t, nodes[0].cluster, 2, "remote-channel-permission")
 	ch := metadb.Channel{
 		ChannelID: channelID, ChannelType: 2, Ban: 1, Disband: 1, SendBan: 1,
-		AllowStranger: 1, DirectoryReady: 1,
+		AllowStranger: 1,
 	}
 	require.NoError(t, nodes[1].db.ForHashSlot(mustHashSlotForKey(t, nodes[1].cluster, channelID)).UpsertChannel(ctx, ch))
 
@@ -591,7 +623,9 @@ func TestStoreReadPermissionMetadataBatchRoutesBySlotAndPreservesAlignment(t *te
 		require.NoError(t, result.Err)
 	}
 	require.True(t, results[0].Found)
-	require.Equal(t, remoteChannel, results[0].Channel)
+	expectedRemoteChannel := remoteChannel
+	expectedRemoteChannel.SubscriberCount = 1
+	require.Equal(t, expectedRemoteChannel, results[0].Channel)
 	require.True(t, results[1].Value)
 	require.False(t, results[2].Value)
 	require.False(t, results[3].Found)

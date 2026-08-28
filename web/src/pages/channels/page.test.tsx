@@ -120,6 +120,9 @@ test("uses compact channel page chrome without summary cards", async () => {
     limit: 50,
     includeMaxMessageSeq: true,
   })
+  const table = screen.getByRole("table")
+  expect(table).toHaveClass("block", "md:table")
+  expect(screen.getByText("alpha").closest("td")).toHaveAttribute("data-label", "Channel ID")
   expect(screen.queryByText("Scope: all channels")).not.toBeInTheDocument()
   expect(screen.queryByText("Channel lists and runtime drill-in status.")).not.toBeInTheDocument()
   expect(screen.queryByText("Loaded channels")).not.toBeInTheDocument()
@@ -174,7 +177,7 @@ test("renders channel rows from the runtime metadata list and opens messages que
   expect(screen.getByText("2")).toBeInTheDocument()
   expect(screen.getByText("1, 2, 3")).toBeInTheDocument()
   expect(screen.getByText("7")).toBeInTheDocument()
-  expect(screen.getByText("active")).toBeInTheDocument()
+  expect(screen.getByText("Active")).toBeInTheDocument()
   await user.click(screen.getByRole("button", { name: "View channel alpha messages" }))
 
   expect(await screen.findByText("/messages?channel_id=alpha&channel_type=1")).toBeInTheDocument()

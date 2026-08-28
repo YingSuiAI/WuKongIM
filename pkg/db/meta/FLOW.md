@@ -69,12 +69,17 @@ fields.
 
 - Subscriber mutations sort and deduplicate UIDs and update the Channel's
   subscriber count and mutation version atomically with subscriber rows.
-- Channel runtime metadata keeps routing, leadership, retention,
-  `directory_ready`, terminal state, and write fences monotonic.
+- Channel runtime metadata keeps routing, leadership, retention, terminal
+  state, and write fences monotonic. Person-directory projection is a
+  generation-fenced `none -> pending -> ready` state backed by durable tasks;
+  a stale completion from a deleted/recreated Channel cannot mark the new
+  generation ready.
 - Channel latest rows are channel-owned projections whose sequence only
   advances; they are not a per-user conversation directory.
 - Message-event state, cursor, and applied-event tables preserve idempotent
-  event reduction without raw replay rows.
+  event reduction without raw replay rows. Platform authority sequences are
+  strictly increasing per run but may contain gaps consumed by non-public
+  ledger entries; the message-event transport sequence remains contiguous.
 - Migration tasks keep guarded runtime-meta updates and read-your-writes
   overlays inside the same deterministic batch.
 

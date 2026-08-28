@@ -173,19 +173,6 @@ func TestLifecycleCandidateSelectionUsesInjectedLiveAssignment(t *testing.T) {
 	}
 }
 
-func TestLifecycleProofCycleIsExactlyEveryTenMinutesWithoutRetainedHistory(t *testing.T) {
-	start := time.Unix(1_000, 0)
-	for cycle := uint64(0); cycle < 4; cycle++ {
-		got, err := LifecycleProofCycleTime(start, cycle)
-		if err != nil || !got.Equal(start.Add(time.Duration(cycle+1)*10*time.Minute)) {
-			t.Fatalf("cycle %d = %v,%v", cycle, got, err)
-		}
-	}
-	if _, err := LifecycleProofCycleTime(start, ^uint64(0)); !errors.Is(err, ErrLifecycleHarnessInvalid) {
-		t.Fatalf("overflow error = %v", err)
-	}
-}
-
 func TestLifecycleCandidateSelectionRejectsDuplicateUndersupplyAndBadPhysicalAssignment(t *testing.T) {
 	now := time.Unix(1_000, 0)
 	valid := lifecycleTestCandidates(t, now)
@@ -258,6 +245,124 @@ func TestLifecycleProofLoadedAbsentReheatSequenceContinuity(t *testing.T) {
 	}
 }
 
+func TestLifecycleProofWaitsForReheatSendACKBeforeRequiringSequenceAdvance(t *testing.T) {
+	now := time.Unix(1_000, 0)
+	candidate := lifecycleTestCandidates(t, now)[0]
+	proof, err := NewLifecycleProof([]LifecycleCandidate{candidate})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := proof.Observe(now, lifecycleRows(candidate, "active", 10, 10)); err != nil {
+		t.Fatalf("loaded: %v", err)
+	}
+	if err := proof.Observe(candidate.QuietNotBefore, lifecycleRows(candidate, "missing", 0, 0)); err != nil {
+		t.Fatalf("absent: %v", err)
+	}
+	if err := proof.Reheat(context.Background(), candidate.QuietNotBefore, candidate.ChannelID, &fakeLifecycleSender{}); err != nil {
+		t.Fatalf("reheat: %v", err)
+	}
+
+	// The incoming reheat SEND loads the runtime before its SENDACK proves the
+	// append. Seeing the retained sequence in that bounded interval is expected
+	// convergence, not a reset or a failed continuity proof.
+	if err := proof.Observe(candidate.ReheatAt.Add(time.Second), lifecycleRows(candidate, "active", 10, 10)); err != nil {
+		t.Fatalf("pre-SENDACK active runtime: %v", err)
+	}
+	if snapshot := proof.Snapshot(); snapshot.Completed != 0 || snapshot.ProductFailures != 0 {
+		t.Fatalf("pre-SENDACK snapshot = %+v", snapshot)
+	}
+
+	if err := proof.Observe(candidate.ReheatAt.Add(2*time.Second), lifecycleRows(candidate, "active", 11, 11)); err != nil {
+		t.Fatalf("post-SENDACK sequence advance: %v", err)
+	}
+	if snapshot := proof.Snapshot(); snapshot.Completed != 1 || snapshot.ProductFailures != 0 {
+		t.Fatalf("completed snapshot = %+v", snapshot)
+	}
+}
+
+func TestLifecycleProofFailsClosedWhenReheatSequenceNeverAdvances(t *testing.T) {
+	now := time.Unix(1_000, 0)
+	candidate := lifecycleTestCandidates(t, now)[0]
+	proof, err := NewLifecycleProof([]LifecycleCandidate{candidate})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := proof.Observe(now, lifecycleRows(candidate, "active", 10, 10)); err != nil {
+		t.Fatalf("loaded: %v", err)
+	}
+	if err := proof.Observe(candidate.QuietNotBefore, lifecycleRows(candidate, "missing", 0, 0)); err != nil {
+		t.Fatalf("absent: %v", err)
+	}
+	if err := proof.Reheat(context.Background(), candidate.QuietNotBefore, candidate.ChannelID, &fakeLifecycleSender{}); err != nil {
+		t.Fatalf("reheat: %v", err)
+	}
+	if err := proof.Observe(candidate.ReheatAt.Add(time.Second), lifecycleRows(candidate, "active", 10, 10)); err != nil {
+		t.Fatalf("bounded convergence: %v", err)
+	}
+	if err := proof.Observe(candidate.ReheatAt.Add(lifecycleReheatDeadline+time.Nanosecond), lifecycleRows(candidate, "active", 10, 10)); !errors.Is(err, ErrLifecycleProductFailure) {
+		t.Fatalf("deadline error = %v, want product failure", err)
+	}
+	snapshot := proof.Snapshot()
+	if snapshot.ProductFailures != 1 || snapshot.ProductFailureReasons.ReheatTimeout != 1 || snapshot.Completed != 0 {
+		t.Fatalf("deadline snapshot = %+v", snapshot)
+	}
+}
+
+func TestLifecycleProofAcceptsAdvancedSequenceFromFirstPostDeadlineProbe(t *testing.T) {
+	now := time.Unix(1_000, 0)
+	candidate := lifecycleTestCandidates(t, now)[0]
+	proof, err := NewLifecycleProof([]LifecycleCandidate{candidate})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := proof.Observe(now, lifecycleRows(candidate, "active", 10, 10)); err != nil {
+		t.Fatalf("loaded: %v", err)
+	}
+	if err := proof.Observe(candidate.QuietNotBefore, lifecycleRows(candidate, "missing", 0, 0)); err != nil {
+		t.Fatalf("absent: %v", err)
+	}
+	if err := proof.Reheat(context.Background(), candidate.QuietNotBefore, candidate.ChannelID, &fakeLifecycleSender{}); err != nil {
+		t.Fatalf("reheat: %v", err)
+	}
+
+	// The worker can finish the real SEND/SENDACK before the proof's bounded
+	// all-node probe returns. The first post-deadline probe must evaluate that
+	// successful sequence evidence before classifying a timeout.
+	if err := proof.Observe(candidate.ReheatAt.Add(lifecycleReheatDeadline+time.Nanosecond), lifecycleRows(candidate, "active", 11, 11)); err != nil {
+		t.Fatalf("advanced post-deadline probe: %v", err)
+	}
+	if snapshot := proof.Snapshot(); snapshot.Completed != 1 || snapshot.ProductFailures != 0 {
+		t.Fatalf("completed snapshot = %+v", snapshot)
+	}
+}
+
+func TestLifecycleProofAcceptsLeaderOnlyRuntimeAcrossNaturalColdReheat(t *testing.T) {
+	now := time.Unix(1_000, 0)
+	candidate := lifecycleTestCandidates(t, now)[0]
+	proof, err := NewLifecycleProof([]LifecycleCandidate{candidate})
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaderOnly := lifecycleRowsWithRoles(candidate, [3]string{"leader", "missing", "missing"}, 10, 10)
+	if err := proof.Observe(now, leaderOnly); err != nil {
+		t.Fatalf("initial leader runtime: %v", err)
+	}
+	if err := proof.Observe(candidate.QuietNotBefore, lifecycleRows(candidate, "missing", 0, 0)); err != nil {
+		t.Fatalf("all-node absence: %v", err)
+	}
+	if err := proof.Reheat(context.Background(), candidate.QuietNotBefore, candidate.ChannelID, &fakeLifecycleSender{}); err != nil {
+		t.Fatalf("reheat: %v", err)
+	}
+	reheatedLeaderOnly := lifecycleRowsWithRoles(candidate, [3]string{"missing", "leader", "missing"}, 11, 11)
+	if err := proof.Observe(candidate.ReheatAt.Add(time.Second), reheatedLeaderOnly); err != nil {
+		t.Fatalf("reheated leader runtime: %v", err)
+	}
+	snapshot := proof.Snapshot()
+	if snapshot.Loaded != 1 || snapshot.ColdEligible != 1 || snapshot.Completed != 1 || snapshot.ProductFailures != 0 {
+		t.Fatalf("snapshot = %+v, want one leader-only lifecycle proof", snapshot)
+	}
+}
+
 func TestLifecycleCandidateEngineLeaseReconstructsCurrentTimerAndAdmitsRealScheduledReheat(t *testing.T) {
 	fixture := newEngineTestFixture(t, engineTestLimits{})
 	if err := fixture.engine.Start(context.Background()); err != nil {
@@ -266,6 +371,11 @@ func TestLifecycleCandidateEngineLeaseReconstructsCurrentTimerAndAdmitsRealSched
 	defer fixture.engine.Stop()
 	edge := fixture.graph.Incoming(18).Items[0]
 	now := fixture.clock.Now()
+	if _, err := fixture.engine.Login(context.Background(), SessionLogin{
+		UID: edge.OwnerUID, UserIndex: edge.OwnerIndex, LoginOrdinal: edge.OwnerIndex,
+	}); err != nil {
+		t.Fatalf("login inflight sender: %v", err)
+	}
 	installed := make(chan struct{}, 1)
 	if err := fixture.engine.enqueueBlocking(engineCommand{run: func() {
 		work := &engineWork{due: now.Add(10 * time.Minute), eligibilityDeadline: now.Add(11 * time.Minute), kind: engineWorkLifecycle, edge: edge,
@@ -278,34 +388,42 @@ func TestLifecycleCandidateEngineLeaseReconstructsCurrentTimerAndAdmitsRealSched
 		t.Fatal(err)
 	}
 	<-installed
-	candidates, err := fixture.engine.LeaseLifecycleCandidates(context.Background(), 1, mustInitialLifecycleSlotAssignment(t))
+	candidates, err := fixture.engine.LeaseLifecycleCandidates(context.Background(), 1, mustInitialLifecycleSlotAssignment(t), fixture.clock.Now())
 	if err != nil || len(candidates) != 1 {
 		t.Fatalf("lease = %+v, %v", candidates, err)
 	}
 	candidate := candidates[0]
 	if candidate.ChannelID != edge.PersonChannelID || candidate.TimerToken != 41 || candidate.ActivityVersion != 1 || candidate.InitialSequence != 42 || !candidate.ObservedLoaded ||
-		!candidate.QuietNotBefore.Equal(now.Add(5*time.Minute+time.Nanosecond)) || !candidate.QuietDeadline.Equal(now.Add(10*time.Minute-time.Nanosecond)) || !candidate.ReheatAt.Equal(now.Add(10*time.Minute)) {
+		!candidate.QuietNotBefore.Equal(now.Add(5*time.Minute+time.Nanosecond)) ||
+		!candidate.QuietDeadline.Equal(now.Add(10*time.Minute-lifecycleReheatAdmissionReserve-time.Nanosecond)) ||
+		!candidate.ReheatAt.Equal(now.Add(10*time.Minute)) {
 		t.Fatalf("candidate = %+v", candidate)
 	}
 	fixture.clock.Set(now.Add(time.Minute))
 	intent := fixture.intent(t, edge.OwnerUID, edge.PeerUID, 0, TrafficPerson)
 	intent.ChannelID = edge.PersonChannelID
-	if err := fixture.verifier.RegisterSend(intent.Logical, now); err != nil {
+	if err := fixture.verifier.RegisterSend(intent.Logical, now, SendLatencyHot); err != nil {
 		t.Fatal(err)
 	}
 	if err := fixture.verifier.ObserveAttempt(intent.Logical, RetryAttempt{ClientMsgNo: intent.Logical.ClientMsgNo}, 1); err != nil {
 		t.Fatal(err)
 	}
-	installedAck := make(chan struct{}, 1)
+	installedAck := make(chan bool, 1)
 	if err := fixture.engine.enqueueBlocking(engineCommand{run: func() {
-		inflight := &engineInflight{intent: intent, currentClientSeq: 1}
-		inflight.registerClientSeq(1)
+		if !fixture.engine.sessions.acquireSendLease(intent.Logical.Sender) {
+			installedAck <- false
+			return
+		}
+		inflight := &engineInflight{intent: intent, senderLeaseUID: intent.Logical.Sender, currentClientSeq: 1}
+		inflight.registerClientSeq(1, fixture.clock.Now())
 		fixture.engine.inflight[intent.Logical.ClientMsgNo] = inflight
-		installedAck <- struct{}{}
+		installedAck <- true
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	<-installedAck
+	if !<-installedAck {
+		t.Fatal("install inflight send lease")
+	}
 	ack := &frame.SendackPacket{ClientSeq: 1, ClientMsgNo: intent.Logical.ClientMsgNo, MessageID: 101, MessageSeq: 43, ReasonCode: frame.ReasonSuccess}
 	verificationErr := fixture.verifier.HandleSendack(ack)
 	if err := fixture.engine.ObserveSendack(edge.OwnerUID, ack, verificationErr); err != nil {
@@ -314,7 +432,7 @@ func TestLifecycleCandidateEngineLeaseReconstructsCurrentTimerAndAdmitsRealSched
 	if stale, staleErr := fixture.engine.ApproveColdRevisitContext(context.Background(), candidate.ChannelID, candidate.TimerToken, candidate.ActivityVersion); staleErr != nil || stale {
 		t.Fatalf("stale activity lease approval = %v,%v", stale, staleErr)
 	}
-	refreshed, err := fixture.engine.LeaseLifecycleCandidates(context.Background(), 1, mustInitialLifecycleSlotAssignment(t))
+	refreshed, err := fixture.engine.LeaseLifecycleCandidates(context.Background(), 1, mustInitialLifecycleSlotAssignment(t), fixture.clock.Now())
 	if err != nil || len(refreshed) != 1 || refreshed[0].TimerToken != candidate.TimerToken || refreshed[0].ActivityVersion != 2 || refreshed[0].InitialSequence != 43 || !refreshed[0].QuietNotBefore.Equal(now.Add(6*time.Minute+time.Nanosecond)) {
 		t.Fatalf("refreshed lease = %+v,%v", refreshed, err)
 	}
@@ -335,22 +453,28 @@ func TestLifecycleCandidateEngineLeaseReconstructsCurrentTimerAndAdmitsRealSched
 	}
 	lateIntent := fixture.intent(t, edge.OwnerUID, edge.PeerUID, 1, TrafficPerson)
 	lateIntent.ChannelID = edge.PersonChannelID
-	if err := fixture.verifier.RegisterSend(lateIntent.Logical, now.Add(time.Minute)); err != nil {
+	if err := fixture.verifier.RegisterSend(lateIntent.Logical, now.Add(time.Minute), SendLatencyHot); err != nil {
 		t.Fatal(err)
 	}
 	if err := fixture.verifier.ObserveAttempt(lateIntent.Logical, RetryAttempt{ClientMsgNo: lateIntent.Logical.ClientMsgNo}, 2); err != nil {
 		t.Fatal(err)
 	}
-	lateInstalled := make(chan struct{}, 1)
+	lateInstalled := make(chan bool, 1)
 	if err := fixture.engine.enqueueBlocking(engineCommand{run: func() {
-		inflight := &engineInflight{intent: lateIntent, currentClientSeq: 2}
-		inflight.registerClientSeq(2)
+		if !fixture.engine.sessions.acquireSendLease(lateIntent.Logical.Sender) {
+			lateInstalled <- false
+			return
+		}
+		inflight := &engineInflight{intent: lateIntent, senderLeaseUID: lateIntent.Logical.Sender, currentClientSeq: 2}
+		inflight.registerClientSeq(2, fixture.clock.Now())
 		fixture.engine.inflight[lateIntent.Logical.ClientMsgNo] = inflight
-		lateInstalled <- struct{}{}
+		lateInstalled <- true
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	<-lateInstalled
+	if !<-lateInstalled {
+		t.Fatal("install late inflight send lease")
+	}
 	lateAck := &frame.SendackPacket{ClientSeq: 2, ClientMsgNo: lateIntent.Logical.ClientMsgNo, MessageID: 102, MessageSeq: 44, ReasonCode: frame.ReasonSuccess}
 	lateVerificationErr := fixture.verifier.HandleSendack(lateAck)
 	lateErr := fixture.engine.ObserveSendack(edge.OwnerUID, lateAck, lateVerificationErr)
@@ -374,7 +498,7 @@ func TestLifecycleCandidateEngineLeaseReconstructsCurrentTimerAndAdmitsRealSched
 	if replay, replayErr := fixture.engine.ApproveColdRevisitContext(context.Background(), candidate.ChannelID, candidate.TimerToken, candidate.ActivityVersion); replayErr != nil || replay {
 		t.Fatalf("externally invalidated approval replay = %v,%v", replay, replayErr)
 	}
-	if leased, leaseErr := fixture.engine.LeaseLifecycleCandidates(context.Background(), 1, mustInitialLifecycleSlotAssignment(t)); leaseErr != nil || len(leased) != 0 {
+	if leased, leaseErr := fixture.engine.LeaseLifecycleCandidates(context.Background(), 1, mustInitialLifecycleSlotAssignment(t), fixture.clock.Now()); leaseErr != nil || len(leased) != 0 {
 		t.Fatalf("invalidated timer lease = %+v,%v", leased, leaseErr)
 	}
 	if washed, washErr := fixture.engine.ApproveColdRevisitContext(context.Background(), candidate.ChannelID, candidate.TimerToken, candidate.ActivityVersion+1); washErr != nil || washed {
@@ -418,6 +542,589 @@ func TestLifecycleCandidateEngineLeaseReconstructsCurrentTimerAndAdmitsRealSched
 	}
 	if exact, exactErr := fixture.engine.ApproveColdRevisitContext(context.Background(), candidate.ChannelID, 42, 1); exactErr != nil || !exact {
 		t.Fatalf("replacement exact approval = %v,%v", exact, exactErr)
+	}
+}
+
+func TestLifecycleCandidateReheatAdmissionSurvivesBoundedControlPipeline(t *testing.T) {
+	fixture := newEngineTestFixture(t, engineTestLimits{})
+	if err := fixture.engine.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer fixture.engine.Stop()
+
+	edge := fixture.graph.Incoming(18).Items[0]
+	now := fixture.clock.Now()
+	installed := make(chan struct{}, 1)
+	if err := fixture.engine.enqueueBlocking(engineCommand{run: func() {
+		work := &engineWork{
+			due: now.Add(minimumRevisitDelay), eligibilityDeadline: now.Add(minimumRevisitDelay + time.Minute),
+			kind: engineWorkLifecycle, edge: edge,
+			schedule:            ChannelSchedule{Class: LifecycleRevisit, RequiresColdRuntimeEvidence: true, NaturalCooling: true},
+			lifecycleTimerToken: 41, activityVersion: 1, initialSequence: 42, lastActivityAt: now, observedLoaded: true,
+		}
+		fixture.engine.installLifecycleTimer(work)
+		fixture.engine.offerLifecycleCandidate(work)
+		installed <- struct{}{}
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	<-installed
+
+	candidates, err := fixture.engine.LeaseLifecycleCandidates(
+		context.Background(), 1, mustInitialLifecycleSlotAssignment(t), fixture.clock.Now(),
+	)
+	if err != nil || len(candidates) != 1 {
+		t.Fatalf("lease = %+v, %v", candidates, err)
+	}
+	candidate := candidates[0]
+	// The production controller performs one bounded all-node probe followed by
+	// one bounded worker approval. Leave five additional seconds for remote
+	// scheduling and command-queue jitter observed by the owner clock.
+	controlPipeline := 2*observerMaxRoundTimeout + 5*time.Second
+	if candidate.ReheatAt.Sub(candidate.QuietDeadline) <= controlPipeline {
+		t.Fatalf("reheat admission reserve = %v, want more than bounded control pipeline %v",
+			candidate.ReheatAt.Sub(candidate.QuietDeadline), controlPipeline)
+	}
+	fixture.clock.Set(candidate.QuietDeadline.Add(controlPipeline))
+	approved, err := fixture.engine.ApproveColdRevisitContext(
+		context.Background(), candidate.ChannelID, candidate.TimerToken, candidate.ActivityVersion,
+	)
+	if err != nil || !approved {
+		t.Fatalf("bounded control pipeline approval = %v, %v", approved, err)
+	}
+}
+
+func TestLifecycleCandidateEngineBatchApprovalIsAtomic(t *testing.T) {
+	fixture := newEngineTestFixture(t, engineTestLimits{})
+	if err := fixture.engine.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer fixture.engine.Stop()
+	now := fixture.clock.Now()
+	edges := []RelationshipEdge{fixture.graph.Incoming(18).Items[0], fixture.graph.Incoming(19).Items[0]}
+	items := make([]WorkerLifecycleReheatItem, len(edges))
+	installed := make(chan struct{}, 1)
+	if err := fixture.engine.enqueueBlocking(engineCommand{run: func() {
+		for index, edge := range edges {
+			work := &engineWork{
+				due: now.Add(10 * time.Minute), eligibilityDeadline: now.Add(11 * time.Minute), kind: engineWorkLifecycle, edge: edge,
+				schedule:            ChannelSchedule{Class: LifecycleRevisit, RequiresColdRuntimeEvidence: true, NaturalCooling: true},
+				lifecycleTimerToken: uint64(index + 41), activityVersion: 1, initialSequence: 42, lastActivityAt: now, observedLoaded: true,
+			}
+			fixture.engine.installLifecycleTimer(work)
+			fixture.engine.offerLifecycleCandidate(work)
+			items[index] = WorkerLifecycleReheatItem{ChannelID: edge.PersonChannelID, TimerToken: work.lifecycleTimerToken, ActivityVersion: 1}
+		}
+		installed <- struct{}{}
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	<-installed
+
+	invalid := append([]WorkerLifecycleReheatItem(nil), items...)
+	invalid[1].ActivityVersion++
+	if approved, err := fixture.engine.ApproveColdRevisitsContext(context.Background(), invalid); err != nil || approved != 0 {
+		t.Fatalf("invalid batch approval = %d,%v, want 0,nil", approved, err)
+	}
+	state := make(chan [2]bool, 1)
+	if err := fixture.engine.enqueueBlocking(engineCommand{run: func() {
+		state <- [2]bool{
+			fixture.engine.lifecycleByChannel[items[0].ChannelID].coldConfirmed,
+			fixture.engine.lifecycleByChannel[items[1].ChannelID].coldConfirmed,
+		}
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := <-state; got != [2]bool{} {
+		t.Fatalf("partial admission after rejected batch = %v", got)
+	}
+	if approved, err := fixture.engine.ApproveColdRevisitsContext(context.Background(), items); err != nil || approved != len(items) {
+		t.Fatalf("valid batch approval = %d,%v, want %d,nil", approved, err, len(items))
+	}
+}
+
+func TestLifecycleCandidateEngineApprovalRejectionsAreClosedAndIdentityFree(t *testing.T) {
+	fixture := newEngineTestFixture(t, engineTestLimits{})
+	if err := fixture.engine.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer fixture.engine.Stop()
+
+	edge := fixture.graph.Incoming(18).Items[0]
+	now := fixture.clock.Now()
+	installed := make(chan struct{}, 1)
+	if err := fixture.engine.enqueueBlocking(engineCommand{run: func() {
+		fixture.engine.installLifecycleTimer(&engineWork{
+			due: now.Add(10 * time.Minute), eligibilityDeadline: now.Add(11 * time.Minute), kind: engineWorkLifecycle, edge: edge,
+			schedule:            ChannelSchedule{Class: LifecycleRevisit, RequiresColdRuntimeEvidence: true, NaturalCooling: true},
+			lifecycleTimerToken: 41, activityVersion: 2, initialSequence: 42, lastActivityAt: now, observedLoaded: true,
+		})
+		installed <- struct{}{}
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	<-installed
+
+	if approved, err := fixture.engine.ApproveColdRevisitContext(context.Background(), edge.PersonChannelID, 41, 1); err != nil || approved {
+		t.Fatalf("stale activity approval = %v,%v", approved, err)
+	}
+	fixture.clock.Set(now.Add(10 * time.Minute))
+	if approved, err := fixture.engine.ApproveColdRevisitContext(context.Background(), edge.PersonChannelID, 41, 2); err != nil || approved {
+		t.Fatalf("expired approval = %v,%v", approved, err)
+	}
+	missing := channelid.EncodePersonChannel("diagnostic-missing-a", "diagnostic-missing-b")
+	if approved, err := fixture.engine.ApproveColdRevisitContext(context.Background(), missing, 42, 1); err != nil || approved {
+		t.Fatalf("missing timer approval = %v,%v", approved, err)
+	}
+
+	snapshot, err := fixture.engine.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := LifecycleApprovalRejectionSnapshot{MissingTimer: 1, ActivityFence: 1, Deadline: 1}
+	if snapshot.LifecycleApprovalRejections != want {
+		t.Fatalf("approval rejections = %+v, want %+v", snapshot.LifecycleApprovalRejections, want)
+	}
+	encoded, err := json.Marshal(snapshot.LifecycleApprovalRejections)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, identity := range []string{edge.PersonChannelID, missing} {
+		if bytes.Contains(encoded, []byte(identity)) {
+			t.Fatalf("approval rejection evidence leaked identity: %s", encoded)
+		}
+	}
+}
+
+func TestLifecycleCandidateLeaseWaitsForInitialActivitySettlement(t *testing.T) {
+	fixture := newEngineTestFixture(t, engineTestLimits{})
+	if err := fixture.engine.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer fixture.engine.Stop()
+
+	edge := fixture.graph.Incoming(18).Items[0]
+	now := fixture.clock.Now()
+	if err := fixture.engine.enqueueBlocking(engineCommand{run: func() {
+		work := &engineWork{
+			due: now.Add(10 * time.Minute), kind: engineWorkLifecycle, edge: edge,
+			schedule:            ChannelSchedule{Class: LifecycleRevisit, RequiresColdRuntimeEvidence: true, NaturalCooling: true},
+			lifecycleTimerToken: 41, activityVersion: 2, initialSequence: 42, lastActivityAt: now, observedLoaded: true,
+			initialActivityPending: 2,
+		}
+		fixture.engine.installLifecycleTimer(work)
+		fixture.engine.offerLifecycleCandidate(work)
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	candidates, err := fixture.engine.LeaseLifecycleCandidates(
+		context.Background(), lifecycleCohortSize, mustInitialLifecycleSlotAssignment(t), now.Add(time.Minute),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates) != 0 {
+		t.Fatalf("leased %d candidates with unsettled initial activity", len(candidates))
+	}
+	settled := make(chan error, 1)
+	if err := fixture.engine.enqueue(engineCommand{run: func() {
+		settlementErr := fixture.engine.settleLifecycleInitialActivity(TrafficIntent{
+			ChannelID: edge.PersonChannelID, Domain: LogicalDomainLifecycle, lifecycleTimerToken: 40,
+		})
+		settlementErr = errors.Join(settlementErr, fixture.engine.settleLifecycleInitialActivity(TrafficIntent{
+			ChannelID: edge.PersonChannelID, Domain: LogicalDomainLifecycle, lifecycleTimerToken: 41,
+		}))
+		settled <- settlementErr
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if settlementErr := <-settled; settlementErr != nil {
+		t.Fatalf("settle stale and first activity: %v", settlementErr)
+	}
+	candidates, err = fixture.engine.LeaseLifecycleCandidates(
+		context.Background(), lifecycleCohortSize, mustInitialLifecycleSlotAssignment(t), now.Add(time.Minute),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates) != 0 {
+		t.Fatalf("leased %d candidates with one unsettled initial activity", len(candidates))
+	}
+	if err := fixture.engine.enqueue(engineCommand{run: func() {
+		settled <- fixture.engine.settleLifecycleInitialActivity(TrafficIntent{
+			ChannelID: edge.PersonChannelID, Domain: LogicalDomainLifecycle, lifecycleTimerToken: 41,
+		})
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if settlementErr := <-settled; settlementErr != nil {
+		t.Fatalf("settle final activity: %v", settlementErr)
+	}
+	candidates, err = fixture.engine.LeaseLifecycleCandidates(
+		context.Background(), lifecycleCohortSize, mustInitialLifecycleSlotAssignment(t), now.Add(time.Minute),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates) != 1 || candidates[0].TimerToken != 41 {
+		t.Fatalf("settled candidates = %+v, want exact timer 41", candidates)
+	}
+}
+
+func TestLifecycleCandidateEngineLeaseExcludesTimerWhoseRequiredSenderExpiresAtProofDeadline(t *testing.T) {
+	const revisitAfter = 10 * time.Minute
+	fixture := newEngineTestFixture(t, engineTestLimits{
+		SessionDuration: revisitAfter + lifecycleReheatDeadline,
+		WorkCapacity:    256,
+	})
+	if err := fixture.engine.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer fixture.engine.Stop()
+	edge := fixture.graph.Incoming(18).Items[0]
+	now := fixture.clock.Now()
+	if _, err := fixture.engine.Login(context.Background(), SessionLogin{
+		UID: edge.OwnerUID, UserIndex: edge.OwnerIndex, LoginOrdinal: edge.OwnerIndex,
+	}); err != nil {
+		t.Fatalf("login required sender: %v", err)
+	}
+	fixture.clock.Set(now.Add(time.Minute))
+	if _, err := fixture.engine.Login(context.Background(), SessionLogin{
+		UID: edge.PeerUID, UserIndex: edge.PeerIndex, LoginOrdinal: edge.PeerIndex,
+	}); err != nil {
+		t.Fatalf("login surviving recipient: %v", err)
+	}
+	installed := make(chan struct{}, 1)
+	if err := fixture.engine.enqueueBlocking(engineCommand{run: func() {
+		work := &engineWork{
+			due: now.Add(revisitAfter), eligibilityDeadline: now.Add(revisitAfter + time.Minute),
+			kind: engineWorkLifecycle, edge: edge,
+			schedule: ChannelSchedule{
+				Class: LifecycleRevisit, RevisitMessages: 2,
+				RequiresColdRuntimeEvidence: true, NaturalCooling: true,
+			},
+			requiredSender: edge.OwnerUID, lifecycleTimerToken: 41,
+			activityVersion: 1, initialSequence: 42, lastActivityAt: now, observedLoaded: true,
+		}
+		fixture.engine.installLifecycleTimer(work)
+		fixture.engine.offerLifecycleCandidate(work)
+		installed <- struct{}{}
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	<-installed
+
+	candidates, err := fixture.engine.LeaseLifecycleCandidates(
+		context.Background(), 1, mustInitialLifecycleSlotAssignment(t), now,
+	)
+	if err != nil {
+		t.Fatalf("LeaseLifecycleCandidates: %v", err)
+	}
+	if len(candidates) != 0 {
+		t.Fatalf("leased candidates = %+v, want none whose required sender expires at the proof deadline", candidates)
+	}
+}
+
+func TestLifecycleCandidateEngineLeaseIncludesTimerWhoseNonSendingRecipientExpiresAtProofDeadline(t *testing.T) {
+	const revisitAfter = 10 * time.Minute
+	fixture := newEngineTestFixture(t, engineTestLimits{
+		SessionDuration: revisitAfter + lifecycleReheatDeadline,
+		WorkCapacity:    256,
+	})
+	if err := fixture.engine.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer fixture.engine.Stop()
+	edge := fixture.graph.Incoming(18).Items[0]
+	now := fixture.clock.Now()
+	if _, err := fixture.engine.Login(context.Background(), SessionLogin{
+		UID: edge.PeerUID, UserIndex: edge.PeerIndex, LoginOrdinal: edge.PeerIndex,
+	}); err != nil {
+		t.Fatalf("login expiring recipient: %v", err)
+	}
+	fixture.clock.Set(now.Add(time.Minute))
+	if _, err := fixture.engine.Login(context.Background(), SessionLogin{
+		UID: edge.OwnerUID, UserIndex: edge.OwnerIndex, LoginOrdinal: edge.OwnerIndex,
+	}); err != nil {
+		t.Fatalf("login surviving required sender: %v", err)
+	}
+	installed := make(chan struct{}, 1)
+	if err := fixture.engine.enqueueBlocking(engineCommand{run: func() {
+		work := &engineWork{
+			due: now.Add(revisitAfter), eligibilityDeadline: now.Add(revisitAfter + time.Minute),
+			kind: engineWorkLifecycle, edge: edge,
+			schedule: ChannelSchedule{
+				Class: LifecycleRevisit, RevisitMessages: 2,
+				RequiresColdRuntimeEvidence: true, NaturalCooling: true,
+			},
+			requiredSender: edge.OwnerUID, lifecycleTimerToken: 41,
+			activityVersion: 1, initialSequence: 42, lastActivityAt: now, observedLoaded: true,
+		}
+		fixture.engine.installLifecycleTimer(work)
+		fixture.engine.offerLifecycleCandidate(work)
+		installed <- struct{}{}
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	<-installed
+
+	candidates, err := fixture.engine.LeaseLifecycleCandidates(
+		context.Background(), 1, mustInitialLifecycleSlotAssignment(t), now,
+	)
+	if err != nil {
+		t.Fatalf("LeaseLifecycleCandidates: %v", err)
+	}
+	if len(candidates) != 1 {
+		t.Fatalf("leased candidates = %+v, want the timer whose required sender outlives the proof deadline", candidates)
+	}
+}
+
+func TestLifecycleCandidateEngineLeaseExcludesAlternatingTimerWhenOneSenderExpiresAtProofDeadline(t *testing.T) {
+	const revisitAfter = 10 * time.Minute
+	fixture := newEngineTestFixture(t, engineTestLimits{
+		SessionDuration: revisitAfter + lifecycleReheatDeadline,
+		WorkCapacity:    256,
+	})
+	if err := fixture.engine.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer fixture.engine.Stop()
+	edge := fixture.graph.Incoming(18).Items[0]
+	alternatingOrdinal := uint64(0)
+	for {
+		direction, err := fixture.traffic.DirectionFor(alternatingOrdinal)
+		if err != nil {
+			t.Fatalf("DirectionFor(%d): %v", alternatingOrdinal, err)
+		}
+		if direction == DirectionAlternating {
+			break
+		}
+		alternatingOrdinal++
+	}
+	now := fixture.clock.Now()
+	if _, err := fixture.engine.Login(context.Background(), SessionLogin{
+		UID: edge.OwnerUID, UserIndex: edge.OwnerIndex, LoginOrdinal: edge.OwnerIndex,
+	}); err != nil {
+		t.Fatalf("login expiring alternating sender: %v", err)
+	}
+	fixture.clock.Set(now.Add(time.Minute))
+	if _, err := fixture.engine.Login(context.Background(), SessionLogin{
+		UID: edge.PeerUID, UserIndex: edge.PeerIndex, LoginOrdinal: edge.PeerIndex,
+	}); err != nil {
+		t.Fatalf("login surviving alternating sender: %v", err)
+	}
+	installed := make(chan struct{}, 1)
+	if err := fixture.engine.enqueueBlocking(engineCommand{run: func() {
+		work := &engineWork{
+			due: now.Add(revisitAfter), eligibilityDeadline: now.Add(revisitAfter + time.Minute),
+			kind: engineWorkLifecycle, edge: edge,
+			schedule: ChannelSchedule{
+				Class: LifecycleRevisit, RevisitMessages: 2,
+				RequiresColdRuntimeEvidence: true, NaturalCooling: true,
+			},
+			relationshipOrdinal: alternatingOrdinal, lifecycleTimerToken: 41,
+			activityVersion: 1, initialSequence: 42, lastActivityAt: now, observedLoaded: true,
+		}
+		fixture.engine.installLifecycleTimer(work)
+		fixture.engine.offerLifecycleCandidate(work)
+		installed <- struct{}{}
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	<-installed
+
+	candidates, err := fixture.engine.LeaseLifecycleCandidates(
+		context.Background(), 1, mustInitialLifecycleSlotAssignment(t), now,
+	)
+	if err != nil {
+		t.Fatalf("LeaseLifecycleCandidates: %v", err)
+	}
+	if len(candidates) != 0 {
+		t.Fatalf("leased candidates = %+v, want none when either alternating sender expires at the proof deadline", candidates)
+	}
+}
+
+func TestLifecycleCandidateEngineLeaseIncludesOneWayTimerWhoseRecipientExpiresAtProofDeadline(t *testing.T) {
+	const revisitAfter = 10 * time.Minute
+	fixture := newEngineTestFixture(t, engineTestLimits{
+		SessionDuration: revisitAfter + lifecycleReheatDeadline,
+		WorkCapacity:    256,
+	})
+	if err := fixture.engine.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer fixture.engine.Stop()
+	edge := fixture.graph.Incoming(18).Items[0]
+	oneWayOrdinal := uint64(0)
+	for {
+		direction, err := fixture.traffic.DirectionFor(oneWayOrdinal)
+		if err != nil {
+			t.Fatalf("DirectionFor(%d): %v", oneWayOrdinal, err)
+		}
+		if direction == DirectionOneWay {
+			break
+		}
+		oneWayOrdinal++
+	}
+	now := fixture.clock.Now()
+	if _, err := fixture.engine.Login(context.Background(), SessionLogin{
+		UID: edge.PeerUID, UserIndex: edge.PeerIndex, LoginOrdinal: edge.PeerIndex,
+	}); err != nil {
+		t.Fatalf("login expiring recipient: %v", err)
+	}
+	fixture.clock.Set(now.Add(time.Minute))
+	if _, err := fixture.engine.Login(context.Background(), SessionLogin{
+		UID: edge.OwnerUID, UserIndex: edge.OwnerIndex, LoginOrdinal: edge.OwnerIndex,
+	}); err != nil {
+		t.Fatalf("login surviving one-way sender: %v", err)
+	}
+	installed := make(chan struct{}, 1)
+	if err := fixture.engine.enqueueBlocking(engineCommand{run: func() {
+		work := &engineWork{
+			due: now.Add(revisitAfter), eligibilityDeadline: now.Add(revisitAfter + time.Minute),
+			kind: engineWorkLifecycle, edge: edge,
+			schedule: ChannelSchedule{
+				Class: LifecycleRevisit, RevisitMessages: 2,
+				RequiresColdRuntimeEvidence: true, NaturalCooling: true,
+			},
+			relationshipOrdinal: oneWayOrdinal, lifecycleTimerToken: 42,
+			activityVersion: 1, initialSequence: 42, lastActivityAt: now, observedLoaded: true,
+		}
+		fixture.engine.installLifecycleTimer(work)
+		fixture.engine.offerLifecycleCandidate(work)
+		installed <- struct{}{}
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	<-installed
+
+	candidates, err := fixture.engine.LeaseLifecycleCandidates(
+		context.Background(), 1, mustInitialLifecycleSlotAssignment(t), now,
+	)
+	if err != nil {
+		t.Fatalf("LeaseLifecycleCandidates: %v", err)
+	}
+	if len(candidates) != 1 {
+		t.Fatalf("leased candidates = %+v, want the one-way timer whose only sender outlives the proof deadline", candidates)
+	}
+}
+
+func TestLifecycleCandidateEngineLeaseIncludesTimerWhoseEndpointsOutliveProofDeadline(t *testing.T) {
+	const revisitAfter = 10 * time.Minute
+	fixture := newEngineTestFixture(t, engineTestLimits{
+		SessionDuration: revisitAfter + lifecycleReheatDeadline + time.Nanosecond,
+		WorkCapacity:    256,
+	})
+	if err := fixture.engine.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer fixture.engine.Stop()
+	edge := fixture.graph.Incoming(18).Items[0]
+	now := fixture.clock.Now()
+	for _, login := range []SessionLogin{
+		{UID: edge.OwnerUID, UserIndex: edge.OwnerIndex, LoginOrdinal: edge.OwnerIndex},
+		{UID: edge.PeerUID, UserIndex: edge.PeerIndex, LoginOrdinal: edge.PeerIndex},
+	} {
+		if _, err := fixture.engine.Login(context.Background(), login); err != nil {
+			t.Fatalf("login %s: %v", login.UID, err)
+		}
+	}
+	installed := make(chan struct{}, 1)
+	if err := fixture.engine.enqueueBlocking(engineCommand{run: func() {
+		work := &engineWork{
+			due: now.Add(revisitAfter), eligibilityDeadline: now.Add(revisitAfter + time.Minute),
+			kind: engineWorkLifecycle, edge: edge,
+			schedule: ChannelSchedule{
+				Class: LifecycleRevisit, RevisitMessages: 2,
+				RequiresColdRuntimeEvidence: true, NaturalCooling: true,
+			},
+			relationshipOrdinal: 1, lifecycleTimerToken: 41,
+			activityVersion: 1, initialSequence: 42, lastActivityAt: now, observedLoaded: true,
+		}
+		fixture.engine.installLifecycleTimer(work)
+		fixture.engine.offerLifecycleCandidate(work)
+		installed <- struct{}{}
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	<-installed
+
+	candidates, err := fixture.engine.LeaseLifecycleCandidates(
+		context.Background(), 1, mustInitialLifecycleSlotAssignment(t), now,
+	)
+	if err != nil {
+		t.Fatalf("LeaseLifecycleCandidates: %v", err)
+	}
+	if len(candidates) != 1 {
+		t.Fatalf("leased candidates = %+v, want the timer whose endpoints strictly outlive the proof deadline", candidates)
+	}
+}
+
+func TestLifecycleCandidateQuietWindowStartsAtPhysicalSendAdmissionNotDelayedSendACK(t *testing.T) {
+	fixture := newEngineTestFixture(t, engineTestLimits{})
+	if err := fixture.engine.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer fixture.engine.Stop()
+
+	edge := fixture.graph.Incoming(18).Items[0]
+	startedAt := fixture.clock.Now()
+	if _, err := fixture.engine.Login(context.Background(), SessionLogin{
+		UID: edge.OwnerUID, UserIndex: edge.OwnerIndex, LoginOrdinal: edge.OwnerIndex,
+	}); err != nil {
+		t.Fatalf("login sender: %v", err)
+	}
+	installed := make(chan struct{}, 1)
+	if err := fixture.engine.enqueueBlocking(engineCommand{run: func() {
+		work := &engineWork{
+			due: startedAt.Add(10 * time.Minute), eligibilityDeadline: startedAt.Add(11 * time.Minute), kind: engineWorkLifecycle, edge: edge,
+			schedule: ChannelSchedule{Class: LifecycleRevisit, RequiresColdRuntimeEvidence: true, NaturalCooling: true}, lifecycleTimerToken: 51,
+			activityVersion: 1, initialSequence: 42, lastActivityAt: startedAt, observedLoaded: true,
+		}
+		fixture.engine.installLifecycleTimer(work)
+		fixture.engine.offerLifecycleCandidate(work)
+		installed <- struct{}{}
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	<-installed
+
+	physicalAdmissionAt := startedAt.Add(time.Minute)
+	fixture.clock.Set(physicalAdmissionAt)
+	intent := fixture.intent(t, edge.OwnerUID, edge.PeerUID, 0, TrafficPerson)
+	intent.ChannelID = edge.PersonChannelID
+	if !fixture.pool.acquireSendLease(intent.Logical.Sender) {
+		t.Fatal("acquire send lease")
+	}
+	if err := fixture.engine.processAttempt(context.Background(), intent, 0, physicalAdmissionAt); err != nil {
+		t.Fatalf("process attempt: %v", err)
+	}
+	routes := fixture.factory.sentRoutes()
+	if len(routes) != 1 || routes[0].packet == nil {
+		t.Fatalf("physical routes = %+v, want one SEND", routes)
+	}
+
+	acknowledgedAt := physicalAdmissionAt.Add(750 * time.Millisecond)
+	fixture.clock.Set(acknowledgedAt)
+	packet := routes[0].packet
+	ack := &frame.SendackPacket{
+		ClientSeq: packet.ClientSeq, ClientMsgNo: packet.ClientMsgNo,
+		MessageID: 101, MessageSeq: 43, ReasonCode: frame.ReasonSuccess,
+	}
+	if err := fixture.engine.ObserveSendack(edge.OwnerUID, ack, fixture.verifier.HandleSendack(ack)); err != nil {
+		t.Fatalf("observe delayed SENDACK: %v", err)
+	}
+
+	candidates, err := fixture.engine.LeaseLifecycleCandidates(
+		context.Background(), 1, mustInitialLifecycleSlotAssignment(t), acknowledgedAt,
+	)
+	if err != nil || len(candidates) != 1 {
+		t.Fatalf("lease candidates = %+v, %v", candidates, err)
+	}
+	wantQuietNotBefore := physicalAdmissionAt.Add(lifecycleNaturalQuiet + time.Nanosecond)
+	if !candidates[0].QuietNotBefore.Equal(wantQuietNotBefore) {
+		t.Fatalf("quiet-not-before = %v, want physical SEND admission boundary %v; delayed SENDACK was %v",
+			candidates[0].QuietNotBefore, wantQuietNotBefore, acknowledgedAt)
 	}
 }
 
@@ -689,20 +1396,19 @@ func TestEngineLifecycleApprovalReplayCapacityFailsClosedAndRedactsIdentity(t *t
 	}
 }
 
-func TestEngineLifecycleApprovalReplayBoundsCoverWorstCaseCadenceOverlap(t *testing.T) {
-	if lifecycleApprovalReplayRetention != time.Minute || lifecycleApprovalReplayRetention >= LifecycleProofCadence {
-		t.Fatalf("replay retention = %v, want 1m and less than %v", lifecycleApprovalReplayRetention, LifecycleProofCadence)
+func TestEngineLifecycleApprovalReplayBoundsCoverFixedCohort(t *testing.T) {
+	if lifecycleApprovalReplayRetention != time.Minute || lifecycleApprovalReplayRetention >= lifecycleNaturalQuiet {
+		t.Fatalf("replay retention = %v, want 1m and less than %v", lifecycleApprovalReplayRetention, lifecycleNaturalQuiet)
 	}
-	wantOverlapping := int((maximumRevisitDelay + LifecycleProofCadence - 1) / LifecycleProofCadence)
-	if lifecycleApprovalReplayOverlappingCohorts != wantOverlapping || lifecycleApprovalReplayCapacity != lifecycleCohortSize*wantOverlapping {
-		t.Fatalf("replay bounds = cohorts %d capacity %d, want %d and %d", lifecycleApprovalReplayOverlappingCohorts, lifecycleApprovalReplayCapacity, wantOverlapping, lifecycleCohortSize*wantOverlapping)
+	if lifecycleCohortSize != 1_200 {
+		t.Fatalf("fixed cohort size = %d, want 1200", lifecycleCohortSize)
 	}
-	if lifecycleApprovalReplayOverlappingCohorts != 6 || lifecycleApprovalReplayCapacity != 7_200 {
-		t.Fatalf("reviewed replay bounds = cohorts %d capacity %d, want 6 and 7200", lifecycleApprovalReplayOverlappingCohorts, lifecycleApprovalReplayCapacity)
+	if lifecycleApprovalReplayCapacity != lifecycleCohortSize {
+		t.Fatalf("fixed-cohort replay capacity = %d, want %d", lifecycleApprovalReplayCapacity, lifecycleCohortSize)
 	}
 }
 
-func TestEngineLifecycleApprovalReplayRotatesWorstCaseOverlappingCohortsAcrossGeneration(t *testing.T) {
+func TestEngineLifecycleApprovalReplayRotatesFixedCohortAcrossGeneration(t *testing.T) {
 	fixture := newEngineTestFixture(t, engineTestLimits{WorkCapacity: 8_000, MaxWorkPerAdvance: 8_000})
 	if err := fixture.engine.Start(context.Background()); err != nil {
 		t.Fatal(err)
@@ -714,42 +1420,40 @@ func TestEngineLifecycleApprovalReplayRotatesWorstCaseOverlappingCohortsAcrossGe
 	for wave, waveOffset := range []time.Duration{0, 72 * time.Hour} {
 		due := base.Add(waveOffset + maximumRevisitDelay)
 		works := make([]*engineWork, 0, lifecycleApprovalReplayCapacity)
-		for cohort := 0; cohort < lifecycleApprovalReplayOverlappingCohorts; cohort++ {
-			approvalAt := base.Add(waveOffset + time.Duration(cohort)*LifecycleProofCadence)
-			fixture.clock.Set(approvalAt)
-			cohortWorks := make([]*engineWork, lifecycleCohortSize)
-			installed := make(chan struct{}, 1)
-			if err := fixture.engine.enqueueBlocking(engineCommand{run: func() {
-				for index := range cohortWorks {
-					nextToken++
-					identity := channelid.EncodePersonChannel(
-						fmt.Sprintf("replay-overlap-%d-%d-%04d-a", wave, cohort, index),
-						fmt.Sprintf("replay-overlap-%d-%d-%04d-b", wave, cohort, index),
-					)
-					work := &engineWork{
-						due: due, eligibilityDeadline: due.Add(time.Minute), kind: engineWorkLifecycle,
-						edge:                RelationshipEdge{PersonChannelID: identity},
-						schedule:            ChannelSchedule{Class: LifecycleRevisit, RequiresColdRuntimeEvidence: true},
-						lifecycleTimerToken: nextToken, activityVersion: 1,
-					}
-					cohortWorks[index] = work
-					fixture.engine.installLifecycleTimer(work)
-				}
-				installed <- struct{}{}
-			}}); err != nil {
-				t.Fatal(err)
-			}
-			<-installed
-			for index, work := range cohortWorks {
-				approved, err := fixture.engine.ApproveColdRevisitContext(
-					context.Background(), work.edge.PersonChannelID, work.lifecycleTimerToken, work.activityVersion,
+		approvalAt := base.Add(waveOffset)
+		fixture.clock.Set(approvalAt)
+		cohortWorks := make([]*engineWork, lifecycleCohortSize)
+		installed := make(chan struct{}, 1)
+		if err := fixture.engine.enqueueBlocking(engineCommand{run: func() {
+			for index := range cohortWorks {
+				nextToken++
+				identity := channelid.EncodePersonChannel(
+					fmt.Sprintf("replay-fixed-%d-%04d-a", wave, index),
+					fmt.Sprintf("replay-fixed-%d-%04d-b", wave, index),
 				)
-				if err != nil || !approved {
-					t.Fatalf("wave %d cohort %d approval %d = %v, %v", wave, cohort, index, approved, err)
+				work := &engineWork{
+					due: due, eligibilityDeadline: due.Add(time.Minute), kind: engineWorkLifecycle,
+					edge:                RelationshipEdge{PersonChannelID: identity},
+					schedule:            ChannelSchedule{Class: LifecycleRevisit, RequiresColdRuntimeEvidence: true},
+					lifecycleTimerToken: nextToken, activityVersion: 1,
 				}
+				cohortWorks[index] = work
+				fixture.engine.installLifecycleTimer(work)
 			}
-			works = append(works, cohortWorks...)
+			installed <- struct{}{}
+		}}); err != nil {
+			t.Fatal(err)
 		}
+		<-installed
+		for index, work := range cohortWorks {
+			approved, err := fixture.engine.ApproveColdRevisitContext(
+				context.Background(), work.edge.PersonChannelID, work.lifecycleTimerToken, work.activityVersion,
+			)
+			if err != nil || !approved {
+				t.Fatalf("wave %d approval %d = %v, %v", wave, index, approved, err)
+			}
+		}
+		works = append(works, cohortWorks...)
 		mapSize := make(chan [2]int, 1)
 		if err := fixture.engine.enqueueBlocking(engineCommand{run: func() {
 			mapSize <- [2]int{len(fixture.engine.lifecycleApprovalReplays), len(fixture.engine.lifecycleApprovalReplayByChannel)}
@@ -774,7 +1478,7 @@ func TestEngineLifecycleApprovalReplayRotatesWorstCaseOverlappingCohortsAcrossGe
 			t.Fatal(err)
 		}
 		if err := <-completed; err != nil {
-			t.Fatalf("wave %d complete overlapping cohorts: %v", wave, err)
+			t.Fatalf("wave %d complete fixed cohort: %v", wave, err)
 		}
 		if err := fixture.engine.enqueueBlocking(engineCommand{run: func() {
 			mapSize <- [2]int{len(fixture.engine.lifecycleApprovalReplays), len(fixture.engine.lifecycleApprovalReplayByChannel)}
@@ -787,14 +1491,11 @@ func TestEngineLifecycleApprovalReplayRotatesWorstCaseOverlappingCohortsAcrossGe
 		}
 
 		fixture.clock.Set(due.Add(30 * time.Second))
-		for cohort := 0; cohort < lifecycleApprovalReplayOverlappingCohorts; cohort++ {
-			sample := works[cohort*lifecycleCohortSize+cohort]
-			if replay, err := fixture.engine.ApproveColdRevisitContext(context.Background(), sample.edge.PersonChannelID, sample.lifecycleTimerToken, sample.activityVersion); err != nil || !replay {
-				t.Fatalf("wave %d cohort %d in-window replay = %v, %v", wave, cohort, replay, err)
-			}
-		}
 		sample := works[0]
-		wrongChannel := channelid.EncodePersonChannel(fmt.Sprintf("replay-overlap-wrong-%d-a", wave), fmt.Sprintf("replay-overlap-wrong-%d-b", wave))
+		if replay, err := fixture.engine.ApproveColdRevisitContext(context.Background(), sample.edge.PersonChannelID, sample.lifecycleTimerToken, sample.activityVersion); err != nil || !replay {
+			t.Fatalf("wave %d in-window replay = %v, %v", wave, replay, err)
+		}
+		wrongChannel := channelid.EncodePersonChannel(fmt.Sprintf("replay-fixed-wrong-%d-a", wave), fmt.Sprintf("replay-fixed-wrong-%d-b", wave))
 		if replay, err := fixture.engine.ApproveColdRevisitContext(context.Background(), wrongChannel, sample.lifecycleTimerToken, sample.activityVersion); err != nil || replay {
 			t.Fatalf("wave %d wrong-channel replay = %v, %v", wave, replay, err)
 		}
@@ -802,11 +1503,8 @@ func TestEngineLifecycleApprovalReplayRotatesWorstCaseOverlappingCohortsAcrossGe
 			t.Fatalf("wave %d wrong-version replay = %v, %v", wave, replay, err)
 		}
 		fixture.clock.Set(due.Add(time.Minute))
-		for cohort := 0; cohort < lifecycleApprovalReplayOverlappingCohorts; cohort++ {
-			sample := works[cohort*lifecycleCohortSize+cohort]
-			if replay, err := fixture.engine.ApproveColdRevisitContext(context.Background(), sample.edge.PersonChannelID, sample.lifecycleTimerToken, sample.activityVersion); err != nil || replay {
-				t.Fatalf("wave %d cohort %d expired replay = %v, %v; want false", wave, cohort, replay, err)
-			}
+		if replay, err := fixture.engine.ApproveColdRevisitContext(context.Background(), sample.edge.PersonChannelID, sample.lifecycleTimerToken, sample.activityVersion); err != nil || replay {
+			t.Fatalf("wave %d expired replay = %v, %v; want false", wave, replay, err)
 		}
 		if err := fixture.engine.enqueueBlocking(engineCommand{run: func() {
 			mapSize <- [2]int{len(fixture.engine.lifecycleApprovalReplays), len(fixture.engine.lifecycleApprovalReplayByChannel)}
@@ -822,7 +1520,7 @@ func TestEngineLifecycleApprovalReplayRotatesWorstCaseOverlappingCohortsAcrossGe
 	if snapshot, err := fixture.engine.Snapshot(); err != nil {
 		t.Fatal(err)
 	} else if snapshot.HarnessInvalid != 0 || snapshot.Classification == SyncClassificationHarnessInvalid {
-		t.Fatalf("overlapping cohorts saturated lifecycle replay state: %+v", snapshot)
+		t.Fatalf("fixed cohort saturated lifecycle replay state: %+v", snapshot)
 	}
 }
 
@@ -915,15 +1613,34 @@ func TestEngineLifecycleApprovalUsesOwnerExecutionDeadlineAndKeepsExactReplay(t 
 			if got.err != nil || got.approved != test.approved {
 				t.Fatalf("approval at owner time %v = %v,%v, want %v,nil", fixture.clock.Now(), got.approved, got.err, test.approved)
 			}
-			leased, err := fixture.engine.LeaseLifecycleCandidates(context.Background(), 1, mustInitialLifecycleSlotAssignment(t))
+			if !test.approved {
+				type timerState struct {
+					present  bool
+					token    uint64
+					version  uint64
+					sequence uint64
+				}
+				state := make(chan timerState, 1)
+				if err := fixture.engine.enqueueBlocking(engineCommand{run: func() {
+					work := fixture.engine.lifecycleByChannel[edge.PersonChannelID]
+					if work == nil {
+						state <- timerState{}
+						return
+					}
+					state <- timerState{present: true, token: work.lifecycleTimerToken, version: work.activityVersion, sequence: work.initialSequence}
+				}}); err != nil {
+					t.Fatal(err)
+				}
+				if gotState := <-state; !gotState.present || gotState.token != 1 || gotState.version != 1 || gotState.sequence != 10 {
+					t.Fatalf("late rejection washed timer state: %+v", gotState)
+				}
+			}
+			leased, err := fixture.engine.LeaseLifecycleCandidates(context.Background(), 1, mustInitialLifecycleSlotAssignment(t), fixture.clock.Now())
 			if err != nil {
 				t.Fatal(err)
 			}
-			if test.approved && len(leased) != 0 {
-				t.Fatalf("approved timer remained indexed: %+v", leased)
-			}
-			if !test.approved && (len(leased) != 1 || leased[0].TimerToken != 1 || leased[0].ActivityVersion != 1) {
-				t.Fatalf("late rejection washed timer/index state: %+v", leased)
+			if len(leased) != 0 {
+				t.Fatalf("approved or expired timer remained publicly leasable: %+v", leased)
 			}
 		})
 	}
@@ -961,7 +1678,7 @@ func TestEngineLifecycleApprovalUsesOwnerExecutionDeadlineAndKeepsExactReplay(t 
 			t.Fatalf("canceled approval error = %v, want context canceled", err)
 		}
 		close(release)
-		leased, err := fixture.engine.LeaseLifecycleCandidates(context.Background(), 1, mustInitialLifecycleSlotAssignment(t))
+		leased, err := fixture.engine.LeaseLifecycleCandidates(context.Background(), 1, mustInitialLifecycleSlotAssignment(t), fixture.clock.Now())
 		if err != nil || len(leased) != 1 {
 			t.Fatalf("canceled approval mutated timer/index: %+v,%v", leased, err)
 		}
@@ -1104,7 +1821,7 @@ func TestEngineLifecycleCandidateLeaseUsesFixedBalancedIndex(t *testing.T) {
 			t.Fatalf("slot %d indexed count = %d, want %d", slot+1, count, lifecyclePerSlot)
 		}
 	}
-	candidates, err := fixture.engine.LeaseLifecycleCandidates(context.Background(), lifecycleCohortSize, assignment)
+	candidates, err := fixture.engine.LeaseLifecycleCandidates(context.Background(), lifecycleCohortSize, assignment, fixture.clock.Now())
 	if err != nil || len(candidates) != lifecycleCohortSize {
 		t.Fatalf("bounded lease = %d,%v", len(candidates), err)
 	}
@@ -1146,7 +1863,7 @@ func TestEngineLifecycleCandidateLeaseUsesFixedBalancedIndex(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.engine.LeaseLifecycleCandidates(context.Background(), 1, mismatch); !errors.Is(err, ErrLifecycleHarnessInvalid) {
+	if _, err := fixture.engine.LeaseLifecycleCandidates(context.Background(), 1, mismatch, fixture.clock.Now()); !errors.Is(err, ErrLifecycleHarnessInvalid) {
 		t.Fatalf("mismatched mapping error = %v, want harness invalid", err)
 	}
 }
@@ -1205,14 +1922,14 @@ func TestEngineLifecycleCandidateStandbyPromotesBestWithoutFenceReentry(t *testi
 			works[100].lifecycleCandidateTier, works[101].lifecycleCandidateTier, works[102].lifecycleCandidateTier, replacement.lifecycleCandidateTier)
 	}
 
-	candidates, err := fixture.engine.LeaseLifecycleCandidates(context.Background(), 100, assignment)
+	candidates, err := fixture.engine.LeaseLifecycleCandidates(context.Background(), 100, assignment, fixture.clock.Now())
 	if err != nil || len(candidates) != 100 {
 		t.Fatalf("initial primary lease = %d,%v", len(candidates), err)
 	}
 	if approved, approveErr := fixture.engine.ApproveColdRevisitContext(context.Background(), candidates[0].ChannelID, candidates[0].TimerToken, candidates[0].ActivityVersion); approveErr != nil || !approved {
 		t.Fatalf("primary approval = %v,%v", approved, approveErr)
 	}
-	candidates, err = fixture.engine.LeaseLifecycleCandidates(context.Background(), 100, assignment)
+	candidates, err = fixture.engine.LeaseLifecycleCandidates(context.Background(), 100, assignment, fixture.clock.Now())
 	if err != nil || len(candidates) != 100 {
 		t.Fatalf("promoted primary lease = %d,%v", len(candidates), err)
 	}
@@ -1246,11 +1963,216 @@ func TestEngineLifecycleCandidateStandbyPromotesBestWithoutFenceReentry(t *testi
 		} else if approved, approveErr := fixture.engine.ApproveColdRevisitContext(context.Background(), candidate.ChannelID, candidate.TimerToken, candidate.ActivityVersion); approveErr != nil || !approved {
 			t.Fatalf("repeated primary approval %d = %v,%v", removed, approved, approveErr)
 		}
-		candidates, err = fixture.engine.LeaseLifecycleCandidates(context.Background(), 100, assignment)
+		candidates, err = fixture.engine.LeaseLifecycleCandidates(context.Background(), 100, assignment, fixture.clock.Now())
 		if err != nil || len(candidates) != 100 {
 			t.Fatalf("lease after removal %d = %d,%v, want standby refill", removed, len(candidates), err)
 		}
 		assertEngineLifecycleCandidateIndexInvariant(t, fixture.engine)
+	}
+}
+
+func TestEngineLifecycleCandidateLeaseEvictsExpiredPrimariesAndPromotesValidStandby(t *testing.T) {
+	fixture := newEngineTestFixture(t, engineTestLimits{WorkCapacity: lifecyclePerSlot + 1})
+	if err := fixture.engine.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer fixture.engine.Stop()
+	initialNow := fixture.clock.Now()
+	assignment := mustInitialLifecycleSlotAssignment(t)
+	if err := fixture.engine.enqueueBlocking(engineCommand{run: func() {
+		for ordinal, added := 0, 0; added < lifecyclePerSlot; ordinal++ {
+			identity := channelid.EncodePersonChannel(
+				fmt.Sprintf("expired-primary-%06d-a", ordinal), fmt.Sprintf("expired-primary-%06d-b", ordinal),
+			)
+			hashSlot := lifecycleHashSlotForKey(identity, formalHashSlots)
+			slotID, _ := assignment.Lookup(hashSlot)
+			if slotID != 1 {
+				continue
+			}
+			work := &engineWork{
+				due: initialNow.Add(20*time.Minute + time.Duration(added)*time.Second), kind: engineWorkLifecycle,
+				edge: RelationshipEdge{PersonChannelID: identity}, schedule: ChannelSchedule{Class: LifecycleRevisit, RequiresColdRuntimeEvidence: true},
+				lifecycleTimerToken: uint64(added + 1), activityVersion: 1, initialSequence: 10, lastActivityAt: initialNow, observedLoaded: true,
+			}
+			fixture.engine.installLifecycleTimer(work)
+			fixture.engine.offerLifecycleCandidate(work)
+			added++
+		}
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	leaseNow := initialNow.Add(lifecycleNaturalQuiet + time.Minute)
+	fixture.clock.Set(leaseNow)
+	var validStandby string
+	if err := fixture.engine.enqueueBlocking(engineCommand{run: func() {
+		for ordinal := 0; ; ordinal++ {
+			identity := channelid.EncodePersonChannel(
+				fmt.Sprintf("valid-standby-%06d-a", ordinal), fmt.Sprintf("valid-standby-%06d-b", ordinal),
+			)
+			hashSlot := lifecycleHashSlotForKey(identity, formalHashSlots)
+			slotID, _ := assignment.Lookup(hashSlot)
+			if slotID != 1 {
+				continue
+			}
+			work := &engineWork{
+				due: leaseNow.Add(20 * time.Minute), kind: engineWorkLifecycle,
+				edge: RelationshipEdge{PersonChannelID: identity}, schedule: ChannelSchedule{Class: LifecycleRevisit, RequiresColdRuntimeEvidence: true},
+				lifecycleTimerToken: lifecyclePerSlot + 1, activityVersion: 1, initialSequence: 11, lastActivityAt: leaseNow, observedLoaded: true,
+			}
+			fixture.engine.installLifecycleTimer(work)
+			fixture.engine.offerLifecycleCandidate(work)
+			validStandby = identity
+			return
+		}
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	candidates, err := fixture.engine.LeaseLifecycleCandidates(context.Background(), lifecyclePerSlot, assignment, fixture.clock.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates) != 1 || candidates[0].ChannelID != validStandby {
+		t.Fatalf("lease after primary quiet-start expiry = %+v, want only valid standby %q", candidates, validStandby)
+	}
+	if !candidates[0].QuietNotBefore.After(leaseNow) {
+		t.Fatalf("leased candidate quiet-not-before = %v, want after lease time %v", candidates[0].QuietNotBefore, leaseNow)
+	}
+}
+
+func TestEngineLifecycleCandidateLeasePromotesStandbyWithCompleteColdObservationWindow(t *testing.T) {
+	fixture := newEngineTestFixture(t, engineTestLimits{WorkCapacity: lifecyclePerSlot + 1})
+	if err := fixture.engine.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer fixture.engine.Stop()
+	leaseNow := fixture.clock.Now()
+	assignment := mustInitialLifecycleSlotAssignment(t)
+	if err := fixture.engine.enqueueBlocking(engineCommand{run: func() {
+		for ordinal, added := 0, 0; added < lifecyclePerSlot; ordinal++ {
+			identity := channelid.EncodePersonChannel(
+				fmt.Sprintf("narrow-window-primary-%06d-a", ordinal), fmt.Sprintf("narrow-window-primary-%06d-b", ordinal),
+			)
+			hashSlot := lifecycleHashSlotForKey(identity, formalHashSlots)
+			slotID, _ := assignment.Lookup(hashSlot)
+			if slotID != 1 {
+				continue
+			}
+			work := &engineWork{
+				due: leaseNow.Add(lifecycleNaturalQuiet + 30*time.Second), kind: engineWorkLifecycle,
+				edge: RelationshipEdge{PersonChannelID: identity}, schedule: ChannelSchedule{Class: LifecycleRevisit, RequiresColdRuntimeEvidence: true},
+				lifecycleTimerToken: uint64(added + 1), activityVersion: 1, initialSequence: 10,
+				lastActivityAt: leaseNow, observedLoaded: true,
+			}
+			fixture.engine.installLifecycleTimer(work)
+			fixture.engine.offerLifecycleCandidate(work)
+			added++
+		}
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	var validStandby string
+	if err := fixture.engine.enqueueBlocking(engineCommand{run: func() {
+		for ordinal := 0; ; ordinal++ {
+			identity := channelid.EncodePersonChannel(
+				fmt.Sprintf("complete-window-standby-%06d-a", ordinal), fmt.Sprintf("complete-window-standby-%06d-b", ordinal),
+			)
+			hashSlot := lifecycleHashSlotForKey(identity, formalHashSlots)
+			slotID, _ := assignment.Lookup(hashSlot)
+			if slotID != 1 {
+				continue
+			}
+			work := &engineWork{
+				due: leaseNow.Add(lifecycleNaturalQuiet + 2*time.Minute), kind: engineWorkLifecycle,
+				edge: RelationshipEdge{PersonChannelID: identity}, schedule: ChannelSchedule{Class: LifecycleRevisit, RequiresColdRuntimeEvidence: true},
+				lifecycleTimerToken: lifecyclePerSlot + 1, activityVersion: 1, initialSequence: 11,
+				lastActivityAt: leaseNow, observedLoaded: true,
+			}
+			fixture.engine.installLifecycleTimer(work)
+			fixture.engine.offerLifecycleCandidate(work)
+			validStandby = identity
+			return
+		}
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	candidates, err := fixture.engine.LeaseLifecycleCandidates(context.Background(), lifecyclePerSlot, assignment, leaseNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates) != 1 || candidates[0].ChannelID != validStandby {
+		t.Fatalf("lease with narrow primary windows = %+v, want complete-window standby %q", candidates, validStandby)
+	}
+}
+
+func TestEngineLifecycleCandidateLeasePromotesStandbyThatRemainsLoadedThroughInitialProbe(t *testing.T) {
+	fixture := newEngineTestFixture(t, engineTestLimits{WorkCapacity: lifecyclePerSlot + 1})
+	if err := fixture.engine.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer fixture.engine.Stop()
+	leaseNow := fixture.clock.Now()
+	loadedThrough := leaseNow.Add(5 * time.Second)
+	assignment := mustInitialLifecycleSlotAssignment(t)
+	if err := fixture.engine.enqueueBlocking(engineCommand{run: func() {
+		for ordinal, added := 0, 0; added < lifecyclePerSlot; ordinal++ {
+			identity := channelid.EncodePersonChannel(
+				fmt.Sprintf("boundary-primary-%06d-a", ordinal), fmt.Sprintf("boundary-primary-%06d-b", ordinal),
+			)
+			hashSlot := lifecycleHashSlotForKey(identity, formalHashSlots)
+			slotID, _ := assignment.Lookup(hashSlot)
+			if slotID != 1 {
+				continue
+			}
+			work := &engineWork{
+				due: leaseNow.Add(20*time.Minute + time.Duration(added)*time.Second), kind: engineWorkLifecycle,
+				edge: RelationshipEdge{PersonChannelID: identity}, schedule: ChannelSchedule{Class: LifecycleRevisit, RequiresColdRuntimeEvidence: true},
+				lifecycleTimerToken: uint64(added + 1), activityVersion: 1, initialSequence: 10,
+				lastActivityAt: leaseNow.Add(-lifecycleNaturalQuiet + time.Second), observedLoaded: true,
+			}
+			fixture.engine.installLifecycleTimer(work)
+			fixture.engine.offerLifecycleCandidate(work)
+			added++
+		}
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	var validStandby string
+	if err := fixture.engine.enqueueBlocking(engineCommand{run: func() {
+		for ordinal := 0; ; ordinal++ {
+			identity := channelid.EncodePersonChannel(
+				fmt.Sprintf("probe-safe-standby-%06d-a", ordinal), fmt.Sprintf("probe-safe-standby-%06d-b", ordinal),
+			)
+			hashSlot := lifecycleHashSlotForKey(identity, formalHashSlots)
+			slotID, _ := assignment.Lookup(hashSlot)
+			if slotID != 1 {
+				continue
+			}
+			work := &engineWork{
+				due: leaseNow.Add(30 * time.Minute), kind: engineWorkLifecycle,
+				edge: RelationshipEdge{PersonChannelID: identity}, schedule: ChannelSchedule{Class: LifecycleRevisit, RequiresColdRuntimeEvidence: true},
+				lifecycleTimerToken: lifecyclePerSlot + 1, activityVersion: 1, initialSequence: 11,
+				lastActivityAt: leaseNow, observedLoaded: true,
+			}
+			fixture.engine.installLifecycleTimer(work)
+			fixture.engine.offerLifecycleCandidate(work)
+			validStandby = identity
+			return
+		}
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	candidates, err := fixture.engine.LeaseLifecycleCandidates(context.Background(), lifecyclePerSlot, assignment, loadedThrough)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates) != 1 || candidates[0].ChannelID != validStandby || !candidates[0].QuietNotBefore.After(loadedThrough) {
+		t.Fatalf("lease through initial probe = %+v, want only safe standby %q after %v", candidates, validStandby, loadedThrough)
 	}
 }
 
@@ -1356,7 +2278,7 @@ func TestEngineLifecycleCandidateFullIndexRefreshKeepsLiveTimerAndInvalidatesOld
 	if approved, err := fixture.engine.ApproveColdRevisitContext(context.Background(), state.identity, state.token, state.oldVersion); err != nil || approved {
 		t.Fatalf("old refreshed lease approval = %v,%v, want false,nil", approved, err)
 	}
-	candidates, err := fixture.engine.LeaseLifecycleCandidates(context.Background(), lifecyclePerSlot, assignment)
+	candidates, err := fixture.engine.LeaseLifecycleCandidates(context.Background(), lifecyclePerSlot, assignment, fixture.clock.Now())
 	if err != nil || len(candidates) != lifecyclePerSlot {
 		t.Fatalf("lease after full refresh = %d,%v", len(candidates), err)
 	}
@@ -1403,7 +2325,7 @@ func TestEngineLifecycleCandidateDetachMismatchFailsClosedWithoutDuplicate(t *te
 	if got.tier != engineLifecycleCandidatePrimary || got.position != lifecyclePerSlot-1 || got.indexed != 1 || got.primaries != 1 {
 		t.Fatalf("detach mismatch state = %+v, want one fail-closed retained entry without duplicate", got)
 	}
-	leased, err := fixture.engine.LeaseLifecycleCandidates(context.Background(), 1, mustInitialLifecycleSlotAssignment(t))
+	leased, err := fixture.engine.LeaseLifecycleCandidates(context.Background(), 1, mustInitialLifecycleSlotAssignment(t), fixture.clock.Now())
 	if err != nil || len(leased) != 0 {
 		t.Fatalf("corrupt fail-closed entry became leasable: %+v,%v", leased, err)
 	}
@@ -1417,29 +2339,40 @@ func TestEngineLifecycleActivityVersionOverflowIsHarnessInvalid(t *testing.T) {
 	defer fixture.engine.Stop()
 	edge := fixture.graph.Incoming(18).Items[0]
 	now := fixture.clock.Now()
+	if _, err := fixture.engine.Login(context.Background(), SessionLogin{
+		UID: edge.OwnerUID, UserIndex: edge.OwnerIndex, LoginOrdinal: edge.OwnerIndex,
+	}); err != nil {
+		t.Fatalf("login inflight sender: %v", err)
+	}
 	intent := fixture.intent(t, edge.OwnerUID, edge.PeerUID, 0, TrafficPerson)
 	intent.ChannelID = edge.PersonChannelID
-	if err := fixture.verifier.RegisterSend(intent.Logical, now); err != nil {
+	if err := fixture.verifier.RegisterSend(intent.Logical, now, SendLatencyHot); err != nil {
 		t.Fatal(err)
 	}
 	if err := fixture.verifier.ObserveAttempt(intent.Logical, RetryAttempt{ClientMsgNo: intent.Logical.ClientMsgNo}, 1); err != nil {
 		t.Fatal(err)
 	}
-	installed := make(chan struct{}, 1)
+	installed := make(chan bool, 1)
 	if err := fixture.engine.enqueueBlocking(engineCommand{run: func() {
 		work := &engineWork{due: now.Add(10 * time.Minute), kind: engineWorkLifecycle, edge: edge,
 			schedule: ChannelSchedule{Class: LifecycleRevisit, RequiresColdRuntimeEvidence: true}, lifecycleTimerToken: 1,
 			activityVersion: math.MaxUint64, initialSequence: 42, lastActivityAt: now, observedLoaded: true}
 		fixture.engine.installLifecycleTimer(work)
 		fixture.engine.offerLifecycleCandidate(work)
-		inflight := &engineInflight{intent: intent, currentClientSeq: 1}
-		inflight.registerClientSeq(1)
+		if !fixture.engine.sessions.acquireSendLease(intent.Logical.Sender) {
+			installed <- false
+			return
+		}
+		inflight := &engineInflight{intent: intent, senderLeaseUID: intent.Logical.Sender, currentClientSeq: 1}
+		inflight.registerClientSeq(1, fixture.clock.Now())
 		fixture.engine.inflight[intent.Logical.ClientMsgNo] = inflight
-		installed <- struct{}{}
+		installed <- true
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	<-installed
+	if !<-installed {
+		t.Fatal("install inflight send lease")
+	}
 	ack := &frame.SendackPacket{ClientSeq: 1, ClientMsgNo: intent.Logical.ClientMsgNo, MessageID: 201, MessageSeq: 43, ReasonCode: frame.ReasonSuccess}
 	verificationErr := fixture.verifier.HandleSendack(ack)
 	err := fixture.engine.ObserveSendack(edge.OwnerUID, ack, verificationErr)
@@ -1460,7 +2393,7 @@ func TestEngineLifecycleActivityVersionOverflowIsHarnessInvalid(t *testing.T) {
 	if !<-unchanged {
 		t.Fatal("activity overflow mutated the fenced quiet window")
 	}
-	if leased, leaseErr := fixture.engine.LeaseLifecycleCandidates(context.Background(), 1, mustInitialLifecycleSlotAssignment(t)); leaseErr != nil || len(leased) != 0 {
+	if leased, leaseErr := fixture.engine.LeaseLifecycleCandidates(context.Background(), 1, mustInitialLifecycleSlotAssignment(t), fixture.clock.Now()); leaseErr != nil || len(leased) != 0 {
 		t.Fatalf("exhausted timer lease = %+v,%v", leased, leaseErr)
 	}
 	if washed, washErr := fixture.engine.ApproveColdRevisitContext(context.Background(), edge.PersonChannelID, 1, math.MaxUint64); washErr != nil || washed {
@@ -1480,7 +2413,7 @@ func TestEngineLifecycleActivityVersionOverflowIsHarnessInvalid(t *testing.T) {
 
 func TestLifecycleProofWorkerSenderUsesFencedApprovalWithoutForgingSequence(t *testing.T) {
 	fence := WorkerFence{RunID: "run", AssignmentID: "assignment", Generation: 1}
-	control := &fakeLifecycleReheatControl{response: WorkerLifecycleReheatResponse{WorkerFence: fence, WorkerID: 0, WorkerCount: 3, Approved: true}}
+	control := &fakeLifecycleReheatControl{response: WorkerLifecycleReheatResponse{WorkerFence: fence, WorkerID: 0, WorkerCount: 3, Approved: 1}}
 	sender, err := NewWorkerLifecycleReheatSender(control, fence)
 	if err != nil {
 		t.Fatal(err)
@@ -1489,7 +2422,9 @@ func TestLifecycleProofWorkerSenderUsesFencedApprovalWithoutForgingSequence(t *t
 	if err := sender.ApproveLifecycleReheat(context.Background(), candidate); err != nil {
 		t.Fatal(err)
 	}
-	if control.request.ChannelID != candidate.ChannelID || control.request.TimerToken != candidate.TimerToken || control.request.ActivityVersion != candidate.ActivityVersion || control.request.WorkerFence != fence {
+	if len(control.request.Items) != 1 || control.request.Items[0].ChannelID != candidate.ChannelID ||
+		control.request.Items[0].TimerToken != candidate.TimerToken || control.request.Items[0].ActivityVersion != candidate.ActivityVersion ||
+		control.request.WorkerFence != fence {
 		t.Fatalf("request = %+v", control.request)
 	}
 	invalid := candidate
@@ -1515,7 +2450,7 @@ func TestLifecycleProofRejectsProductTransitionFailures(t *testing.T) {
 		{"error", lifecycleRows(candidate, "error", 10, 10)},
 		{"two leaders", lifecycleRowsWithRoles(candidate, [3]string{"leader", "leader", "follower"}, 10, 10)},
 		{"non monotonic watermark", lifecycleRowsWithOffsets(candidate, [3][2]uint64{{10, 9}, {8, 8}, {10, 10}})},
-		{"partial missing", lifecycleRowsWithRoles(candidate, [3]string{"missing", "leader", "follower"}, 10, 10)},
+		{"no leader", lifecycleRowsWithRoles(candidate, [3]string{"missing", "follower", "follower"}, 10, 10)},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -1556,7 +2491,7 @@ func TestLifecycleProofReportsClosedProductFailureReasons(t *testing.T) {
 		run    func(*LifecycleProof) error
 	}{
 		{name: "incomplete initial load", reason: LifecycleFailureInitialLoad, run: func(proof *LifecycleProof) error {
-			return proof.Observe(now, lifecycleRowsWithRoles(candidate, [3]string{"missing", "leader", "follower"}, 10, 10))
+			return proof.Observe(now, lifecycleRows(candidate, "missing", 0, 0))
 		}},
 		{name: "runtime state", reason: LifecycleFailureRuntimeState, run: func(proof *LifecycleProof) error {
 			return proof.Observe(now, lifecycleRows(candidate, "closing", 10, 10))
@@ -1583,13 +2518,9 @@ func TestLifecycleProofReportsClosedProductFailureReasons(t *testing.T) {
 			reheat(proof)
 			return proof.Observe(candidate.ReheatAt.Add(lifecycleReheatDeadline+time.Nanosecond), lifecycleRows(candidate, "missing", 0, 0))
 		}},
-		{name: "partial reheat", reason: LifecycleFailurePartialReheat, run: func(proof *LifecycleProof) error {
+		{name: "reheat without leader", reason: LifecycleFailureRoleDisagreement, run: func(proof *LifecycleProof) error {
 			reheat(proof)
-			return proof.Observe(candidate.ReheatAt.Add(time.Second), lifecycleRowsWithRoles(candidate, [3]string{"leader", "follower", "missing"}, 11, 11))
-		}},
-		{name: "sequence proof", reason: LifecycleFailureSequenceProof, run: func(proof *LifecycleProof) error {
-			reheat(proof)
-			return proof.Observe(candidate.ReheatAt.Add(time.Second), lifecycleRows(candidate, "active", 10, 10))
+			return proof.Observe(candidate.ReheatAt.Add(time.Second), lifecycleRowsWithRoles(candidate, [3]string{"follower", "missing", "missing"}, 11, 11))
 		}},
 		{name: "sequence reset", reason: LifecycleFailureSequenceProof, run: func(proof *LifecycleProof) error {
 			initial := lifecycleRows(candidate, "active", 10, 10)
@@ -1761,7 +2692,7 @@ func TestLifecycleProofRejectsInvalidBatchAtomically(t *testing.T) {
 	}
 }
 
-func TestLifecycleProofRejectsStuckPartialReheatAndSequenceReset(t *testing.T) {
+func TestLifecycleProofRejectsStuckRuntimeAndSequenceReset(t *testing.T) {
 	now := time.Unix(1_000, 0)
 	candidate := lifecycleTestCandidates(t, now)[0]
 	for _, test := range []struct {
@@ -1776,26 +2707,30 @@ func TestLifecycleProofRejectsStuckPartialReheatAndSequenceReset(t *testing.T) {
 			return p.Reheat(context.Background(), now, candidate.ChannelID, &fakeLifecycleSender{})
 		}},
 		{"sequence reset", func(p *LifecycleProof) error {
-			_ = p.Observe(now, lifecycleRows(candidate, "active", 10, 10))
+			initial := lifecycleRows(candidate, "active", 10, 10)
+			for node := range initial {
+				initial[node].Channels[0].CheckpointHW = 8
+			}
+			_ = p.Observe(now, initial)
 			_ = p.Observe(candidate.QuietNotBefore, lifecycleRows(candidate, "missing", 0, 0))
 			_ = p.Reheat(context.Background(), candidate.QuietNotBefore, candidate.ChannelID, &fakeLifecycleSender{})
-			return p.Observe(candidate.ReheatAt, lifecycleRows(candidate, "active", 10, 10))
+			return p.Observe(candidate.ReheatAt, lifecycleRows(candidate, "active", 9, 9))
 		}},
-		{"partial reheat", func(p *LifecycleProof) error {
+		{"reheat without leader", func(p *LifecycleProof) error {
 			_ = p.Observe(now, lifecycleRows(candidate, "active", 10, 10))
 			_ = p.Observe(candidate.QuietNotBefore, lifecycleRows(candidate, "missing", 0, 0))
 			_ = p.Reheat(context.Background(), candidate.QuietNotBefore, candidate.ChannelID, &fakeLifecycleSender{})
-			return p.Observe(candidate.ReheatAt, lifecycleRowsWithRoles(candidate, [3]string{"leader", "follower", "missing"}, 11, 11))
+			return p.Observe(candidate.ReheatAt, lifecycleRowsWithRoles(candidate, [3]string{"follower", "missing", "missing"}, 11, 11))
 		}},
 		{"absence after quiet deadline", func(p *LifecycleProof) error {
 			_ = p.Observe(now, lifecycleRows(candidate, "active", 10, 10))
 			return p.Observe(candidate.QuietDeadline.Add(time.Nanosecond), lifecycleRows(candidate, "missing", 0, 0))
 		}},
-		{"reload after reheat deadline", func(p *LifecycleProof) error {
+		{"unadvanced reload after reheat deadline", func(p *LifecycleProof) error {
 			_ = p.Observe(now, lifecycleRows(candidate, "active", 10, 10))
 			_ = p.Observe(candidate.QuietNotBefore, lifecycleRows(candidate, "missing", 0, 0))
 			_ = p.Reheat(context.Background(), candidate.QuietNotBefore, candidate.ChannelID, &fakeLifecycleSender{})
-			return p.Observe(candidate.ReheatAt.Add(lifecycleReheatDeadline+time.Nanosecond), lifecycleRows(candidate, "active", 11, 11))
+			return p.Observe(candidate.ReheatAt.Add(lifecycleReheatDeadline+time.Nanosecond), lifecycleRows(candidate, "active", 10, 10))
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -2285,6 +3220,16 @@ type fakeLifecycleSender struct{ err error }
 
 func (s *fakeLifecycleSender) ApproveLifecycleReheat(context.Context, LifecycleCandidate) error {
 	return s.err
+}
+
+func workerLifecycleReheatRequest(fence WorkerFence, candidates ...LifecycleCandidate) WorkerLifecycleReheatRequest {
+	items := make([]WorkerLifecycleReheatItem, len(candidates))
+	for index, candidate := range candidates {
+		items[index] = WorkerLifecycleReheatItem{
+			ChannelID: candidate.ChannelID, TimerToken: candidate.TimerToken, ActivityVersion: candidate.ActivityVersion,
+		}
+	}
+	return WorkerLifecycleReheatRequest{WorkerFence: fence, Items: items}
 }
 
 type fakeLifecycleReheatControl struct {

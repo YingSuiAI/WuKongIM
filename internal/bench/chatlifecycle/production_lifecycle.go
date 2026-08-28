@@ -9,7 +9,11 @@ import (
 	"github.com/WuKongIM/WuKongIM/pkg/bench/model"
 )
 
-const productionLifecycleMaxActiveCohorts = 6
+const (
+	productionLifecycleInitialLoadSchedulingReserve = time.Second
+	productionLifecycleMaxPollEvery                 = 10 * time.Minute
+	productionLifecycleFirstLeaseGrace              = 10 * time.Minute
+)
 
 // ProductionLifecycleWorker is the fenced control-plane seam required from
 // each of the exact three production workers.
@@ -27,6 +31,9 @@ type ProductionLifecycleProber interface {
 // ProductionLifecycleOptions supplies the three fenced workers and the
 // bounded polling controls for the long-running production proof loop.
 type ProductionLifecycleOptions struct {
+	// Enabled starts the formal natural hot/cold/reheat proof. Local throughput
+	// diagnostics leave it disabled and make no natural-lifecycle claim.
+	Enabled        bool
 	Workers        [3]ProductionLifecycleWorker
 	Prober         ProductionLifecycleProber
 	Clock          ObserverClock
@@ -35,8 +42,8 @@ type ProductionLifecycleOptions struct {
 	ProbeOptions   LifecycleProbeOptions
 }
 
-// ProductionLifecycle owns at most six transient 1,200-candidate proofs.
-// Snapshot is identity-free and safe to call while Run is active.
+// ProductionLifecycle owns one transient 1,200-candidate proof. Snapshot is
+// identity-free and safe to call while Run is active.
 type ProductionLifecycle struct {
 	options ProductionLifecycleOptions
 
@@ -58,6 +65,12 @@ type productionLifecycleCohort struct {
 
 // NewProductionLifecycle constructs one single-use production proof loop.
 func NewProductionLifecycle(options ProductionLifecycleOptions) (*ProductionLifecycle, error) {
+	if !options.Enabled {
+		return &ProductionLifecycle{
+			options:   options,
+			completed: LifecycleProofSnapshot{ReheatLatency: newWorkerHistogramSnapshot()},
+		}, nil
+	}
 	for _, worker := range options.Workers {
 		if worker == nil {
 			return nil, ErrLifecycleHarnessInvalid
@@ -72,7 +85,7 @@ func NewProductionLifecycle(options ProductionLifecycleOptions) (*ProductionLife
 	if options.PollEvery == 0 {
 		options.PollEvery = time.Second
 	}
-	if options.PollEvery < 0 || options.PollEvery > LifecycleProofCadence {
+	if options.PollEvery < 0 || options.PollEvery > productionLifecycleMaxPollEvery {
 		return nil, ErrLifecycleHarnessInvalid
 	}
 	if options.ProbeOptions.BatchSize == 0 {
@@ -86,7 +99,7 @@ func NewProductionLifecycle(options ProductionLifecycleOptions) (*ProductionLife
 	}
 	if options.ProbeOptions.BatchSize < 1 || options.ProbeOptions.BatchSize > lifecycleMaxProbeBatch ||
 		options.ProbeOptions.MaxConcurrency < 1 || options.ProbeOptions.MaxConcurrency > lifecycleMaxProbeParallel ||
-		options.ProbeOptions.RequestTimeout < 0 || options.ProbeOptions.RequestTimeout > 30*time.Second {
+		options.ProbeOptions.RequestTimeout < 0 || options.ProbeOptions.RequestTimeout > observerMaxRoundTimeout {
 		return nil, ErrLifecycleHarnessInvalid
 	}
 	return &ProductionLifecycle{
@@ -95,9 +108,10 @@ func NewProductionLifecycle(options ProductionLifecycleOptions) (*ProductionLife
 	}, nil
 }
 
-// Run leases one exact 12x100 cohort every ten minutes and polls all active
-// cohorts concurrently. It returns the original cancellation or a closed
-// product/harness classification and always releases transient identities.
+// Run leases one fixed exact 12x100 cohort after five active minutes and polls
+// it through natural cold/reheat completion. It returns the original
+// cancellation or a closed product/harness classification and always releases
+// transient identities.
 func (p *ProductionLifecycle) Run(ctx context.Context, fence WorkerFence) error {
 	if p == nil || ctx == nil || !validWorkerFence(fence) {
 		if p != nil {
@@ -117,13 +131,17 @@ func (p *ProductionLifecycle) Run(ctx context.Context, fence WorkerFence) error 
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if !p.options.Enabled {
+		<-ctx.Done()
+		return ctx.Err()
+	}
 	startedAt := p.options.Clock.Now()
 	if startedAt.IsZero() {
 		p.recordHarnessFailure()
 		return ErrLifecycleHarnessInvalid
 	}
-	nextLease, err := LifecycleProofCycleTime(startedAt, 0)
-	if err != nil {
+	nextLease := startedAt.Add(lifecycleNaturalQuiet)
+	if !nextLease.After(startedAt) {
 		p.recordHarnessFailure()
 		return ErrLifecycleHarnessInvalid
 	}
@@ -134,7 +152,7 @@ func (p *ProductionLifecycle) Run(ctx context.Context, fence WorkerFence) error 
 	}
 	defer ticker.Stop()
 	lastTick := startedAt
-	cycle := uint64(0)
+	leasedOnce := false
 	for {
 		select {
 		case <-ctx.Done():
@@ -145,25 +163,9 @@ func (p *ProductionLifecycle) Run(ctx context.Context, fence WorkerFence) error 
 				return ErrLifecycleHarnessInvalid
 			}
 			lastTick = tick
-			leaseDue := !tick.Before(nextLease)
-			var leased *productionLifecycleCohort
-			prePolled := false
-			if leaseDue && p.activeCount() >= productionLifecycleMaxActiveCohorts {
-				if err := p.pollRound(ctx, fence, tick); err != nil {
-					if ctx.Err() != nil {
-						return ctx.Err()
-					}
-					return err
-				}
-				p.releaseCompleted()
-				prePolled = true
-				if p.activeCount() >= productionLifecycleMaxActiveCohorts {
-					p.recordHarnessFailure()
-					return ErrLifecycleHarnessInvalid
-				}
-			}
+			leaseDue := !leasedOnce && !tick.Before(nextLease)
 			if leaseDue {
-				if !tick.Before(nextLease.Add(LifecycleProofCadence)) {
+				if !tick.Before(nextLease.Add(productionLifecycleFirstLeaseGrace)) {
 					p.recordHarnessFailure()
 					return ErrLifecycleHarnessInvalid
 				}
@@ -178,20 +180,9 @@ func (p *ProductionLifecycle) Run(ctx context.Context, fence WorkerFence) error 
 				p.mu.Lock()
 				p.active = append(p.active, cohort)
 				p.mu.Unlock()
-				leased = cohort
-				cycle++
-				nextLease, err = LifecycleProofCycleTime(startedAt, cycle)
-				if err != nil {
-					p.recordHarnessFailure()
-					return ErrLifecycleHarnessInvalid
-				}
+				leasedOnce = true
 			}
-			var pollErr error
-			if prePolled {
-				pollErr = p.pollCohorts(ctx, fence, tick, []*productionLifecycleCohort{leased})
-			} else {
-				pollErr = p.pollRound(ctx, fence, tick)
-			}
+			pollErr := p.pollRound(ctx, fence, tick)
 			if pollErr != nil {
 				if ctx.Err() != nil {
 					return ctx.Err()
@@ -204,6 +195,10 @@ func (p *ProductionLifecycle) Run(ctx context.Context, fence WorkerFence) error 
 }
 
 func (p *ProductionLifecycle) leaseCohort(ctx context.Context, fence WorkerFence, now time.Time) (*productionLifecycleCohort, error) {
+	initialLoadDeadline := now.Add(2*p.options.ProbeOptions.RequestTimeout + productionLifecycleInitialLoadSchedulingReserve)
+	if !initialLoadDeadline.After(now) {
+		return nil, ErrLifecycleHarnessInvalid
+	}
 	type leaseOutcome struct {
 		response WorkerLifecycleCandidateLeaseResponse
 		err      error
@@ -217,7 +212,7 @@ func (p *ProductionLifecycle) leaseCohort(ctx context.Context, fence WorkerFence
 		go func(workerID int, worker ProductionLifecycleWorker) {
 			defer wait.Done()
 			outcomes[workerID].response, outcomes[workerID].err = worker.LeaseLifecycleCandidates(roundCtx, WorkerLifecycleCandidateLeaseRequest{
-				WorkerFence: fence, Requested: lifecycleCohortSize,
+				WorkerFence: fence, Requested: lifecycleCohortSize, InitialLoadDeadline: initialLoadDeadline,
 			})
 		}(workerID, worker)
 	}
@@ -252,7 +247,7 @@ func (p *ProductionLifecycle) leaseCohort(ctx context.Context, fence WorkerFence
 			all = append(all, candidate)
 		}
 	}
-	selected, err := SelectLifecycleCohort(all, now, p.options.SlotAssignment, formalLogicalSlotGroups)
+	selected, err := SelectLifecycleCohort(all, initialLoadDeadline, p.options.SlotAssignment, formalLogicalSlotGroups)
 	if err != nil {
 		return nil, ErrLifecycleHarnessInvalid
 	}
@@ -324,9 +319,9 @@ func (p *ProductionLifecycle) pollCohorts(ctx context.Context, fence WorkerFence
 }
 
 type productionLifecycleReheatJob struct {
-	cohort   *productionLifecycleCohort
-	identity string
-	index    int
+	cohort    *productionLifecycleCohort
+	candidate LifecycleCandidate
+	index     int
 }
 
 func (p *ProductionLifecycle) reheatColdCandidates(ctx context.Context, fence WorkerFence, now time.Time, cohorts []*productionLifecycleCohort) []error {
@@ -342,7 +337,7 @@ func (p *ProductionLifecycle) reheatColdCandidates(ctx context.Context, fence Wo
 				return []error{ErrLifecycleHarnessInvalid}
 			}
 			jobsByWorker[owner] = append(jobsByWorker[owner], productionLifecycleReheatJob{
-				cohort: cohort, identity: candidate.ChannelID, index: jobCount,
+				cohort: cohort, candidate: candidate, index: jobCount,
 			})
 			jobCount++
 		}
@@ -357,9 +352,24 @@ func (p *ProductionLifecycle) reheatColdCandidates(ctx context.Context, fence Wo
 		wait.Add(1)
 		go func(workerID uint64, jobs []productionLifecycleReheatJob) {
 			defer wait.Done()
-			sender := productionLifecycleOwnedSender{client: p.options.Workers[workerID], fence: fence, workerID: workerID}
+			approvalCtx, cancel := context.WithTimeout(ctx, p.options.ProbeOptions.RequestTimeout)
+			defer cancel()
+			items := make([]WorkerLifecycleReheatItem, len(jobs))
+			for index, job := range jobs {
+				items[index] = WorkerLifecycleReheatItem{
+					ChannelID: job.candidate.ChannelID, TimerToken: job.candidate.TimerToken, ActivityVersion: job.candidate.ActivityVersion,
+				}
+			}
+			response, err := p.options.Workers[workerID].ApproveLifecycleReheat(approvalCtx, WorkerLifecycleReheatRequest{
+				WorkerFence: fence, Items: items,
+			})
+			if err != nil || !sameWorkerFence(response.WorkerFence, fence) || response.WorkerID != workerID ||
+				response.WorkerCount != uint64(len(p.options.Workers)) || int(response.Approved) != len(items) {
+				results[jobs[0].index] = ErrLifecycleHarnessInvalid
+				return
+			}
 			for _, job := range jobs {
-				err := job.cohort.proof.Reheat(ctx, now, job.identity, &sender)
+				err := job.cohort.proof.Reheat(ctx, now, job.candidate.ChannelID, approvedLifecycleReheatSender{})
 				results[job.index] = err
 				succeeded[job.index] = err == nil
 			}
@@ -369,37 +379,17 @@ func (p *ProductionLifecycle) reheatColdCandidates(ctx context.Context, fence Wo
 	for _, jobs := range jobsByWorker {
 		for _, job := range jobs {
 			if succeeded[job.index] {
-				job.cohort.approved[job.identity] = true
+				job.cohort.approved[job.candidate.ChannelID] = true
 			}
 		}
 	}
 	return results
 }
 
-type productionLifecycleOwnedSender struct {
-	client   ProductionLifecycleWorker
-	fence    WorkerFence
-	workerID uint64
-}
+type approvedLifecycleReheatSender struct{}
 
-func (s *productionLifecycleOwnedSender) ApproveLifecycleReheat(ctx context.Context, candidate LifecycleCandidate) error {
-	response, err := s.client.ApproveLifecycleReheat(ctx, WorkerLifecycleReheatRequest{
-		WorkerFence: s.fence, ChannelID: candidate.ChannelID,
-		TimerToken: candidate.TimerToken, ActivityVersion: candidate.ActivityVersion,
-	})
-	if err != nil {
-		return err
-	}
-	if !sameWorkerFence(response.WorkerFence, s.fence) || response.WorkerID != s.workerID || response.WorkerCount != 3 || !response.Approved {
-		return ErrLifecycleHarnessInvalid
-	}
+func (approvedLifecycleReheatSender) ApproveLifecycleReheat(context.Context, LifecycleCandidate) error {
 	return nil
-}
-
-func (p *ProductionLifecycle) activeCount() int {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return len(p.active)
 }
 
 func (p *ProductionLifecycle) releaseCompleted() {

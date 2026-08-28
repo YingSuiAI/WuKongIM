@@ -18,6 +18,9 @@ const (
 	KindUpdateControllerVoters Kind = "update_controller_voters"
 	// KindPromoteControllerVoter atomically declares a live Controller Raft voter in durable cluster state.
 	KindPromoteControllerVoter Kind = "promote_controller_voter"
+	// KindReserveControllerVoterPromotion fences target preparation and live
+	// membership changes against Slot replica-count expansion.
+	KindReserveControllerVoterPromotion Kind = "reserve_controller_voter_promotion"
 	// KindUpsertSlotAssignmentAndTask atomically writes a slot assignment and reconcile task.
 	KindUpsertSlotAssignmentAndTask Kind = "upsert_slot_assignment_and_task"
 	// KindUpsertSlotReplicaMoveTask writes a staged Slot replica move task without changing assignment peers.
@@ -62,6 +65,9 @@ type Command struct {
 	Assignment *state.SlotAssignment `json:"assignment,omitempty"`
 	// Task contains the active reconcile task to upsert.
 	Task *state.ReconcileTask `json:"task,omitempty"`
+	// SlotReplicaCountTransition initializes a forward-only replica-count
+	// increase together with its first Slot task.
+	SlotReplicaCountTransition *state.SlotReplicaCountTransition `json:"slot_replica_count_transition,omitempty"`
 	// SlotReplicaMovePhase carries a fenced Slot replica move phase update.
 	SlotReplicaMovePhase *SlotReplicaMovePhaseAdvance `json:"slot_replica_move_phase,omitempty"`
 	// SlotReplicaMoveCommit carries a fenced Slot replica move assignment commit.

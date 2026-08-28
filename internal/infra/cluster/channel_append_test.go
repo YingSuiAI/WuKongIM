@@ -196,6 +196,19 @@ func TestChannelAppendClientInvalidatesExactFailedAuthority(t *testing.T) {
 	}
 }
 
+func TestChannelAppendClientMarksExactUnavailableAuthority(t *testing.T) {
+	id := channelappend.ChannelID{ID: "unavailable", Type: 2}
+	node := &channelAppendNodeForTest{}
+	client := NewChannelAppendClient(node, nil, nil)
+	target := channelappend.AuthorityTarget{ChannelID: id, ChannelKey: "2:unavailable", LeaderNodeID: 3, Epoch: 11, LeaderEpoch: 7, RouteGeneration: 19}
+
+	client.MarkAppendAuthorityFailed(id, target)
+
+	if node.markFailedCalls != 1 || node.invalidatedID != (channelruntime.ChannelID{ID: id.ID, Type: id.Type}) || node.invalidatedLeader != 3 || node.invalidatedEpoch != 11 || node.invalidatedLeaderEpoch != 7 || node.invalidatedRouteGeneration != 19 {
+		t.Fatalf("failure marker = calls:%d id:%#v leader:%d epoch:%d/%d generation:%d, want exact unavailable authority", node.markFailedCalls, node.invalidatedID, node.invalidatedLeader, node.invalidatedEpoch, node.invalidatedLeaderEpoch, node.invalidatedRouteGeneration)
+	}
+}
+
 type channelAppendNodeForTest struct {
 	nodeID                     uint64
 	meta                       channelruntime.Meta
@@ -205,6 +218,7 @@ type channelAppendNodeForTest struct {
 	calls                      int
 	metadataCalls              int
 	invalidateCalls            int
+	markFailedCalls            int
 	invalidatedID              channelruntime.ChannelID
 	invalidatedLeader          uint64
 	invalidatedEpoch           uint64
@@ -214,6 +228,15 @@ type channelAppendNodeForTest struct {
 
 func (n *channelAppendNodeForTest) InvalidateChannelAppendAuthority(id channelruntime.ChannelID, leader uint64, epoch uint64, leaderEpoch uint64, routeGeneration uint64) {
 	n.invalidateCalls++
+	n.invalidatedID = id
+	n.invalidatedLeader = leader
+	n.invalidatedEpoch = epoch
+	n.invalidatedLeaderEpoch = leaderEpoch
+	n.invalidatedRouteGeneration = routeGeneration
+}
+
+func (n *channelAppendNodeForTest) MarkChannelAppendAuthorityFailed(id channelruntime.ChannelID, leader uint64, epoch uint64, leaderEpoch uint64, routeGeneration uint64) {
+	n.markFailedCalls++
 	n.invalidatedID = id
 	n.invalidatedLeader = leader
 	n.invalidatedEpoch = epoch

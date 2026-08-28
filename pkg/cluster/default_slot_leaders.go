@@ -271,7 +271,6 @@ func (n *Node) remoteSlotLeaderStatuses(ctx context.Context, snapshot control.Sn
 		select {
 		case <-roundCtx.Done():
 			completed = len(peerIDs)
-			continue
 		case result := <-results:
 			for _, status := range result.statuses {
 				if status.SlotID == 0 || status.Leader == 0 {
@@ -281,10 +280,6 @@ func (n *Node) remoteSlotLeaderStatuses(ctx context.Context, snapshot control.Sn
 				if !ok || status.LeaderTerm > current.LeaderTerm {
 					bySlot[status.SlotID] = status
 				}
-			}
-			if len(bySlot) == len(slotIDs) {
-				cancel()
-				completed = len(peerIDs)
 			}
 		}
 	}
