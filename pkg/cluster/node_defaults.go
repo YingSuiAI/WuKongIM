@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strings"
 
 	channelruntime "github.com/WuKongIM/WuKongIM/pkg/channel"
 	channelreplication "github.com/WuKongIM/WuKongIM/pkg/channel/replication"
@@ -27,7 +28,7 @@ func (n *Node) ensureDefaultRuntime() (bool, error) {
 		raftTransport := control.NewRaftTransportWithOptions(n.transportClient, control.RaftTransportOptions{Observer: n.cfg.Transport.Observer})
 		runtime, err := control.NewRuntime(control.RuntimeConfig{
 			NodeID:                 n.cfg.NodeID,
-			Addr:                   n.cfg.ListenAddr,
+			Addr:                   n.defaultControlRuntimeAddr(),
 			StateDir:               n.cfg.Control.StateDir,
 			ClusterID:              n.cfg.Control.ClusterID,
 			Role:                   control.RuntimeRole(n.cfg.Control.Role),
@@ -211,6 +212,21 @@ func (n *Node) ensureDefaultTransport() error {
 	n.defaultTransport = true
 	n.registeredRPCHandlers = make(map[uint8]struct{})
 	return nil
+}
+
+// defaultControlRuntimeAddr uses the same identity submitted by seed join or
+// bootstrap membership. ListenAddr only binds transport and may be a wildcard.
+func (n *Node) defaultControlRuntimeAddr() string {
+	if n.cfg.seedJoinMode() {
+		return strings.TrimSpace(n.cfg.Join.AdvertiseAddr)
+	}
+	for _, voter := range n.cfg.Control.Voters {
+		if voter.NodeID == n.cfg.NodeID {
+			return voter.Addr
+		}
+	}
+	// Static mirrors have no local entry in Controller voter membership.
+	return n.cfg.ListenAddr
 }
 
 func (n *Node) defaultControlRuntimePeers() []control.RuntimeVoter {
