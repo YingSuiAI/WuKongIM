@@ -318,6 +318,12 @@ not a strict completion requirement. Slot replica movement first opens the
 target's local learner runtime, then advances Slot Raft membership through
 add-learner, promote-learner, remove-voter, and finally commits the durable
 assignment only after observed voters match the target peer set.
+For the explicit one-to-three replica-count transition, the same executor uses
+`SourceNode=0` to mean add-only: it opens and catches up the learner, promotes
+the voter, skips removal, and commits one Slot assignment only after the exact
+expanded voter set is observed. The Controller-held transition keeps the exact
+three target node IDs immutable, and advances the cluster-wide replica count
+only after every Slot is complete.
 
 `Config.Control.RaftObserver` is passed through to the default Controller
 runtime so composition roots can expose Controller Raft ingress queue metrics

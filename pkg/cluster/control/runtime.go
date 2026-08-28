@@ -434,12 +434,14 @@ func (r *Runtime) RequestSlotReplicaMove(ctx context.Context, req SlotReplicaMov
 		return resp.SlotReplicaMove, nil
 	}
 	result, err := r.backend.RequestSlotReplicaMove(ctx, controller.SlotReplicaMoveRequest{
-		SlotID:        req.SlotID,
-		SourceNode:    req.SourceNode,
-		TargetNode:    req.TargetNode,
-		TargetPeers:   append([]uint64(nil), req.TargetPeers...),
-		ConfigEpoch:   req.ConfigEpoch,
-		StateRevision: req.StateRevision,
+		SlotID:                req.SlotID,
+		SourceNode:            req.SourceNode,
+		TargetNode:            req.TargetNode,
+		TargetPeers:           append([]uint64(nil), req.TargetPeers...),
+		ConfigEpoch:           req.ConfigEpoch,
+		StateRevision:         req.StateRevision,
+		TargetReplicaCount:    req.TargetReplicaCount,
+		TransitionTargetNodes: append([]uint64(nil), req.TransitionTargetNodes...),
 	})
 	if shouldForwardControlWrite(err) {
 		resp, err := r.forwardControlWriteAfterError(ctx, ControlWriteRequest{

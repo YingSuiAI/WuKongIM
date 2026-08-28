@@ -3,6 +3,11 @@ package control
 // Clone returns a deep copy that callers may mutate independently.
 func (s Snapshot) Clone() Snapshot {
 	out := s
+	if s.SlotReplicaCountTransition != nil {
+		transition := *s.SlotReplicaCountTransition
+		transition.TargetNodeIDs = append([]uint64(nil), s.SlotReplicaCountTransition.TargetNodeIDs...)
+		out.SlotReplicaCountTransition = &transition
+	}
 	out.Nodes = append([]Node(nil), s.Nodes...)
 	for i := range out.Nodes {
 		out.Nodes[i].Roles = append([]Role(nil), s.Nodes[i].Roles...)

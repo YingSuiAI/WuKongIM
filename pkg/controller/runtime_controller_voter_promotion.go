@@ -44,6 +44,9 @@ func (r *Runtime) PromoteControllerVoter(ctx context.Context, req PromoteControl
 	if err != nil {
 		return PromoteControllerVoterResult{}, err
 	}
+	if st.SlotReplicaCountTransition != nil {
+		return PromoteControllerVoterResult{}, fmt.Errorf("%w: %s", ErrProposalRejected, fsm.ReasonSlotReplicaCountTransitionActive)
+	}
 	node, ok := findLifecycleNode(st, req.NodeID)
 	if !ok {
 		return PromoteControllerVoterResult{}, fmt.Errorf("%w: node %d", ErrNodeLifecycleNotFound, req.NodeID)

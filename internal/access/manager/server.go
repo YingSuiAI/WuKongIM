@@ -498,6 +498,7 @@ func (s *Server) registerRoutes() {
 	}
 	slotWrites.POST("/nodes/:node_id/slots/:slot_id/compact", s.handleCompactSlotRaftLog)
 	slotWrites.POST("/slots/leader-transfer-batch", s.handleSlotLeaderTransferBatchExecute)
+	slotWrites.POST("/slots/replica-count-transition/advance", s.handleSlotReplicaTransitionAdvance)
 	slotWrites.POST("/slots/:slot_id/leader-transfer", s.handleSlotLeaderTransfer)
 
 	controllerReads := s.engine.Group("/manager")

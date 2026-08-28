@@ -50,6 +50,9 @@ const (
 	ReasonControllerVoterProofMissing = "controller_voter_proof_missing"
 	// ReasonControllerVoterSetMismatch marks a promotion fenced to a stale Controller voter set.
 	ReasonControllerVoterSetMismatch = "controller_voter_set_mismatch"
+	// ReasonSlotReplicaCountTransitionActive prevents irreversible Controller
+	// promotion before every Slot has proven the target voter count.
+	ReasonSlotReplicaCountTransitionActive = "slot_replica_count_transition_active"
 	// ReasonOpsMCPOwnerChangeWhileEnabled rejects changing the executor without stopping MCP first.
 	ReasonOpsMCPOwnerChangeWhileEnabled = "ops_mcp_owner_change_while_enabled"
 	// ReasonInitConflict marks an init command that does not match existing state.

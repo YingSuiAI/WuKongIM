@@ -35,6 +35,11 @@ irreversible operator request
   -> use-case safety plan and fresh state checks
   -> Controller-backed intent or explicit conflict/unavailable result
 
+Slot replica-count transition advance
+  -> `cluster.slot:w` plus exact three target node IDs
+  -> management validates the single-Controller precondition and live data nodes
+  -> create/resume at most one fenced Slot task (`202`) or report current phase (`200`)
+
 remote node read or action
   -> management orchestration selects target
   -> infra/cluster node RPC adapter

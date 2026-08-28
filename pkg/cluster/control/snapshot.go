@@ -187,6 +187,10 @@ type Snapshot struct {
 	Revision uint64
 	// ControllerID is the best-known Controller leader or owner node ID.
 	ControllerID uint64
+	// SlotReplicaCount is the last cluster-wide fully converged Slot voter count.
+	SlotReplicaCount uint16
+	// SlotReplicaCountTransition is present while Slots are being expanded.
+	SlotReplicaCountTransition *SlotReplicaCountTransition
 	// Nodes lists known cluster members.
 	Nodes []Node
 	// Slots lists desired physical Slot assignments.
@@ -201,6 +205,15 @@ type Snapshot struct {
 	OpsMCP *OpsMCPState
 	// ChannelDataPlaneLease is this node's local append-admission visibility lease.
 	ChannelDataPlaneLease ChannelDataPlaneLease
+}
+
+// SlotReplicaCountTransition is the read-model projection of the durable,
+// forward-only Slot voter-count transition.
+type SlotReplicaCountTransition struct {
+	SourceReplicaCount uint16   `json:"source_replica_count"`
+	TargetReplicaCount uint16   `json:"target_replica_count"`
+	StartedAtRevision  uint64   `json:"started_at_revision"`
+	TargetNodeIDs      []uint64 `json:"target_node_ids"`
 }
 
 // Node describes one cluster member in the control snapshot.

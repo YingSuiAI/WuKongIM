@@ -362,6 +362,41 @@ func TestSlotReplicaMoveExecutorCommitsAfterTargetVotersObserved(t *testing.T) {
 	}
 }
 
+func TestSlotReplicaMoveExecutorAdditionPromotesWithoutRemovingVoter(t *testing.T) {
+	before := multiraft.Status{
+		SlotID: 1, NodeID: 1, LeaderID: 1, CurrentVoters: []multiraft.NodeID{1},
+		CurrentLearners: []multiraft.NodeID{2}, ConfigAppliedIndex: 8, CommitIndex: 8,
+		Progress: map[multiraft.NodeID]multiraft.PeerProgress{2: {Match: 8}},
+	}
+	after := before
+	after.CurrentVoters = []multiraft.NodeID{1, 2}
+	after.CurrentLearners = nil
+	after.ConfigAppliedIndex = 9
+	runtime := &fakeSlotReplicaMoveRuntime{statuses: []multiraft.Status{before, before, after}}
+	writer := &fakeSlotReplicaMoveWriter{}
+	executor := NewSlotReplicaMoveExecutor(SlotReplicaMoveExecutorConfig{LocalNode: 1, Runtime: runtime, MoveWriter: writer, PollInterval: -1})
+	snapshot := slotReplicaMoveSnapshot(control.TaskStepPromoteLearner, 1, before)
+	snapshot.Slots[0].DesiredPeers = []uint64{1}
+	snapshot.Tasks[0].SourceNode = 0
+	snapshot.Tasks[0].TargetNode = 2
+	snapshot.Tasks[0].TargetPeers = []uint64{1, 2}
+
+	if err := executor.Reconcile(context.Background(), snapshot); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if len(runtime.changes) != 1 || runtime.changes[0].Type != multiraft.PromoteLearner {
+		t.Fatalf("changes = %#v, want one learner promotion", runtime.changes)
+	}
+	if writer.phaseCalls != 1 || writer.phase.NextStep != control.TaskStepCommitAssignment {
+		t.Fatalf("phase = %#v, want direct commit assignment", writer.phase)
+	}
+	for _, change := range runtime.changes {
+		if change.Type == multiraft.RemoveVoter {
+			t.Fatalf("addition attempted voter removal: %#v", runtime.changes)
+		}
+	}
+}
+
 func slotReplicaMoveSnapshot(step control.TaskStep, phaseIndex uint32, status multiraft.Status) control.Snapshot {
 	_ = status
 	return control.Snapshot{

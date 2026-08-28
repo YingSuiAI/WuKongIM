@@ -62,6 +62,9 @@ type Command struct {
 	Assignment *state.SlotAssignment `json:"assignment,omitempty"`
 	// Task contains the active reconcile task to upsert.
 	Task *state.ReconcileTask `json:"task,omitempty"`
+	// SlotReplicaCountTransition initializes a forward-only replica-count
+	// increase together with its first Slot task.
+	SlotReplicaCountTransition *state.SlotReplicaCountTransition `json:"slot_replica_count_transition,omitempty"`
 	// SlotReplicaMovePhase carries a fenced Slot replica move phase update.
 	SlotReplicaMovePhase *SlotReplicaMovePhaseAdvance `json:"slot_replica_move_phase,omitempty"`
 	// SlotReplicaMoveCommit carries a fenced Slot replica move assignment commit.

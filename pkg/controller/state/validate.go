@@ -34,18 +34,42 @@ func (s ClusterState) Validate() error {
 	if err := validateControllers(s.Controllers, nodes); err != nil {
 		return err
 	}
+	if s.SlotReplicaCountTransition != nil {
+		if len(s.Controllers) != 1 {
+			return invalid("slot replica count transition requires exactly one Controller voter")
+		}
+		for _, nodeID := range s.SlotReplicaCountTransition.TargetNodeIDs {
+			node, ok := nodes[nodeID]
+			if !ok || node.JoinState != NodeJoinStateActive || !node.HasRole(NodeRoleData) {
+				return invalid("slot replica count transition target must be an active data node")
+			}
+		}
+	}
 	if err := validateNodeHealthReports(s.NodeHealthReports, nodes); err != nil {
 		return err
 	}
-	assignments, err := validateSlots(s.Config, s.Slots, nodes)
+	if err := validateSlotReplicaCountTransition(s.Config, s.SlotReplicaCountTransition); err != nil {
+		return err
+	}
+	assignments, err := validateSlots(s.Config, s.SlotReplicaCountTransition, s.Slots, nodes)
 	if err != nil {
 		return err
+	}
+	if s.SlotReplicaCountTransition != nil && len(assignments) != int(s.Config.SlotCount) {
+		return invalid("slot replica count transition requires every Slot assignment")
 	}
 	if err := validateHashSlots(s.Config, s.HashSlots); err != nil {
 		return err
 	}
-	if err := validateTasks(s.Tasks, assignments, nodes); err != nil {
+	if err := validateTasks(s.Tasks, assignments, nodes, s.SlotReplicaCountTransition); err != nil {
 		return err
+	}
+	if s.SlotReplicaCountTransition != nil {
+		for _, task := range s.Tasks {
+			if task.Kind != TaskKindSlotReplicaMove || task.SourceNode != 0 {
+				return invalid("slot replica count transition permits only voter-add tasks")
+			}
+		}
 	}
 	if err := validateScheduledBackup(s.ScheduledBackup); err != nil {
 		return err
@@ -61,6 +85,10 @@ func (s ClusterState) Validate() error {
 	if s.ScheduledBackup != nil && s.ScheduledBackup.ActiveBackup != nil &&
 		len(s.Tasks) != 0 {
 		return invalid("active backup requires an empty Controller task set")
+	}
+	if s.SlotReplicaCountTransition != nil && s.ScheduledBackup != nil &&
+		(s.ScheduledBackup.ActiveBackup != nil || s.ScheduledBackup.ActiveRestore != nil) {
+		return invalid("slot replica count transition cannot overlap backup or restore")
 	}
 	if err := validateOpsMCP(s.OpsMCP, nodes); err != nil {
 		return err
@@ -196,7 +224,20 @@ func validateControllers(controllers []ControllerVoter, nodes map[uint64]Node) e
 	return nil
 }
 
-func validateSlots(config ClusterConfig, slots []SlotAssignment, nodes map[uint64]Node) (map[uint32]SlotAssignment, error) {
+func validateSlotReplicaCountTransition(config ClusterConfig, transition *SlotReplicaCountTransition) error {
+	if transition == nil {
+		return nil
+	}
+	if transition.SourceReplicaCount != config.ReplicaCount ||
+		transition.TargetReplicaCount <= transition.SourceReplicaCount ||
+		transition.TargetReplicaCount != 3 || transition.StartedAtRevision == 0 ||
+		len(transition.TargetNodeIDs) != int(transition.TargetReplicaCount) || hasDuplicateUint64(transition.TargetNodeIDs) {
+		return invalid("slot replica count transition is invalid")
+	}
+	return nil
+}
+
+func validateSlots(config ClusterConfig, transition *SlotReplicaCountTransition, slots []SlotAssignment, nodes map[uint64]Node) (map[uint32]SlotAssignment, error) {
 	byID := make(map[uint32]SlotAssignment, len(slots))
 	for _, slot := range slots {
 		if slot.SlotID == 0 || slot.SlotID > config.SlotCount {
@@ -208,8 +249,13 @@ func validateSlots(config ClusterConfig, slots []SlotAssignment, nodes map[uint6
 		if slot.ConfigEpoch == 0 {
 			return nil, invalid("slot config_epoch is required")
 		}
-		if len(slot.DesiredPeers) != int(config.ReplicaCount) {
-			return nil, invalid("slot desired_peers must match replica_count")
+		minReplicaCount := int(config.ReplicaCount)
+		maxReplicaCount := minReplicaCount
+		if transition != nil {
+			maxReplicaCount = int(transition.TargetReplicaCount)
+		}
+		if len(slot.DesiredPeers) < minReplicaCount || len(slot.DesiredPeers) > maxReplicaCount {
+			return nil, invalid("slot desired_peers must be within the active replica count transition")
 		}
 		seenPeers := make(map[uint64]struct{}, len(slot.DesiredPeers))
 		for _, peerID := range slot.DesiredPeers {
@@ -223,6 +269,9 @@ func validateSlots(config ClusterConfig, slots []SlotAssignment, nodes map[uint6
 			node, ok := nodes[peerID]
 			if !ok || !slotDesiredPeerNodeAllowed(node) {
 				return nil, invalid("slot peer must be an active or leaving data node")
+			}
+			if transition != nil && !containsUint64(transition.TargetNodeIDs, peerID) {
+				return nil, invalid("slot peer must belong to replica count transition targets")
 			}
 		}
 		if slot.PreferredLeader != 0 {
@@ -273,7 +322,7 @@ func validateHashSlots(config ClusterConfig, table HashSlotTable) error {
 	return nil
 }
 
-func validateTasks(tasks []ReconcileTask, assignments map[uint32]SlotAssignment, nodes map[uint64]Node) error {
+func validateTasks(tasks []ReconcileTask, assignments map[uint32]SlotAssignment, nodes map[uint64]Node, transition *SlotReplicaCountTransition) error {
 	seenTaskIDs := make(map[string]struct{}, len(tasks))
 	seenSlots := make(map[uint32]struct{}, len(tasks))
 	for _, task := range tasks {
@@ -365,16 +414,16 @@ func validateTasks(tasks []ReconcileTask, assignments map[uint32]SlotAssignment,
 			if !ok {
 				return invalid("slot replica move task requires slot assignment")
 			}
-			if task.SourceNode == 0 || task.TargetNode == 0 {
-				return invalid("slot replica move source and target must be non-zero")
+			if task.TargetNode == 0 {
+				return invalid("slot replica move target must be non-zero")
 			}
-			if task.SourceNode == task.TargetNode {
+			if task.SourceNode != 0 && task.SourceNode == task.TargetNode {
 				return invalid("slot replica move source and target must differ")
 			}
 			if task.ConfigEpoch != assignment.ConfigEpoch {
 				return invalid("slot replica move config_epoch must match assignment")
 			}
-			if !containsUint64(assignment.DesiredPeers, task.SourceNode) {
+			if task.SourceNode != 0 && !containsUint64(assignment.DesiredPeers, task.SourceNode) {
 				return invalid("slot replica move source must be a desired peer")
 			}
 			if containsUint64(assignment.DesiredPeers, task.TargetNode) {
@@ -384,7 +433,13 @@ func validateTasks(tasks []ReconcileTask, assignments map[uint32]SlotAssignment,
 			if !ok || target.JoinState != NodeJoinStateActive || !target.HasRole(NodeRoleData) {
 				return invalid("slot replica move target must be an active data node")
 			}
-			if !reflect.DeepEqual(task.TargetPeers, replacePeer(assignment.DesiredPeers, task.SourceNode, task.TargetNode)) {
+			if task.SourceNode == 0 {
+				if transition == nil || len(task.TargetPeers) != len(assignment.DesiredPeers)+1 ||
+					len(task.TargetPeers) > int(transition.TargetReplicaCount) ||
+					!equalUint64Set(task.TargetPeers, append(append([]uint64(nil), assignment.DesiredPeers...), task.TargetNode)) {
+					return invalid("slot replica add target peers must append target")
+				}
+			} else if !reflect.DeepEqual(task.TargetPeers, replacePeer(assignment.DesiredPeers, task.SourceNode, task.TargetNode)) {
 				return invalid("slot replica move target peers must replace source with target")
 			}
 			if task.CompletionPolicy != TaskCompletionPolicySingleObserver {
@@ -440,6 +495,17 @@ func containsUint64(items []uint64, want uint64) bool {
 		}
 	}
 	return false
+}
+
+func equalUint64Set(left, right []uint64) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	left = append([]uint64(nil), left...)
+	right = append([]uint64(nil), right...)
+	sort.Slice(left, func(i, j int) bool { return left[i] < left[j] })
+	sort.Slice(right, func(i, j int) bool { return right[i] < right[j] })
+	return reflect.DeepEqual(left, right)
 }
 
 func replacePeer(peers []uint64, source uint64, target uint64) []uint64 {

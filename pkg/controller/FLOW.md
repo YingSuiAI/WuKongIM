@@ -40,6 +40,11 @@ not depend on `pkg/cluster`.
 3. Planner, lifecycle, and task APIs propose versioned fenced commands through
    Raft, while non-voter mirrors refresh the complete state file and watchers
    publish latest-state wakeups.
+4. A single-voter Slot cluster may enter one durable, forward-only replica-count
+   transition to an exact three-node target topology. Each Slot addition is
+   proven through learner catch-up and voter promotion before its assignment is
+   committed; the final Slot commit atomically advances `ReplicaCount` and
+   clears the transition.
 
 ## Invariants and Failure Semantics
 
@@ -64,6 +69,9 @@ not depend on `pkg/cluster`.
   idempotent.
 - Controller voter promotion separates live learner/voter preparation from the
   final revision- and voter-proof-fenced durable state command.
+- While a Slot replica-count transition is active, node topology, ordinary Slot
+  moves, backup/restore admission, and Controller voter promotion are fenced.
+  Failed Slot tasks retain their proven phase and may only resume forward.
 - Watch buffers retain the newest visible state under pressure; bounded
   observers and diagnostics must never stall apply.
 

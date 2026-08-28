@@ -43,6 +43,9 @@ user, message, and operations concerns while keeping one stable usecase API.
    task reuse, and terminal transitions across sequential writes. Any other
    durable Controller mutation or exhaustion of the batch-wide catch-up budget
    closes the fence for all remaining candidates.
+4. Slot replica-count transition advance validates the exact three active,
+   healthy data nodes and the pre-promotion single Controller voter, then
+   creates or resumes at most one revision- and epoch-fenced add-only Slot task.
 
 ## Invariants and Failure Semantics
 
@@ -52,6 +55,9 @@ user, message, and operations concerns while keeping one stable usecase API.
 - Irreversible operations fail closed. Final node removal requires the same
   status projection to prove lifecycle, health, Slot, task, Channel, and
   gateway/runtime drain safety, then carries its observed revision as a fence.
+- Replica-count transition calls are idempotent. An active task is observed,
+  not duplicated; a failed add-only task is re-armed at its last durable phase
+  for forward recovery, and a different target topology is rejected.
 - The usecase never directly changes desired peers, Raft membership, durable
   Channel placement, message rows, process state, or filesystem contents.
 - Plans and scans have stable ordering and hard page, item, concurrency, and

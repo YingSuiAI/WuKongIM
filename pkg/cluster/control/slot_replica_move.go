@@ -6,7 +6,8 @@ import "fmt"
 type SlotReplicaMoveRequest struct {
 	// SlotID is the physical Slot whose replica set should change.
 	SlotID uint32 `json:"slot_id"`
-	// SourceNode is the current desired peer that will be removed.
+	// SourceNode is the current desired peer that will be removed. Zero means
+	// add TargetNode during a forward-only replica-count transition.
 	SourceNode uint64 `json:"source_node"`
 	// TargetNode is the active data node that will replace SourceNode.
 	TargetNode uint64 `json:"target_node"`
@@ -16,6 +17,11 @@ type SlotReplicaMoveRequest struct {
 	ConfigEpoch uint64 `json:"config_epoch"`
 	// StateRevision is the Controller cluster-state revision observed by the caller.
 	StateRevision uint64 `json:"state_revision"`
+	// TargetReplicaCount starts or continues a forward-only Slot replica-count
+	// transition when SourceNode is zero.
+	TargetReplicaCount uint16 `json:"target_replica_count,omitempty"`
+	// TransitionTargetNodes is the exact immutable final Slot voter topology.
+	TransitionTargetNodes []uint64 `json:"transition_target_nodes,omitempty"`
 }
 
 // SlotReplicaMoveResult is returned after a replica-move intent is accepted.
