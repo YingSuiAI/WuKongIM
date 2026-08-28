@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -47,6 +48,11 @@ func slotLeaderChangeRetryTimeout(tickInterval time.Duration, electionTick int) 
 func (n *Node) ensureDefaultSlots() error {
 	if n == nil || n.slots != nil {
 		return nil
+	}
+	if _, err := os.Lstat(filepath.Join(n.cfg.DataDir, metadb.DirectoryProjectionUpgradePendingFile)); err == nil {
+		return fmt.Errorf("directory projection upgrade incomplete: rerun wkdb upgrade-person-directory before starting the node")
+	} else if !os.IsNotExist(err) {
+		return err
 	}
 	metaDB, err := metadb.OpenWithLogger(filepath.Join(n.cfg.DataDir, defaultSlotMetaDirName), namedLogger(n.cfg.Logger, "slot_meta_db"))
 	if err != nil {

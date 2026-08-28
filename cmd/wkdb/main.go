@@ -29,7 +29,7 @@ func runWithIO(args []string, stdin io.Reader, stderr io.Writer) int {
 
 func runWithStreams(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: wkdb [flags] <query|repl|import|export|diff>")
+		fmt.Fprintln(stderr, "usage: wkdb [flags] <query|repl|import|export|diff|upgrade-person-directory>")
 		return exitConfig
 	}
 	flags, rest, code := parseFlags(args, stderr)
@@ -37,10 +37,12 @@ func runWithStreams(args []string, stdin io.Reader, stdout, stderr io.Writer) in
 		return code
 	}
 	if len(rest) == 0 {
-		fmt.Fprintln(stderr, "usage: wkdb [flags] <query|repl|import|export|diff>")
+		fmt.Fprintln(stderr, "usage: wkdb [flags] <query|repl|import|export|diff|upgrade-person-directory>")
 		return exitConfig
 	}
 	switch rest[0] {
+	case "upgrade-person-directory":
+		return runUpgradeDirectory(context.Background(), flags, rest[1:], stdout, stderr)
 	case "query":
 		if len(rest) < 2 {
 			fmt.Fprintln(stderr, "usage: wkdb [flags] query <sql>")
