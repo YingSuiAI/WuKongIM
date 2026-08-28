@@ -72,7 +72,6 @@ func (s *Server) registerConversationRoutes() {
 	}
 	s.engine.POST("/conversation/list", s.handleConversationList)
 	s.engine.POST("/conversation/retry", s.handleConversationRetry)
-	s.engine.POST("/conversation/sync", s.handleConversationSyncLegacy)
 	s.engine.POST("/conversations/clearUnread", s.handleConversationClearUnread)
 	s.engine.POST("/conversations/setUnread", s.handleConversationSetUnread)
 	s.engine.POST("/conversations/delete", s.handleConversationDelete)

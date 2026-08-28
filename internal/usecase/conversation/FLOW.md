@@ -99,13 +99,3 @@ The internal cursor carries the complete membership index position:
 
 The HTTP adapter encodes it opaquely. Last-message time and sequence do not
 participate in directory ordering.
-
-## Legacy conversation sync
-
-`SyncLegacy` walks at most 1,000 membership candidates through the same
-authority-checked directory flow, retries unresolved heads once, applies the
-v2.2 page/unread/excluded-type/per-Channel cursor rules, and reads recent
-committed messages in aligned batches of at most 200 Channels. It exposes the
-current typed event projection metadata and does not recreate removed legacy
-stream fields. A still-unresolved Channel fails the whole legacy request so an
-old client cannot mistake a temporary authority failure for deletion.

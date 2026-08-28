@@ -5122,49 +5122,6 @@ func TestAppWiresConversationListRouteToUsecase(t *testing.T) {
 	}
 }
 
-func TestAppWiresLegacyConversationSyncRouteToDirectoryAndMessageReads(t *testing.T) {
-	cluster := &fakeAuthoritativePresenceCluster{fakePresenceCluster: newFakePresenceCluster(1, nil)}
-	cluster.snapshot = readyFakeClusterSnapshot(1, 16)
-	cluster.channels = map[metadb.ChannelKey]metadb.Channel{
-		{ChannelID: "g1", ChannelType: 2}: {ChannelID: "g1", ChannelType: 2, SubscriberMutationVersion: 1},
-	}
-	cluster.subscribers = map[string][]string{"g1": {"u1"}}
-	cluster.memberships = map[fakeMembershipKey]metadb.UserChannelMembership{
-		{uid: "u1", channelID: "g1", channelType: 2}: {
-			UID: "u1", ChannelID: "g1", ChannelType: 2, JoinSeq: 1, ActivatedAt: 100,
-		},
-	}
-	cluster.messages = map[metadb.ChannelKey][]channelruntime.Message{
-		{ChannelID: "g1", ChannelType: 2}: {{
-			MessageID: 9, MessageSeq: 1, ChannelID: "g1", ChannelType: 2,
-			FromUID: "u2", ClientMsgNo: "client-1", ServerTimestampMS: 1_700_000_000_000,
-			Payload: []byte("legacy"),
-		}},
-	}
-	app, err := newTestApp(t, Config{
-		API: APIConfig{ListenAddr: "127.0.0.1:0"},
-	}, WithCluster(cluster))
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
-	}
-	apiSrv, ok := app.api.(*accessapi.Server)
-	if !ok {
-		t.Fatalf("api runtime = %T, want *accessapi.Server", app.api)
-	}
-
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/conversation/sync", strings.NewReader(`{"uid":"u1","msg_count":1}`))
-	req.Header.Set("Content-Type", "application/json")
-	apiSrv.Handler().ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d body = %s, want 200", rec.Code, rec.Body.String())
-	}
-	if !strings.Contains(rec.Body.String(), `"channel_id":"g1"`) || !strings.Contains(rec.Body.String(), `"last_msg_seq":1`) || !strings.Contains(rec.Body.String(), `"payload":"bGVnYWN5"`) {
-		t.Fatalf("body = %s, want legacy conversation with committed message", rec.Body.String())
-	}
-}
-
 type fakeAuthoritativePresenceCluster struct {
 	*fakePresenceCluster
 }

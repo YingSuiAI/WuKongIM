@@ -101,7 +101,7 @@ func TestChannelMessageReaderMapsPullDownAndReturnsAscending(t *testing.T) {
 	}
 }
 
-func TestChannelMessageReaderPreservesLegacyMessageTimestamp(t *testing.T) {
+func TestChannelMessageReaderPreservesMessageTimestamp(t *testing.T) {
 	node := &recordingReadNode{
 		batchResults: []clusterchannels.CommittedReadResult{{
 			Read: channelstore.ReadCommittedResult{Messages: []channelruntime.Message{{
@@ -119,7 +119,7 @@ func TestChannelMessageReaderPreservesLegacyMessageTimestamp(t *testing.T) {
 		t.Fatalf("SyncMessages(): %v", err)
 	}
 	if len(page.Messages) != 1 || page.Messages[0].Timestamp != 1_700_000_000 {
-		t.Fatalf("messages = %#v, want durable server timestamp in legacy seconds", page.Messages)
+		t.Fatalf("messages = %#v, want durable server timestamp in seconds", page.Messages)
 	}
 }
 

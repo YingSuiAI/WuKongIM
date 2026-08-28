@@ -360,9 +360,6 @@ func (a *App) wireConversations(conversationReadStore *clusterinfra.Conversation
 					options.MembershipAuthority = clusterinfra.NewChannelMetadataStore(channelNode, a.ensureChannelAppendMetadataCache(), a.goroutines)
 				}
 			}
-			if a.messages != nil {
-				options.LegacyMessages = conversationLegacyMessageReader{messages: a.messages}
-			}
 			a.conversations = conversationusecase.New(options)
 		}
 	}

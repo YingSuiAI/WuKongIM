@@ -51,7 +51,7 @@ Store at least these values separately for every conversation:
 5. Realtime receive and sync can overlap; deduplicate by message identity while preserving Channel order.
 6. Commit conversation cursor, messages, and local sequence through recoverable transactions.
 
-Legacy `/conversation/sync` has different pagination and envelope semantics and fails the whole request when temporary hydration remains unresolved. Do not mix its raw-array behavior with canonical list `unresolved` and `done` semantics.
+Use only `/conversation/list` and `/conversation/retry`; the server does not expose a second legacy conversation-sync implementation.
 
 ## Unread and read state
 

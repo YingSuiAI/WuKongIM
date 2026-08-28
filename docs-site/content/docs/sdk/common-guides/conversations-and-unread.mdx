@@ -51,7 +51,7 @@ UID 成员目录
 5. 消息同步与实时接收可能重叠，按消息身份去重并保持 Channel 内顺序。
 6. 把会话 cursor、消息和本地 sequence 在可恢复事务中提交。
 
-旧兼容 `/conversation/sync` 使用不同分页和响应语义，并在临时 hydration 失败时让整个请求失败。不要把旧数组响应与 canonical list 的 `unresolved` / `done` 模型混用。
+只使用 `/conversation/list` 和 `/conversation/retry`；服务端不再暴露第二套旧版会话同步实现。
 
 ## 未读与已读
 
