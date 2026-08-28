@@ -1,0 +1,45 @@
+---
+title: Shared Dictionaries
+description: Reference Channel Types, Device Flags, Message Flags, and Reason Codes aligned with current source.
+---
+
+## Goal and completion criteria
+
+This area centralizes wire values reused across client SDKs, Gateway, and compatible HTTP results. Phase 13 adds Channel Type, Device Flag / Level, and Message Flags to Reason Code so integrators can cross-check numeric values and behavior across languages.
+
+## Compatibility target
+
+Every table aligns with current authoritative Go definitions, and tests check names, values, or bit order. They belong to the current source snapshot. The [compatibility snapshot](/en/api/compatibility) still attests only the JavaScript golden scenario, not every SDK platform.
+
+## Prerequisites
+
+- Numeric values are the wire contract; names support readable diagnosis.
+- Never interpret “present in the enum” as “the current SDK publishes a complete capability.”
+- Preserve unknown raw values and fail closed.
+
+## Published dictionaries
+
+<Cards>
+  <Card title="Channel Type" description="Current types 1–12 with baseline, specialized, and legacy boundaries." href="/en/api/dictionaries/channel-types" />
+  <Card title="Device Flag" description="APP, WEB, PC, SYSTEM, and same-category conflict levels." href="/en/api/dictionaries/device-flags" />
+  <Card title="Message Flags" description="Actual behavior of fixed-header and Setting bits." href="/en/api/dictionaries/message-flags" />
+  <Card title="Reason Code" description="List all current names 0–29 with phase, retry guidance, and reachability." href="/en/api/dictionaries/reason-codes" />
+</Cards>
+
+## Expected result
+
+Match by numeric value and retain dictionary name, protocol phase, and compatibility snapshot. Application code avoids scattered magic numbers and maps through SDK types or one internal shared module.
+
+## Troubleshooting
+
+- **Name and value disagree:** fail validation and realign it; do not maintain a second handwritten table.
+- **A dictionary names a feature but the SDK has no entry:** that platform capability may remain unpublished; check exact version docs.
+- **A value is absent from the table:** record the raw value and compatibility snapshot and remain fail closed until the dictionary is upgraded.
+
+## Security and responsibility boundary
+
+A wire dictionary is neither authorization nor localized text safe for direct display. Map values to product-safe meaning without exposing topology, authorization policy, or sensitive request content.
+
+## Next step
+
+Start with [Channel Types](/en/api/dictionaries/channel-types) and [Device Flags](/en/api/dictionaries/device-flags), then use [Message Flags](/en/api/dictionaries/message-flags) and [Reason Codes](/en/api/dictionaries/reason-codes) to interpret message outcomes.

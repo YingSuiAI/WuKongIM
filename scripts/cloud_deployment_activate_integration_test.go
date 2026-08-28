@@ -4,6 +4,7 @@ package scripts_test
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -80,7 +81,7 @@ exit 0
 				}
 			}
 			planPath := filepath.Join(root, "deployment-plan.json")
-			plan := `{"topology":{"physical_hash_slots":256,"logical_slot_groups":12,"slot_replicas":3,"channel_replicas":3},"hosts":[{"role":"service-1","private_address":"10.42.0.11"},{"role":"service-2","private_address":"10.42.0.12"},{"role":"service-3","private_address":"10.42.0.13"},{"role":"load","private_address":"10.42.0.20"}]}`
+			plan := `{"purpose":"immutable","generation":1,"topology":{"physical_hash_slots":256,"logical_slot_groups":12,"slot_replicas":3,"channel_replicas":3},"hosts":[{"role":"service-1","private_address":"10.42.0.11"},{"role":"service-2","private_address":"10.42.0.12"},{"role":"service-3","private_address":"10.42.0.13"},{"role":"load","private_address":"10.42.0.20"}]}`
 			if err := os.WriteFile(planPath, []byte(plan), 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -111,6 +112,9 @@ exit 0
 				gate, readErr := os.ReadFile(gatePath)
 				if readErr != nil || strings.TrimSpace(string(gate)) != fixture.wantGate {
 					t.Fatalf("last gate = %q, %v", gate, readErr)
+				}
+				if _, statErr := os.Stat(failurePath); !errors.Is(statErr, os.ErrNotExist) {
+					t.Fatalf("successful activation retained stale failure state: %v", statErr)
 				}
 				return
 			}

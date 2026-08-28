@@ -280,6 +280,72 @@ func TestManagerNodesReturnsReadOnlyInventory(t *testing.T) {
 	}
 }
 
+func TestManagerNodeReturnsExactInventoryItem(t *testing.T) {
+	generatedAt := time.Date(2026, 6, 16, 10, 0, 0, 0, time.UTC)
+	srv := New(Options{
+		Management: managerNodesStub{nodes: managementusecase.NodeList{
+			GeneratedAt: generatedAt,
+			Items: []managementusecase.Node{{
+				NodeID: 2,
+				Name:   "node-2",
+				Slots: managementusecase.NodeSlotSummary{
+					HostedIDs:     []uint32{1, 7},
+					LeaderIDs:     []uint32{7},
+					ReplicaCount:  2,
+					LeaderCount:   1,
+					FollowerCount: 1,
+				},
+			}},
+		}},
+	})
+
+	rec := httptest.NewRecorder()
+	srv.Engine().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/manager/nodes/2", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if !jsonEqual(rec.Body.String(), `{
+		"node_id": 2,
+		"name": "node-2",
+		"addr": "",
+		"status": "",
+		"last_heartbeat_at": "0001-01-01T00:00:00Z",
+		"is_local": false,
+		"capacity_weight": 0,
+		"membership": {"role":"","join_state":"","schedulable":false},
+		"health": {"status":"","last_heartbeat_at":"0001-01-01T00:00:00Z","fresh":false,"freshness":"","runtime_ready":false,"report_age_ms":0,"report_ttl_ms":0,"observed_control_revision":0,"observed_slot_revision":0},
+		"controller": {"role":"","voter":false,"leader_id":0,"raft_health":"","first_index":0,"applied_index":0,"snapshot_index":0},
+		"slot_stats": {"count":2,"leader_count":1},
+		"slots": {"hosted_ids":[1,7],"leader_ids":[7],"replica_count":2,"leader_count":1,"follower_count":1,"quorum_lost_count":0,"unreported_count":0},
+		"channel_runtime": {"active_total":0,"active_leader":0,"active_follower":0,"unknown":false},
+		"runtime": {"node_id":0,"active_online":0,"closing_online":0,"total_online":0,"gateway_sessions":0,"pending_activations":0,"sessions_by_listener":{},"accepting_new_sessions":false,"draining":false,"unknown":false},
+		"actions": {"can_drain":false,"can_resume":false,"can_scale_in":false,"can_onboard":false,"can_move_slots_in":false,"can_move_slots_out":false,"can_promote_controller_voter":false}
+	}`) {
+		t.Fatalf("body = %s", rec.Body.String())
+	}
+}
+
+func TestManagerNodeRejectsInvalidOrMissingNode(t *testing.T) {
+	srv := New(Options{Management: managerNodesStub{nodes: managementusecase.NodeList{
+		Items: []managementusecase.Node{{NodeID: 2}},
+	}}})
+
+	for _, tc := range []struct {
+		path string
+		want int
+	}{
+		{path: "/manager/nodes/not-a-number", want: http.StatusBadRequest},
+		{path: "/manager/nodes/3", want: http.StatusNotFound},
+	} {
+		rec := httptest.NewRecorder()
+		srv.Engine().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, tc.path, nil))
+		if rec.Code != tc.want {
+			t.Fatalf("%s status = %d, want %d; body=%s", tc.path, rec.Code, tc.want, rec.Body.String())
+		}
+	}
+}
+
 func TestManagerNodesRequiresNodeReadPermission(t *testing.T) {
 	srv := New(Options{
 		Auth: testAuthConfig([]UserConfig{{
@@ -682,6 +748,7 @@ func TestManagerRealtimeMonitorReturnsUnifiedPayload(t *testing.T) {
 			Stats: []RealtimeMonitorStat{{
 				Key:   "avg",
 				Value: 12.5,
+				Unit:  "msg/s",
 			}},
 		}, {
 			Key:       "rpcSuccessRate",
@@ -732,7 +799,7 @@ func TestManagerRealtimeMonitorReturnsUnifiedPayload(t *testing.T) {
 		],
 		"snapshot":[],
 		"cards":[
-			{"key":"sendRate","category":"gateway","stage":"sendEntry","source":"prometheus","tone":"normal","unit":"msg/s","value":12.5,"series":[{"timestamp":1781767200000,"value":12.5}],"stats":[{"key":"avg","value":12.5}],"available":true,"error":""},
+			{"key":"sendRate","category":"gateway","stage":"sendEntry","source":"prometheus","tone":"normal","unit":"msg/s","value":12.5,"series":[{"timestamp":1781767200000,"value":12.5}],"stats":[{"key":"avg","value":12.5,"unit":"msg/s"}],"available":true,"error":""},
 			{"key":"rpcSuccessRate","category":"internal","stage":"internalNetwork","source":"prometheus","tone":"normal","unit":"%","value":99.96,"series":[{"timestamp":1781767200000,"value":99.96}],"stats":[],"available":true,"error":""}
 		]
 	}`) {
@@ -1498,7 +1565,7 @@ type managerNodesStub struct {
 	businessChannelMutation            managementusecase.MutateBusinessChannelMembersResponse
 	recentConversations                managementusecase.RecentConversationsResponse
 	messagesPage                       managementusecase.ListMessagesResponse
-	connections                        []managementusecase.Connection
+	connectionsPage                    managementusecase.ListConnectionsResponse
 	connectionDetail                   managementusecase.ConnectionDetail
 	pluginList                         managementusecase.NodePluginList
 	pluginDetail                       managementusecase.Plugin
@@ -2071,11 +2138,13 @@ func (s managerNodesStub) ListMessages(_ context.Context, req managementusecase.
 	return s.messagesPage, s.messagesErr
 }
 
-func (s managerNodesStub) ListConnections(_ context.Context, req managementusecase.ListConnectionsRequest) ([]managementusecase.Connection, error) {
+func (s managerNodesStub) ListConnections(_ context.Context, req managementusecase.ListConnectionsRequest) (managementusecase.ListConnectionsResponse, error) {
 	if s.connectionsReqSink != nil {
 		*s.connectionsReqSink = req
 	}
-	return append([]managementusecase.Connection(nil), s.connections...), s.connectionsErr
+	resp := s.connectionsPage
+	resp.Items = append([]managementusecase.Connection(nil), s.connectionsPage.Items...)
+	return resp, s.connectionsErr
 }
 
 func (s managerNodesStub) GetConnection(_ context.Context, req managementusecase.GetConnectionRequest) (managementusecase.ConnectionDetail, error) {

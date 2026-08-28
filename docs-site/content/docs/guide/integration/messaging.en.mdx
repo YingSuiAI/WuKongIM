@@ -25,7 +25,7 @@ Important semantics:
 - The sender generates and retains `client_msg_no` for request correlation and retry tracking.
 - The sender must inspect the SENDACK or HTTP `reason`; transport success alone is insufficient.
 - For default persistent messages, online delivery and other post-commit effects do not extend an already-completed durable acknowledgement.
-- Explicit `no_persist` messages use a realtime, non-durable path; a successful acknowledgement does not make them recoverable from durable history.
+- Plain non-command `NoPersist` returns compatibility success without delivery; only command-style `NoPersist` enters transient online delivery. Neither can recover from durable history; see [Message Flags](/en/api/dictionaries/message-flags).
 
 ## Server-side send
 
@@ -54,7 +54,7 @@ Example compatible response for an accepted commit:
 ```
 
 <Callout type="warn" title="HTTP 200 is not the business result">
-  `reason` is a protocol Reason Code. Callers must distinguish success, retryable outcomes, rejection, and route changes. The complete Reason Code dictionary belongs to the API reference phase.
+  `reason` is a protocol Reason Code. Callers must distinguish success, retryable outcomes, rejection, and route changes; use the complete [Reason Code dictionary](/en/api/dictionaries/reason-codes).
 </Callout>
 
 Do not let browsers or mobile apps call this server route directly. Current product HTTP routes have no product-authentication middleware and must be called by a trusted service through a private network or protected proxy.

@@ -831,3 +831,10 @@ bounded presence error so pending token cleanup semantics stay explicit.
 
 Best-effort unregister calls are bounded by a short context timeout so gateway
 close and rollback paths do not block indefinitely on route lookup or node RPC.
+
+Person-channel directory admission is a bounded, coalesced, node-owned batch:
+it reuses request-scoped authoritative channel facts, persists a generation-
+fenced pending task before SEND proceeds, detaches canceled waiters without
+canceling accepted work, and wakes the background projector after each durable
+wave. Projection becomes ready only after both UID memberships commit; delete
+and recreate cannot reuse cached ready state from an older generation.

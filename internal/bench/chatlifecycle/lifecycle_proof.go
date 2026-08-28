@@ -15,32 +15,22 @@ import (
 )
 
 const (
-	lifecycleCohortSize = 1_200
-	lifecyclePerSlot    = 100
-	// LifecycleProofCadence fixes one proof cohort every ten minutes.
-	LifecycleProofCadence     = 10 * time.Minute
-	lifecycleNaturalQuiet     = 5 * time.Minute
-	lifecycleReheatDeadline   = 5 * time.Second
-	lifecycleMaxProbeBatch    = 1_200
-	lifecycleMaxProbeParallel = 32
+	lifecycleCohortSize   = 1_200
+	lifecyclePerSlot      = 100
+	lifecycleNaturalQuiet = 5 * time.Minute
+	// lifecycleMinimumColdObservationWindow leaves enough time after the
+	// natural-idle boundary for a complete all-node probe before reheat.
+	lifecycleMinimumColdObservationWindow = time.Minute
+	// lifecycleReheatAdmissionReserve keeps the deterministic SEND due time
+	// separate from the control-plane deadline. One all-node probe and one
+	// worker approval each have a five-second bound; the remaining twenty
+	// seconds cover cloud scheduling and serialization jitter without moving
+	// the scheduled SEND.
+	lifecycleReheatAdmissionReserve = 30 * time.Second
+	lifecycleReheatDeadline         = 5 * time.Second
+	lifecycleMaxProbeBatch          = 1_200
+	lifecycleMaxProbeParallel       = 32
 )
-
-// LifecycleProofCycleTime returns the exact history-free boundary for a
-// zero-based proof cycle. Cycle zero is ten minutes after measured start.
-func LifecycleProofCycleTime(start time.Time, cycle uint64) (time.Time, error) {
-	if start.IsZero() || cycle == ^uint64(0) {
-		return time.Time{}, ErrLifecycleHarnessInvalid
-	}
-	multiplier := cycle + 1
-	if multiplier > uint64(math.MaxInt64/int64(LifecycleProofCadence)) {
-		return time.Time{}, ErrLifecycleHarnessInvalid
-	}
-	deadline := start.Add(time.Duration(multiplier) * LifecycleProofCadence)
-	if !deadline.After(start) {
-		return time.Time{}, ErrLifecycleHarnessInvalid
-	}
-	return deadline, nil
-}
 
 var (
 	// ErrLifecycleHarnessInvalid identifies malformed, incomplete, or transport evidence.
@@ -179,7 +169,8 @@ type LifecycleCandidate struct {
 	InitialSequence uint64 `json:"initial_sequence"`
 	// QuietNotBefore is the earliest valid all-node absence observation.
 	QuietNotBefore time.Time `json:"quiet_not_before"`
-	// QuietDeadline is the last acceptable time to prove all-node absence.
+	// QuietDeadline is the last acceptable time to prove all-node absence and
+	// leaves the fixed control-plane reserve before ReheatAt.
 	QuietDeadline time.Time `json:"quiet_deadline"`
 	// ReheatAt is the due time of the already-scheduled revisit SEND.
 	ReheatAt time.Time `json:"reheat_at"`
@@ -313,20 +304,20 @@ func validLifecycleCandidate(candidate LifecycleCandidate, now time.Time, assign
 	if candidate.ChannelType != 1 || candidate.TimerToken == 0 || candidate.ActivityVersion == 0 || candidate.InitialSequence == 0 || candidate.SlotID == 0 || int(candidate.SlotID) > logicalSlots ||
 		int(candidate.HashSlot) >= hashSlots || lifecycleHashSlotForKey(candidate.ChannelID, uint16(hashSlots)) != candidate.HashSlot ||
 		!assigned || slotID != candidate.SlotID || !candidate.QuietNotBefore.After(now) ||
-		!candidate.QuietDeadline.After(candidate.QuietNotBefore) || !candidate.ReheatAt.After(candidate.QuietDeadline) {
+		candidate.QuietDeadline.Sub(candidate.QuietNotBefore) < lifecycleMinimumColdObservationWindow || !candidate.ReheatAt.After(candidate.QuietDeadline) {
 		return false
 	}
 	return validLifecyclePersonChannelID(candidate.ChannelID)
 }
 
-func validWorkerLifecycleCandidateLease(candidates []LifecycleCandidate, requested int, assignment WorkerAssignment) bool {
+func validWorkerLifecycleCandidateLease(candidates []LifecycleCandidate, requested int, assignment WorkerAssignment, loadedThrough time.Time) bool {
 	if requested <= 0 || requested > lifecycleCohortSize || len(candidates) > requested ||
-		assignment.Config.Workload.Topology.HashSlots != formalHashSlots || assignment.Config.Workload.Topology.LogicalSlotGroups != formalLogicalSlotGroups {
+		loadedThrough.IsZero() || assignment.Config.Workload.Topology.HashSlots != formalHashSlots || assignment.Config.Workload.Topology.LogicalSlotGroups != formalLogicalSlotGroups {
 		return false
 	}
 	seen := make(map[string]struct{}, len(candidates))
 	for _, candidate := range candidates {
-		if !validWorkerLifecycleCandidate(candidate) {
+		if !validWorkerLifecycleCandidate(candidate) || !candidate.QuietNotBefore.After(loadedThrough) {
 			return false
 		}
 		if _, duplicate := seen[candidate.ChannelID]; duplicate {
@@ -340,7 +331,7 @@ func validWorkerLifecycleCandidateLease(candidates []LifecycleCandidate, request
 func validWorkerLifecycleCandidate(candidate LifecycleCandidate) bool {
 	if candidate.ChannelType != 1 || candidate.TimerToken == 0 || candidate.ActivityVersion == 0 || candidate.InitialSequence == 0 || candidate.SlotID == 0 || candidate.SlotID > formalLogicalSlotGroups ||
 		candidate.HashSlot >= formalHashSlots || lifecycleHashSlotForKey(candidate.ChannelID, formalHashSlots) != candidate.HashSlot ||
-		candidate.QuietNotBefore.IsZero() || !candidate.QuietDeadline.After(candidate.QuietNotBefore) || !candidate.ReheatAt.After(candidate.QuietDeadline) {
+		candidate.QuietNotBefore.IsZero() || candidate.QuietDeadline.Sub(candidate.QuietNotBefore) < lifecycleMinimumColdObservationWindow || !candidate.ReheatAt.After(candidate.QuietDeadline) {
 		return false
 	}
 	return validLifecyclePersonChannelID(candidate.ChannelID)
@@ -499,12 +490,14 @@ func (p *LifecycleProof) observeCandidateLocked(now time.Time, state *lifecycleC
 	allMissing := true
 	loadedCount := 0
 	leaders := 0
+	loaded := [3]bool{}
 	for index, row := range rows {
 		missing := row.Role == "missing" && row.Status == "missing" && row.LEO == 0 && row.HW == 0 && row.CheckpointHW == 0
 		allMissing = allMissing && missing
 		if missing {
 			continue
 		}
+		loaded[index] = true
 		if row.Status != "active" {
 			return p.productFailureLocked(LifecycleFailureRuntimeState)
 		}
@@ -528,13 +521,16 @@ func (p *LifecycleProof) observeCandidateLocked(now time.Time, state *lifecycleC
 	allLoaded := loadedCount == len(rows)
 	switch state.phase {
 	case lifecycleAwaitLoaded:
-		if !allLoaded {
+		if loadedCount == 0 {
 			return p.productFailureLocked(LifecycleFailureInitialLoad)
 		}
 		if leaders != 1 {
 			return p.productFailureLocked(LifecycleFailureRoleDisagreement)
 		}
 		for index, row := range rows {
+			if !loaded[index] {
+				continue
+			}
 			if row.LEO < state.candidate.InitialSequence || row.HW < state.candidate.InitialSequence {
 				return p.productFailureLocked(LifecycleFailureSequenceProof)
 			}
@@ -580,14 +576,14 @@ func (p *LifecycleProof) observeCandidateLocked(now time.Time, state *lifecycleC
 			return p.productFailureLocked(LifecycleFailureUnexpectedReload)
 		}
 	case lifecycleAwaitReloaded:
-		if now.After(state.candidate.ReheatAt.Add(lifecycleReheatDeadline)) {
-			return p.productFailureLocked(LifecycleFailureReheatTimeout)
-		}
+		// A bounded all-node probe can finish after the product deadline even
+		// when the scheduled SEND/SENDACK completed within it. Consume current
+		// sequence evidence before classifying still-unproven work as timed out.
 		if allMissing {
+			if now.After(state.candidate.ReheatAt.Add(lifecycleReheatDeadline)) {
+				return p.productFailureLocked(LifecycleFailureReheatTimeout)
+			}
 			return nil
-		}
-		if !allLoaded {
-			return p.productFailureLocked(LifecycleFailurePartialReheat)
 		}
 		if leaders != 1 {
 			return p.productFailureLocked(LifecycleFailureRoleDisagreement)
@@ -595,10 +591,21 @@ func (p *LifecycleProof) observeCandidateLocked(now time.Time, state *lifecycleC
 		if now.Before(state.reheatStarted) {
 			return p.productFailureLocked(LifecycleFailureControlTransition)
 		}
-		for _, row := range rows {
-			if row.LEO <= state.candidate.InitialSequence || row.HW <= state.candidate.InitialSequence {
+		sequenceAdvanced := true
+		for index, row := range rows {
+			if !loaded[index] {
+				continue
+			}
+			if row.LEO < state.candidate.InitialSequence || row.HW < state.candidate.InitialSequence {
 				return p.productFailureLocked(LifecycleFailureSequenceProof)
 			}
+			sequenceAdvanced = sequenceAdvanced && row.LEO > state.candidate.InitialSequence && row.HW > state.candidate.InitialSequence
+		}
+		if !sequenceAdvanced {
+			if now.After(state.candidate.ReheatAt.Add(lifecycleReheatDeadline)) {
+				return p.productFailureLocked(LifecycleFailureReheatTimeout)
+			}
+			return nil
 		}
 		state.phase = lifecycleComplete
 		p.snapshot.Completed = saturatingIncrement(p.snapshot.Completed)
@@ -642,12 +649,14 @@ func (s *WorkerLifecycleReheatSender) ApproveLifecycleReheat(ctx context.Context
 		return ErrLifecycleHarnessInvalid
 	}
 	response, err := s.client.ApproveLifecycleReheat(ctx, WorkerLifecycleReheatRequest{
-		WorkerFence: s.fence, ChannelID: candidate.ChannelID, TimerToken: candidate.TimerToken, ActivityVersion: candidate.ActivityVersion,
+		WorkerFence: s.fence, Items: []WorkerLifecycleReheatItem{{
+			ChannelID: candidate.ChannelID, TimerToken: candidate.TimerToken, ActivityVersion: candidate.ActivityVersion,
+		}},
 	})
 	if err != nil {
 		return err
 	}
-	if !sameWorkerFence(response.WorkerFence, s.fence) || !response.Approved {
+	if !sameWorkerFence(response.WorkerFence, s.fence) || response.Approved != 1 {
 		return ErrLifecycleHarnessInvalid
 	}
 	return nil
@@ -940,7 +949,7 @@ type MetaCreateAccounting struct {
 
 // MetaCreateAccountingSnapshot is low-cardinality checkpoint evidence.
 type MetaCreateAccountingSnapshot struct {
-	// ExpectedUnique is the latest deterministic person-edge plus group total.
+	// ExpectedUnique is the latest successful first person plus touched-group total.
 	ExpectedUnique uint64 `json:"expected_unique"`
 	// Created is the latest authoritative cumulative create counter.
 	Created uint64 `json:"created"`
@@ -967,14 +976,14 @@ func NewMetaCreateAccounting() *MetaCreateAccounting { return &MetaCreateAccount
 // Checkpoint folds bounded physical-hash-slot expectations through the current
 // immutable logical-Slot assignment and rejects redistribution or recreation.
 func (a *MetaCreateAccounting) Checkpoint(
-	personEdges, preparedGroups MetaCreateHashSlotCounts,
+	personEdges, touchedGroups MetaCreateHashSlotCounts,
 	assignment LifecycleSlotAssignment,
 	metrics [3]target.MetricsSnapshot,
 	reheat bool,
 ) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	expectedBySlot, expected, ok := foldMetaCreateExpectation(personEdges, preparedGroups, assignment)
+	expectedBySlot, expected, ok := foldMetaCreateExpectation(personEdges, touchedGroups, assignment)
 	if !ok {
 		return ErrLifecycleHarnessInvalid
 	}
@@ -1071,7 +1080,7 @@ func (a *MetaCreateAccounting) Checkpoint(
 }
 
 func foldMetaCreateExpectation(
-	personEdges, preparedGroups MetaCreateHashSlotCounts,
+	personEdges, touchedGroups MetaCreateHashSlotCounts,
 	assignment LifecycleSlotAssignment,
 ) ([formalLogicalSlotGroups]uint64, uint64, bool) {
 	var expected [formalLogicalSlotGroups]uint64
@@ -1080,7 +1089,7 @@ func foldMetaCreateExpectation(
 	}
 	var total uint64
 	for hashSlot := range formalHashSlots {
-		count, ok := checkedUint64Add(personEdges[hashSlot], preparedGroups[hashSlot])
+		count, ok := checkedUint64Add(personEdges[hashSlot], touchedGroups[hashSlot])
 		if !ok {
 			return [formalLogicalSlotGroups]uint64{}, 0, false
 		}

@@ -90,6 +90,35 @@ func TestCloudDeploymentActivationHasSSHAuthorityOnly(t *testing.T) {
 	}
 }
 
+func TestCloudDeploymentActivationBindsRepairGenerationWithoutChangingLeaseIdentity(t *testing.T) {
+	path := filepath.Join(repoRoot(t), ".github", "workflows", "cloud-deployment-activate.yml")
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(content)
+	for _, fragment := range []string{
+		"deployment_purpose:",
+		"deployment_generation:",
+		"DEPLOYMENT_PURPOSE: ${{ inputs.deployment_purpose }}",
+		"DEPLOYMENT_GENERATION: ${{ inputs.deployment_generation }}",
+		`[[ "$DEPLOYMENT_PURPOSE" == "immutable" || "$DEPLOYMENT_PURPOSE" == "repair" ]]`,
+		`[[ "$DEPLOYMENT_GENERATION" =~ ^[1-9][0-9]*$ ]]`,
+		`--purpose "$DEPLOYMENT_PURPOSE"`,
+		`--generation "$DEPLOYMENT_GENERATION"`,
+		`install -m 0600 "$lease_receipt" lease-receipt.json`,
+		`--lease-receipt lease-receipt.json`,
+		`lease_source_sha="$(jq -er .lease_source_sha deployment-plan.json)"`,
+		`--source-sha "$lease_source_sha"`,
+		`wukongim.cloud_deployment.plan/v2`,
+		`wukongim.cloud_deployment.receipt/v2`,
+	} {
+		if !strings.Contains(text, fragment) {
+			t.Fatalf("repair activation contract missing %q", fragment)
+		}
+	}
+}
+
 func TestCloudDeploymentUpstreamProvenanceUsesGitHubCLITransport(t *testing.T) {
 	path := filepath.Join(repoRoot(t), ".github", "workflows", "cloud-deployment-activate.yml")
 	content, err := os.ReadFile(path)
@@ -188,6 +217,40 @@ func TestCloudDeploymentHostActivationUsesExactTypedPhases(t *testing.T) {
 		if !strings.Contains(text, fragment) {
 			t.Fatalf("activation script missing %q", fragment)
 		}
+	}
+}
+
+func TestCloudDeploymentRepairGenerationResetsOnlyFixedDataRootsAfterQuiesce(t *testing.T) {
+	path := filepath.Join(repoRoot(t), "scripts", "cloud-deployment", "activate-hosts.sh")
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(content)
+	for _, fragment := range []string{
+		`deployment_purpose="$(jq -er '.purpose' "$WK_CLOUD_DEPLOYMENT_PLAN")"`,
+		`deployment_generation="$(jq -er '.generation' "$WK_CLOUD_DEPLOYMENT_PLAN")"`,
+		`[[ "$deployment_purpose" == repair && "$deployment_generation" -gt 1 ]]`,
+		`/var/lib/wukongim-cloud/wukongim`,
+		`/var/lib/wukongim-cloud/workers`,
+		`/var/lib/wukongim-cloud/reports`,
+		`/var/lib/wukongim-cloud/prometheus`,
+		`/var/lib/wukongim-cloud/evidence`,
+		`test ! -L "$root"`,
+		`if ! id -u wukongim >/dev/null 2>&1; then`,
+		`do test ! -e "$root"; done; exit 0`,
+		`find -P "$root" -xdev -mindepth 1 -delete`,
+		`test -z "$(find -P "$root" -xdev -mindepth 1 -print -quit)"`,
+	} {
+		if !strings.Contains(text, fragment) {
+			t.Fatalf("repair generation reset missing %q", fragment)
+		}
+	}
+	if strings.Index(text, "${role}-quiesce") > strings.Index(text, "${role}-repair-reset") {
+		t.Fatal("service repair reset must run only after the service units are quiesced")
+	}
+	if strings.Index(text, "load-quiesce") > strings.Index(text, "load-repair-reset") {
+		t.Fatal("load repair reset must run only after the load units are quiesced")
 	}
 }
 
@@ -397,6 +460,73 @@ func TestCloudDeploymentUsesTheProvisionedBootstrapUser(t *testing.T) {
 	for name, content := range map[string]string{"SSH config": string(sshConfig), "activation": string(activation)} {
 		if strings.Contains(content, "User wukong") || strings.Contains(content, "wukong@") || strings.Contains(content, "/home/wukong/") {
 			t.Fatalf("%s still uses the nonexistent deployment user", name)
+		}
+	}
+}
+
+func TestCloudDeploymentSSHConfigUsesLeaseScopedKnownHosts(t *testing.T) {
+	root := repoRoot(t)
+	directory := t.TempDir()
+	keyPath := filepath.Join(directory, "deployment identity")
+	configPath := filepath.Join(directory, "deployment-ssh-config")
+	if err := os.WriteFile(keyPath, []byte("test-key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.CommandContext(t.Context(), "bash", filepath.Join(root, "scripts", "cloud-deployment", "write-ssh-config.sh"))
+	command.Env = append(os.Environ(),
+		"WK_CLOUD_LOAD_PUBLIC_IP=203.0.113.20",
+		"WK_CLOUD_SERVICE1_IP=10.42.0.11",
+		"WK_CLOUD_SERVICE2_IP=10.42.0.12",
+		"WK_CLOUD_SERVICE3_IP=10.42.0.13",
+		"WK_CLOUD_SSH_KEY="+keyPath,
+		"WK_CLOUD_SSH_CONFIG="+configPath,
+	)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("write SSH config: %v\n%s", err, output)
+	}
+	knownHostsPath := configPath + ".known_hosts"
+	knownHosts, err := os.Stat(knownHostsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if knownHosts.Mode().Perm() != 0o600 {
+		t.Fatalf("known-hosts mode = %o, want 600", knownHosts.Mode().Perm())
+	}
+	if err := os.WriteFile(knownHostsPath, []byte("retained-host-key\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	command = exec.CommandContext(t.Context(), "bash", filepath.Join(root, "scripts", "cloud-deployment", "write-ssh-config.sh"))
+	command.Env = append(os.Environ(),
+		"WK_CLOUD_LOAD_PUBLIC_IP=203.0.113.20",
+		"WK_CLOUD_SERVICE1_IP=10.42.0.11",
+		"WK_CLOUD_SERVICE2_IP=10.42.0.12",
+		"WK_CLOUD_SERVICE3_IP=10.42.0.13",
+		"WK_CLOUD_SSH_KEY="+keyPath,
+		"WK_CLOUD_SSH_CONFIG="+configPath,
+	)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("rewrite SSH config: %v\n%s", err, output)
+	}
+	retained, err := os.ReadFile(knownHostsPath)
+	if err != nil || string(retained) != "retained-host-key\n" {
+		t.Fatalf("known-hosts content = %q, %v", retained, err)
+	}
+	canonicalKnownHostsPath, err := filepath.EvalSymlinks(knownHostsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved := exec.CommandContext(t.Context(), "ssh", "-G", "-F", configPath, "wukong-load")
+	output, err := resolved.CombinedOutput()
+	if err != nil {
+		t.Fatalf("resolve deployment SSH config: %v\n%s", err, output)
+	}
+	for _, setting := range []string{
+		"hostname 203.0.113.20",
+		"strictHostKeyChecking accept-new",
+		"userknownhostsfile " + canonicalKnownHostsPath,
+	} {
+		if !strings.Contains(strings.ToLower(string(output)), strings.ToLower(setting)+"\n") {
+			t.Fatalf("resolved SSH config missing %q:\n%s", setting, output)
 		}
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"time"
 
 	ch "github.com/WuKongIM/WuKongIM/pkg/channel"
+	"github.com/WuKongIM/WuKongIM/pkg/channel/replication"
 )
 
 func (rc *runtimeChannel) addWaiter(opID ch.OpID, future *Future) error {
@@ -143,6 +144,10 @@ func (r *Reactor) failWaiters(rc *runtimeChannel, err error) {
 	if r == nil || rc == nil {
 		return
 	}
+	if rc.quorumInstall != nil {
+		r.completeFutures(rc.quorumInstall.futures, Result{Err: err})
+		rc.quorumInstall = nil
+	}
 	for opID, future := range rc.waiters {
 		delete(rc.waiters, opID)
 		if future != nil {
@@ -158,8 +163,7 @@ func (r *Reactor) failWaiters(rc *runtimeChannel, err error) {
 	rc.failPendingRetentionWaiters(err)
 }
 
-func (r *Reactor) evictRuntimeChannel(key ch.ChannelKey, rc *runtimeChannel, reason string) bool {
-	_ = reason
+func (r *Reactor) evictRuntimeChannel(key ch.ChannelKey, rc *runtimeChannel, reason RuntimeEvictionReason) bool {
 	if r == nil || rc == nil || rc.state == nil || r.channels[key] != rc {
 		return false
 	}
@@ -168,6 +172,9 @@ func (r *Reactor) evictRuntimeChannel(key ch.ChannelKey, rc *runtimeChannel, rea
 	}
 	role := rc.state.Role
 	wasParkedFollower := role == ch.RoleFollower && rc.replication.parked
+	if r.cfg.QuorumLog != nil && rc.quorumAuthority.ID != (replication.AuthorityID{}) {
+		r.cfg.QuorumLog.Release(key, rc.quorumAuthority.ID)
+	}
 	r.clearAppendCancelContexts(rc)
 	r.clearPullCancelChannel(rc)
 	r.clearLookupCancelChannel(rc)
@@ -178,7 +185,7 @@ func (r *Reactor) evictRuntimeChannel(key ch.ChannelKey, rc *runtimeChannel, rea
 	r.clearLoadedMetaRefresh(key)
 	delete(r.channels, key)
 	r.closeStoreAsync(key, rc.state.Generation, storeHandle)
-	r.observeChannelRuntimeEvicted(key, role)
+	r.observeChannelRuntimeEvicted(key, role, reason)
 	if wasParkedFollower {
 		if r.parkedFollowerRuntimeCount > 0 {
 			r.parkedFollowerRuntimeCount--

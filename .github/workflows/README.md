@@ -18,12 +18,14 @@ authorization and the applicable budget.
 | `chat-lifecycle-formal.yml` | `Safety Automation - Start Fresh Formal Chat Lifecycle` | Consumes an authenticated released rehearsal transition and starts a fresh 96-hour formal Lease |
 | `chat-lifecycle-formal-finalize.yml` | `Safety Automation - Finalize Formal Chat Lifecycle Runs` | Collects the same-Lease Soak/capacity/recovery result before Release and zero-inventory proof |
 | `chat-lifecycle-stop.yml` | `Agent Tool - Stop Chat Lifecycle Request` | Seals one request-level stop marker and requests coordinated cancellation plus bounded operator-stop finalization |
+| `three-node-chat-lifecycle-regression.yml` | `Safety Automation - Three-Node Chat Lifecycle Regression` | Enforces 400 ms p99 on focused 500 SEND/s PR benchmarks, runs a sealed 500 SEND/s three-node correctness/drain smoke, and runs one fresh nightly ten-minute 500 SEND/s regression directly without the diagnostic rate staircase; 1,000 SEND/s remains a dedicated capacity-environment gate |
 | `review-agent-pr-signal.yml` | `Safety Automation - Review Agent PR Signal` | Emits a credential-free lifecycle or exact-command wake-up hint |
 | `review-agent.yml` | `Safety Automation - Review Agent Controller` | Re-reads GitHub facts and signed state, then plans one lifecycle transition |
 | `review-agent-run.yml` | `Agent Tool - Review Pull Request` | Runs one exact review or explanation generation |
 | `issue-agent-pr-signal.yml` | `Safety Automation - Issue Agent PR Signal` | Emits credential-free lifecycle and Review hints for Issue Agent PRs |
 | `issue-agent.yml` | `Safety Automation - GitHub Issue Agent` | Reconciles Issue work and Review Agent repair requests |
 | `issue-agent-engineer.yml` | `Agent Tool - Issue Engineer` | Runs one exact Context Builder, Codex Engineer, and clean Verifier chain |
+| `manager-browser-smoke.yml` | `Safety Automation - Manager Browser Smoke` | Builds the production Manager bundle and runs the desktop/mobile Chromium matrix against a real three-node cluster |
 | `cloud-lease-oidc-setup.yml` | `Agent Tool - Configure Cloud Lease OIDC Roles` | Reconciles and live-verifies the three workflow-conditioned Cloud Lease roles |
 | `cloud-lease-provision.yml` | `Agent Tool - Provision Cloud Lease` | Quotes or explicitly acquires one generic Alibaba Cloud Lease |
 | `cloud-lease-observe.yml` | `Agent Tool - Inspect Cloud Lease` | Reconstructs exact Lease inventory through the read-only Observer role |
@@ -36,6 +38,18 @@ authorization and the applicable budget.
 | `cloud-sim-oidc-subject.yml` | `Agent Tool - Configure Cloud Simulation OIDC Subject` | Configures and verifies the cloud OIDC subject |
 | `cloud-sim-cleanup.yml` | `Safety Automation - Reconcile Cloud Simulation Resources` | Destroys expired cloud leases and supports exact cleanup |
 | `cloud-sim-monitor.yml` | `Safety Automation - Patrol Cloud Simulation Runs` | Patrols retained live runs and records bounded health evidence |
+
+## Direct local chat-lifecycle repair
+
+The diagnostic repair loop is intentionally not a GitHub Action. Codex runs
+`.agents/skills/wukongim-chat-lifecycle` from the operator's local repository
+and uses `scripts/chat-lifecycle/direct-lab.sh` to build an exact committed
+candidate, Quote and acquire one temporary Alibaba Cloud Lease, deploy over
+SSH, stop stalled traffic, collect bounded evidence, and redeploy later
+candidate generations on the same hosts. Only the request-scoped `stop`
+command accepts cleanup, and only after it stores an exact selector-bound
+zero-inventory proof. The generic expired-Lease sweep remains an independent
+safety backstop; it is not the repair control plane.
 
 ## Review Agent
 
@@ -98,6 +112,11 @@ only in `.github/review-agent/policy.json`; focused Skill test commands live
 only in `.agents/skill-tests.json`. The structural check never discovers or
 executes files from a Skill's `scripts/` directory.
 
+FLOW navigation uses the protected `flow-doc-contracts` check. Its command and
+path selection live only in `.github/review-agent/policy.json`; it enforces the
+strict schema, 150-line limit, local navigation references, and canonical
+generated index.
+
 The model request passes through one root-owned loopback proxy that clamps
 `max_output_tokens` to the protected policy and injects the OpenRouter
 credential. The root-only credential handoff file is deleted before the
@@ -152,8 +171,29 @@ removing the protected check tools.
 
 The exclusive documentation fast path covers `docs/`, `docs-site/`,
 `README.md`, and `README_CN.md`. It runs `docs-contracts` without falling
-through to repository-default Go checks; any mixed or non-allowlisted change
-still receives the union of its applicable checks.
+through to repository-default Go checks. That protected check includes the
+documentation source contracts, the complete `docs-site` verification and
+static export, broken-link and metadata gates, and the buildable JavaScript Web
+sample. Changes to the sample, its published SDK/API contract pages and machine
+artifacts, shared developer-page presentation sources, the Product
+HTTP/use-case/cluster-read path used by it, Gateway authentication or
+WKProto/WebSocket transport, the E2E harness, or the wire ReasonCode enum also
+run the protected `docs-integration` check against a real single-node cluster
+and Chromium. Any mixed or non-allowlisted change still receives the union of
+its applicable checks.
+
+The `docs-integration` check pins Bun 1.3.11 and Node.js 22.12.0. It installs
+the frozen docs tree and locked JavaScript sample before any typechecked build,
+reruns the source-alignment contract tests, and completes an initial unverified
+build/output gate before the browser smoke, so the same static export is
+available to the accessibility checks. It then installs locked Chromium, runs
+the focused real-process E2E against a 256-Hash-Slot single-node cluster, and
+accepts a verification receipt only from a clean committed HEAD. The helper
+strictly validates the bounded receipt against the current source revision,
+sample lock hash, SDK, Node.js, Playwright, and Chromium identities before a
+second verified build and output gate. Its unique receipt directory is always
+removed; a failed browser run may retain only three redacted PNG screenshots,
+each no larger than 2 MiB, under the ignored `tmp/docs-site-e2e/` directory.
 
 Worker dispatch is serialized per pull request. The exact run title derived
 from pull request, signed lease, and infrastructure attempt is the idempotency

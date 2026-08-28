@@ -10,9 +10,10 @@ import (
 var channelRuntimeAppendBatchRecordBuckets = []float64{1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024}
 var channelRuntimeWaiterBuckets = []float64{0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024}
 var channelRuntimeAppendBatchByteBuckets = []float64{64, 256, 1024, 4096, 16384, 65536, 262144, 524288, 1048576, 4194304}
-var channelRuntimeDurationBuckets = []float64{0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5}
+var channelRuntimeDurationBuckets = []float64{0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.15, 0.2, 0.25, 0.5, 1, 2.5}
 var channelRuntimeISRAnomalyReasons = []string{"isr_insufficient", "no_leader", "replica_gap"}
 var channelRuntimeMetaCreateResults = []string{"created", "already_existing", "error"}
+var channelRuntimeMetaCreateBatchResults = []string{"ok", "recovered", "error"}
 
 const maxMaterializedLogicalSlotGroups uint32 = 256
 
@@ -24,6 +25,8 @@ type ChannelRuntimeMetrics struct {
 	workerInflight           *prometheus.GaugeVec
 	workerInflightPeak       *prometheus.GaugeVec
 	activeRuntimes           *prometheus.GaugeVec
+	runtimeLoadTotal         *prometheus.CounterVec
+	runtimeEvictionTotal     *prometheus.CounterVec
 	activationRejectedTotal  *prometheus.CounterVec
 	followerParked           *prometheus.GaugeVec
 	recoveryProbeTotal       *prometheus.CounterVec
@@ -41,6 +44,10 @@ type ChannelRuntimeMetrics struct {
 	needMetaPullTotal        *prometheus.CounterVec
 	metaCacheTotal           *prometheus.CounterVec
 	metaCreatedTotal         *prometheus.CounterVec
+	metaCreateQueueDepth     *prometheus.GaugeVec
+	metaCreateCoalescedTotal *prometheus.CounterVec
+	metaCreateBatchTotal     *prometheus.CounterVec
+	metaCreateBatchItems     *prometheus.HistogramVec
 	isrAnomalyChannels       *prometheus.GaugeVec
 	appendBatchRecords       prometheus.Histogram
 	appendBatchBytes         prometheus.Histogram
@@ -88,6 +95,16 @@ func newChannelRuntimeMetrics(registry prometheus.Registerer, labels prometheus.
 			Help:        "Number of active Channel runtimes by reactor and local role.",
 			ConstLabels: labels,
 		}, []string{"reactor_id", "role"}),
+		runtimeLoadTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name:        "wukongim_channelv2_runtime_load_total",
+			Help:        "Total Channel runtimes loaded from non-resident state by local role.",
+			ConstLabels: labels,
+		}, []string{"role"}),
+		runtimeEvictionTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name:        "wukongim_channelv2_runtime_eviction_total",
+			Help:        "Total loaded Channel runtimes safely evicted by local role and bounded reason.",
+			ConstLabels: labels,
+		}, []string{"role", "reason"}),
 		activationRejectedTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name:        "wukongim_channelv2_activation_rejected_total",
 			Help:        "Total Channel runtime activation rejections by reason.",
@@ -178,6 +195,23 @@ func newChannelRuntimeMetrics(registry prometheus.Registerer, labels prometheus.
 			Name: "wukongim_channelv2_meta_created_total",
 			Help: "Total authoritative initial Channel runtime metadata create outcomes by logical Slot Raft Group.",
 		}, []string{"slot_id", "result"}),
+		metaCreateQueueDepth: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "wukongim_channelv2_meta_create_queue_depth",
+			Help: "Current unique Channel runtime metadata creates queued behind the active batch by logical Slot Raft Group.",
+		}, []string{"slot_id"}),
+		metaCreateCoalescedTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "wukongim_channelv2_meta_create_coalesced_total",
+			Help: "Total duplicate initial metadata create waiters coalesced onto an existing logical create by Slot Raft Group.",
+		}, []string{"slot_id"}),
+		metaCreateBatchTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "wukongim_channelv2_meta_create_batch_total",
+			Help: "Total bounded initial metadata create batches by logical Slot Raft Group and closed result.",
+		}, []string{"slot_id", "result"}),
+		metaCreateBatchItems: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "wukongim_channelv2_meta_create_batch_items",
+			Help:    "Number of unique initial metadata creates submitted in each Slot-owned batch.",
+			Buckets: channelRuntimeAppendBatchRecordBuckets,
+		}, []string{"slot_id", "result"}),
 		isrAnomalyChannels: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name:        "wukongim_channelv2_isr_anomaly_channels",
 			Help:        "Current count of Channel runtime metadata ISR anomalies by low-cardinality reason.",
@@ -259,6 +293,12 @@ func newChannelRuntimeMetrics(registry prometheus.Registerer, labels prometheus.
 	// without recording an event. NewWithLogicalSlots extends this first group
 	// to the complete configured topology.
 	_ = m.activationRejectedTotal.WithLabelValues("max_channels")
+	for _, role := range []string{"leader", "follower"} {
+		_ = m.runtimeLoadTotal.WithLabelValues(role)
+		for _, reason := range []string{"idle", "bench"} {
+			_ = m.runtimeEvictionTotal.WithLabelValues(role, reason)
+		}
+	}
 	m.materializeMetaCreateSlots(1)
 
 	registry.MustRegister(
@@ -268,6 +308,8 @@ func newChannelRuntimeMetrics(registry prometheus.Registerer, labels prometheus.
 		m.workerInflight,
 		m.workerInflightPeak,
 		m.activeRuntimes,
+		m.runtimeLoadTotal,
+		m.runtimeEvictionTotal,
 		m.activationRejectedTotal,
 		m.followerParked,
 		m.recoveryProbeTotal,
@@ -285,6 +327,10 @@ func newChannelRuntimeMetrics(registry prometheus.Registerer, labels prometheus.
 		m.needMetaPullTotal,
 		m.metaCacheTotal,
 		m.metaCreatedTotal,
+		m.metaCreateQueueDepth,
+		m.metaCreateCoalescedTotal,
+		m.metaCreateBatchTotal,
+		m.metaCreateBatchItems,
 		m.isrAnomalyChannels,
 		m.appendBatchRecords,
 		m.appendBatchBytes,
@@ -361,6 +407,22 @@ func (m *ChannelRuntimeMetrics) SetChannelRuntimeCount(reactorID int, role strin
 		return
 	}
 	m.activeRuntimes.WithLabelValues(strconv.Itoa(reactorID), role).Set(float64(count))
+}
+
+// ObserveRuntimeLoad records one transition from non-resident state to a loaded runtime.
+func (m *ChannelRuntimeMetrics) ObserveRuntimeLoad(role string) {
+	if m == nil {
+		return
+	}
+	m.runtimeLoadTotal.WithLabelValues(role).Inc()
+}
+
+// ObserveRuntimeEviction records one safe loaded-runtime release.
+func (m *ChannelRuntimeMetrics) ObserveRuntimeEviction(role string, reason string) {
+	if m == nil {
+		return
+	}
+	m.runtimeEvictionTotal.WithLabelValues(role, reason).Inc()
 }
 
 func (m *ChannelRuntimeMetrics) ObserveChannelActivationRejected(reason string) {
@@ -472,6 +534,48 @@ func (m *ChannelRuntimeMetrics) ObserveMetaCreate(slotID uint32, result string) 
 		return
 	}
 	m.metaCreatedTotal.WithLabelValues(strconv.FormatUint(uint64(slotID), 10), normalizeMetaCreateResult(result)).Inc()
+}
+
+// SetMetaCreateQueueDepth publishes the current bounded unique queue depth.
+func (m *ChannelRuntimeMetrics) SetMetaCreateQueueDepth(slotID uint32, depth int) {
+	if m == nil {
+		return
+	}
+	if depth < 0 {
+		depth = 0
+	}
+	m.metaCreateQueueDepth.WithLabelValues(strconv.FormatUint(uint64(slotID), 10)).Set(float64(depth))
+}
+
+// ObserveMetaCreateCoalesced records one duplicate waiter joined to existing work.
+func (m *ChannelRuntimeMetrics) ObserveMetaCreateCoalesced(slotID uint32) {
+	if m == nil {
+		return
+	}
+	m.metaCreateCoalescedTotal.WithLabelValues(strconv.FormatUint(uint64(slotID), 10)).Inc()
+}
+
+// ObserveMetaCreateBatch records one bounded physical batch and its logical size.
+func (m *ChannelRuntimeMetrics) ObserveMetaCreateBatch(slotID uint32, result string, items int) {
+	if m == nil {
+		return
+	}
+	result = normalizeMetaCreateBatchResult(result)
+	if items < 0 {
+		items = 0
+	}
+	slot := strconv.FormatUint(uint64(slotID), 10)
+	m.metaCreateBatchTotal.WithLabelValues(slot, result).Inc()
+	m.metaCreateBatchItems.WithLabelValues(slot, result).Observe(float64(items))
+}
+
+func normalizeMetaCreateBatchResult(result string) string {
+	for _, allowed := range channelRuntimeMetaCreateBatchResults {
+		if result == allowed {
+			return result
+		}
+	}
+	return "error"
 }
 
 func normalizeMetaCreateResult(result string) string {

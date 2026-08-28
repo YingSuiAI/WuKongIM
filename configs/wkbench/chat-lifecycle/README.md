@@ -7,15 +7,21 @@ first-grant barrier, and can produce only `rehearsal_pass`, never formal
 evidence. Replace every `.invalid` address and the `run_id`; do not place
 credentials in YAML. `local-shakeout.yaml` keeps the same 12 logical Slot Raft Groups, 256
 physical hash slots, replicas 3/3, real TCP traffic, and zero-coverage paginated
-conversation sync at smaller scale. It is not formal evidence.
+conversation sync at smaller scale. Its native-process default keeps 2,500
+simultaneously online users, 500 fixed groups including one 100,000-member
+group, and 100 SEND/s. This is the highest sustained profile validated on the
+shared developer workstation; 5,000 users completed login and sync but made
+the three service nodes and three workers contend on one local filesystem,
+which is not representative of the four-host cloud topology. It is not formal
+evidence.
 
-The reviewed empty-dataset bootstrap rate is one global 25 logins/second until
+The reviewed empty-dataset bootstrap rate is one global 100 logins/second until
 all 10,000 users are simultaneously online. This does not bypass startup work:
 each login still completes WKProto CONNECT/CONNACK and a fresh version-zero full
-conversation sync. The deterministic three-worker churn model reaches the barrier in 421
+conversation sync. The deterministic three-worker churn model reaches the barrier in 101
 seconds and must remain within 15 minutes. Missed or unused per-step credit is
-discarded rather than caught up in a burst. Immutable 9/8/8 worker shares keep
-subsecond skew, including UTC-second boundary skew, within the global 25-login
+discarded rather than caught up in a burst. Immutable 34/33/33 worker shares keep
+subsecond skew, including UTC-second boundary skew, within the global 100-login
 ceiling; coordinator-controlled workers stay all-new at their local shares
 until the first global grant moves all three to the unchanged
 250,000-new-user/day 80/20 stream.
@@ -78,6 +84,7 @@ scripts/run-wukongim-three-node-chat-lifecycle-shakeout.sh \
   --stop-after 120
 ```
 
-The run directory must be absent or empty. A local filesystem smaller than the
-configured minimum, or already below the 5-percent reserve, is expected to fail
-preflight and is not formal evidence.
+The run directory must be absent or empty. The local profile requires at least
+10,000,000,000 bytes on both the service-data and load-host filesystems while
+retaining the 5-percent free-space stop. A smaller or fuller filesystem fails
+preflight, and no local result is formal evidence.

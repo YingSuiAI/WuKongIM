@@ -8,6 +8,7 @@ import (
 	"time"
 
 	channelruntime "github.com/WuKongIM/WuKongIM/pkg/channel"
+	channelreplication "github.com/WuKongIM/WuKongIM/pkg/channel/replication"
 	channelstore "github.com/WuKongIM/WuKongIM/pkg/channel/store"
 	"github.com/WuKongIM/WuKongIM/pkg/cluster/channels"
 	"github.com/WuKongIM/WuKongIM/pkg/cluster/control"
@@ -110,6 +111,10 @@ type Node struct {
 	// channelRPCGateway is registered once per transport server and atomically
 	// follows Channel runtime rebuilds after a restore activation.
 	channelRPCGateway *channels.ServiceGateway
+	// channelQuorumGateway is registered once and follows node-owned quorum runtime rebuilds.
+	channelQuorumGateway *channels.QuorumExchangeGateway
+	// defaultChannelReplication owns local durability, peer batches, and recovery workers.
+	defaultChannelReplication *channelreplication.Runtime
 	// defaultChannelStore owns the Node-created message DB factory.
 	defaultChannelStore *channelstore.MessageDBFactory
 	// channelStoreFactory is the narrow acquisition surface used by local message read facades.
@@ -1110,12 +1115,14 @@ func (n *Node) ReadChannelConversationHeads(ctx context.Context, ids []channelru
 	results := make([]channels.ConversationHeadResult, len(ids))
 	eligibleIDs := make([]channelruntime.ChannelID, 0, len(ids))
 	eligibleIndexes := make([]int, 0, len(ids))
+	metadataResults := n.readConversationChannelMetadataBatch(ctx, ids)
 	for index, id := range ids {
-		metadata, err := n.GetChannelMetadata(ctx, id.ID, int64(id.Type))
+		metadata := metadataResults[index].Channel
+		err := metadataResults[index].Err
 		switch {
-		case err == nil && metadata.Disband != 0:
+		case err == nil && metadataResults[index].Found && metadata.Disband != 0:
 			results[index].Err = channelruntime.ErrChannelNotFound
-		case err == nil || errors.Is(err, metadb.ErrNotFound):
+		case err == nil:
 			eligibleIDs = append(eligibleIDs, id)
 			eligibleIndexes = append(eligibleIndexes, index)
 		default:
@@ -1136,6 +1143,29 @@ func (n *Node) ReadChannelConversationHeads(ctx context.Context, ids []channelru
 		results[eligibleIndexes[index]] = result
 	}
 	return results, nil
+}
+
+func (n *Node) readConversationChannelMetadataBatch(ctx context.Context, ids []channelruntime.ChannelID) []slotproxy.PermissionMetadataReadResult {
+	results := make([]slotproxy.PermissionMetadataReadResult, len(ids))
+	if n != nil && n.defaultSlotProxy != nil {
+		reads := make([]slotproxy.PermissionMetadataRead, len(ids))
+		for i, id := range ids {
+			reads[i] = slotproxy.PermissionMetadataRead{
+				Kind: slotproxy.PermissionMetadataReadChannel, ChannelID: id.ID, ChannelType: int64(id.Type),
+			}
+		}
+		return n.defaultSlotProxy.ReadPermissionMetadataBatch(ctx, reads)
+	}
+	for i, id := range ids {
+		metadata, err := n.GetChannelMetadata(ctx, id.ID, int64(id.Type))
+		if errors.Is(err, metadb.ErrNotFound) {
+			continue
+		}
+		results[i].Channel = metadata
+		results[i].Found = err == nil
+		results[i].Err = err
+	}
+	return results
 }
 
 func minAvailableSeq(retentionThroughSeq uint64) uint64 {

@@ -144,7 +144,7 @@ export type ManagerOverviewResponse = {
   tasks: {
     total: number
     pending: number
-    retrying: number
+    running: number
     failed: number
   }
   anomalies: {
@@ -155,7 +155,6 @@ export type ManagerOverviewResponse = {
     }
     tasks: {
       failed: ManagerOverviewTaskAnomalyGroup
-      retrying: ManagerOverviewTaskAnomalyGroup
     }
   }
 }
@@ -404,6 +403,7 @@ export type RealtimeMonitorPoint = {
 export type RealtimeMonitorStat = {
   key: string
   label?: string
+  series_key?: string
   value?: number
   text?: string
   unit?: string
@@ -970,6 +970,7 @@ export type ManagerSlot = {
     observed_config_epoch: number
     last_report_at: string
   }
+  task?: ManagerSlotTask | null
   node_log?: ManagerSlotNodeLog | null
 }
 
@@ -1269,32 +1270,6 @@ export type ManagerTask = {
   last_error: string
 }
 
-export type ManagerSlotDetailResponse = ManagerSlot & {
-  task: ManagerTask | null
-}
-
-export type ManagerSlotRemoveResponse = {
-  slot_id: number
-  result: string
-}
-
-export type ManagerSlotRecoverResponse = {
-  strategy: string
-  result: string
-  slot: ManagerSlotDetailResponse
-}
-
-export type ManagerSlotRebalancePlanItem = {
-  hash_slot: number
-  from_slot_id: number
-  to_slot_id: number
-}
-
-export type ManagerSlotRebalanceResponse = {
-  total: number
-  items: ManagerSlotRebalancePlanItem[]
-}
-
 export type ManagerSlotLeaderTransferResponse = {
   generated_at: string
   slot_id: number
@@ -1302,7 +1277,7 @@ export type ManagerSlotLeaderTransferResponse = {
   preferred_leader: number
   actual_leader: number
   created: boolean
-  task?: ManagerTask
+  task?: ManagerSlotTask
   message: string
 }
 
@@ -1813,6 +1788,8 @@ export type ManagerConnection = {
 export type ManagerConnectionsResponse = {
   total: number
   items: ManagerConnection[]
+  has_more: boolean
+  next_cursor?: string
 }
 
 export type ManagerConnectionDetailResponse = ManagerConnection
@@ -1880,10 +1857,6 @@ export type ExecuteSlotLeaderTransferBatchInput = SlotLeaderTransferBatchInput &
   planId: string
 }
 
-export type RecoverSlotInput = {
-  strategy: string
-}
-
 export type ChannelRuntimeMetaListParams = {
   nodeId?: number
   channelId?: string
@@ -1906,6 +1879,7 @@ export type ChannelClusterUnhealthyParams = {
 export type ConnectionListParams = {
   nodeId?: number
   limit?: number
+  cursor?: string
 }
 
 export type ConnectionDetailParams = {

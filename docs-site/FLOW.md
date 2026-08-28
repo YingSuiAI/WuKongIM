@@ -1,129 +1,108 @@
+---
+scope: subtree
+summary: Owns the bilingual static v3 documentation site, shared navigation, publication state, search, SEO, and machine-readable outputs.
+---
+
 # Documentation Site Flow
 
 ## Responsibility
 
-`docs-site` is the standalone Fumadocs application for the public WuKongIM v3
-documentation. It owns the `/zh` and `/en` sites, their shared information
-architecture, static search, SEO outputs, and machine-readable documentation
-outputs. It does not own the legacy v2 site or product runtime documentation
-under the repository-level `docs/` directory.
+`docs-site` is the standalone Fumadocs application for public WuKongIM v3
+documentation under `/zh` and `/en`. It owns shared information architecture,
+MDX publication, static search, sitemap/SEO, and LLM/Markdown outputs.
+It also owns the SDK chooser and official-source directory, the narrow
+JavaScript Web golden-path laboratory, its generated compatibility/OpenAPI
+artifacts, platform-neutral SDK behavior guides, and source-checked protocol
+dictionaries. It does not define product runtime
+behavior or replace authoritative code contracts. The JavaScript laboratory
+also owns a bounded local integration-acceptance report. The report identifies
+its harness and observed installed SDK, proves only its compatibility smoke,
+and leaves the tested cluster source and production readiness unassessed.
 
-## Source and publishing flow
+## Boundaries
 
-```text
-lib/navigation.ts
-  -> Fumadocs sidebars and top-level tabs
-  -> static params for visible published/planned routes
-  -> NAVIGATION.md planning reference
+- Repository `docs/` and the legacy v2 site are separate sources; older wiki
+  material is not authoritative unless recalibrated against promoted code.
+- Guide Core Concepts is the reader-first application vocabulary for Message,
+  Channel, User, Device, and Conversation. Cluster, node, Slot, replica, and
+  leadership mechanics belong in Server Architecture rather than that path.
+- `lib/navigation.ts` is the shared bilingual publication registry. Phase specs
+  own detailed content plans and claims.
+- Static export produces artifacts only; deployment, DNS, redirects, and
+  production cutover are external operations.
 
-content/docs/**/*.mdx
-  -> fumadocs-mdx source
-  -> published domain and onboarding pages
-  -> Orama search + sitemap + llms.txt + per-page Markdown
-```
+## Main Flows
 
-- Chinese and English MUST have the same menu structure.
-- A page is `published` only when both locale variants exist and are ready.
-- A `planned` route remains visible in navigation and renders a scope summary,
-  but MUST be excluded from search, sitemap, and LLM outputs and MUST emit
-  `noindex`.
-- `lib/source.ts` filters generated MDX files through the navigation registry;
-  unknown or still-planned content paths fail closed before any index consumer.
-- Change `lib/navigation.ts`, then run `bun run navigation:write`; CI-style
-  validation uses `bun run navigation:check`.
-- `redirects.json` is only a phase-one seed. The complete legacy URL audit and
-  host-specific redirect adapter belong to the migration/deployment phase.
-- Phase 2 publishes the product overview, core-concepts overview, complete
-  source-based quick start, and basic configuration overview. Their commands
-  and defaults MUST stay aligned with the root README, `wukongim.toml.example`,
-  and the embedded Chat Demo.
-- Phase 3 publishes the integration overview, architecture, authentication,
-  messaging, and webhook guidance. These pages MUST preserve the current
-  product security and reliability boundaries: default app composition does
-  not validate stored tokens, product HTTP routes require an external trust
-  boundary, and webhook delivery is bounded and best-effort without a built-in
-  signature header.
-- Phase 4 publishes deployment selection, Docker, Linux, static multi-node,
-  and production-checklist guidance. These pages MUST keep the repository
-  Compose stack development-only, build artifacts from reviewed source without
-  inventing an official image channel, use `/readyz` for traffic admission,
-  preserve 256 hash slots and cluster-only semantics, and leave Kubernetes
-  planned.
-- Phase 5 publishes cluster, networking, storage, security, observability, and
-  configuration-reference guidance. The bilingual reference MUST cover every
-  public field returned by `internal/config.SchemaFields()` exactly once. The
-  root `wukongim.toml.example` remains a development baseline rather than a
-  runtime-default promise; configuration pages MUST distinguish listeners from
-  advertised addresses, preserve cluster-only and 256-hash-slot semantics, and
-  leave full operational procedures planned.
-- Phase 6 publishes Manager, health and monitoring, scaling, backup and
-  restore, and upgrade/migration guidance. Operations MUST use `/readyz` for
-  traffic admission, keep physical hash slots fixed at 256, make dynamic-node
-  onboarding explicit, and fail scale-in closed until authoritative status
-  reports `safe_to_remove=true`; diagnostics then derives the
-  `ready_to_remove` recommendation. Backup plans live only in Manager; saving is distinct from
-  repository testing, restore is limited to the current cluster identity, and
-  all 256 slots are verified before switch. Mixed-version rolling upgrades
-  MUST require an exact release compatibility statement; no generic v2-to-v3
-  in-place storage migration is promised.
-- Phase 7 publishes symptom-led troubleshooting and the official-tool path.
-  Investigation starts with the least expensive trustworthy evidence and keeps
-  unknown or contradictory state fail-closed. `wkcli` operations retain Manager
-  safety gates; `wkdb` remains node-local and offline, with `import` as its only
-  storage-writing command; and `wkbench` is restricted to controlled benchmark
-  clusters. Operations MCP remains a dedicated-credential, non-browser,
-  closed-world observation surface with no write tool; its bounded
-  `pprof_analyze` capture is the sole active observation.
-- Phase 8 publishes the server-architecture path. It MUST distinguish 256
-  stable physical hash-slot fences from logical Slot Raft Groups, Controller
-  intent from observed Raft leadership, Slot metadata from Channel message
-  logs, and durable Channel commit from post-commit effects. Client Gateway
-  transport and node transport remain separate; UID presence is an in-memory,
-  exact-target-fenced authority while concrete sessions remain owner-local.
-  Older wiki architecture content is not a publication source unless it is
-  recalibrated against the promoted packages.
-- Phase 9 completes the guide foundation with product capabilities, use cases,
-  clusters and nodes, messages, Channels, users and devices, conversations,
-  and plugin extensions. Capability claims MUST remain workload-qualified;
-  physical hash-slot fences remain distinct from logical Slot Raft Groups;
-  durable commit remains distinct from delivery, acknowledgement, and user
-  projections; and concrete Sessions remain owner-local. Plain non-command
-  `NoPersist` is a compatibility terminal-success branch without realtime
-  delivery, while only command-style `NoPersist` enters transient delivery.
-  Plugins remain node-local: Send is synchronous and fail-closed by default,
-  while Receive and PersistAfter are bounded post-commit effects.
-- Phase 10 publishes the first scenario tutorials: direct chat and groups
-  through 100,000-member workloads. Direct chat uses the peer UID and
-  `channel_type=1`; the server owns canonical person-Channel derivation. Group
-  chat uses product-owned group IDs and `channel_type=2`; the product service
-  remains authoritative for group lifecycle and reconciles subscriber
-  metadata through bounded requests. Durable SEND success means Channel
-  quorum commit, not complete fanout, RECVACK, directory synchronization, or a
-  business result. Current product HTTP routes remain a trusted service-side
-  boundary without general product authentication. Large-group guidance MUST
-  use bounded application batches and post-commit paged fanout, never one
-  100,000-member request or a context-free capacity promise. `ClearUnread`
-  advances to the newest server-visible message and MUST NOT be documented as
-  an exact client-supplied read-sequence update.
-- Phase 11 completes the scenario tutorials with Message Push and AI & IoT.
-  Push guidance MUST keep mobile-provider delivery in the product service:
-  `msg.offline` is a UID-level, durable-ordinary-message candidate emitted by
-  a bounded best-effort webhook, not a device-level or provider receipt.
-  Offline candidates are collected before sender-echo suppression, so product
-  policy MUST filter sender and service identities before provider work.
-  Stream guidance MUST anchor events to a successfully committed `setting=2`
-  base message, preserve stable event IDs, distinguish cache-only deltas from
-  terminal durable projection, and state that fine-grained event sync is not
-  public. IoT guidance MUST distinguish durable `SyncOnce` command recovery
-  from command-style transient `NoPersist`; recoverable commands MUST use a
-  stable source Channel with recipient `/message/cmd/bind` completed before
-  SEND because request-scoped recipients do not create discovery membership.
-  Group telemetry examples MUST provision the Channel and sender membership
-  before SEND; protocol ACK and sync cursors do not prove device-side business
-  execution.
+1. Navigation metadata generates locale-equal menus, tabs, static parameters,
+   and the planning reference.
+2. Published bilingual MDX is filtered through that registry and feeds pages,
+   search, sitemap, LLM output, and per-page Markdown.
+3. The published SDK chooser separates official repository availability,
+   tutorial publication, and exact-version executable verification. Repository
+   links do not expand the JavaScript compatibility snapshot or publish planned
+   platform APIs.
+4. `lib/developer-contracts.ts` joins source-checked Reason Codes, Channel
+   Types, Device Flags / Levels, Message Flags, build identity, SDK/runtime
+   pins, and the three-endpoint Product HTTP Beta subset into both human pages
+   and machine-readable outputs.
+5. `examples/javascript-web-quickstart/` runs a loopback-only Node.js BFF and one
+   isolated SDK singleton per browser context; its opt-in E2E scenario supplies
+   the real single-node cluster/Chromium verification evidence and can write a
+   redacted local acceptance report only after fast and real gates pass.
+6. Next.js static export writes `out/`, whose publication, canonical, link,
+   accessibility-structure, and machine-artifact boundaries are checked before
+   any external hosting step.
 
-## Static delivery
+## Invariants and Failure Semantics
 
-`next.config.mjs` uses Next.js static export. `bun run build` writes `out/`;
-`bun run test:output` validates publishing boundaries against that artifact.
-No deployment, DNS change, or production cutover is performed by these phases.
+- Chinese and English share the same menu structure; a route is published only
+  when both locale variants are ready.
+- Planned routes remain visible but are `noindex` and excluded from search,
+  sitemap, and machine-readable content. Unknown content fails closed.
+- Product facts must preserve cluster-only/256-hash-slot semantics, authority
+  versus observation, durable commit versus side effects, and current security
+  boundaries.
+- Common SDK guides publish server- and wire-proven behavior only. They do not
+  claim platform method names or expand compatibility beyond the executable
+  JavaScript/Web snapshot.
+- The SDK chooser may link current official repositories, but must label source
+  availability, site tutorial status, and executable verification separately.
+  Legacy timing, universal-platform, or family-wide capability claims are not
+  republished without exact-version evidence.
+- Plain non-command `NoPersist` is terminal compatibility success without
+  realtime delivery. Only command-style `NoPersist` enters transient online
+  delivery, and neither branch has durable recovery.
+- Operational guidance must use `/readyz`, retain Manager safety gates, avoid
+  invented compatibility/image promises, and keep unimplemented procedures
+  visibly planned.
+- Configuration reference covers every public schema field exactly once and
+  distinguishes examples from runtime defaults.
+- Browsers never call Product HTTP directly in the JavaScript golden path. The
+  localhost BFF owns `/user/token`, `/route`, and `/channel/messagesync`; it is
+  a development boundary, not production authentication.
+- Compatibility output identifies the exact source revision, sample lockfile,
+  SDK, Node.js, Playwright, and Chromium target. Verification defaults to false
+  and becomes true only when a successful receipt matches that complete tuple.
+  Chromium is the only eligible browser target; other browsers remain
+  explicitly unverified.
+- The local acceptance report uses its own exact schema, records no endpoint,
+  token, UID, message body, DOM, or browser capture, and always marks production
+  readiness `not_assessed`, tested cluster source `not_assessed`, and publication
+  attestation `not_issued`. Its documentation-quality result passes only when
+  both locale routes participate in the browser run. It cannot be supplied as
+  the protected golden-path verification receipt.
+
+## Read First
+
+- [Navigation registry](lib/navigation.ts)
+- [Phase 14 acceptance specification](PHASE_14_SPEC.md)
+- [Developer contract source](lib/developer-contracts.ts)
+- [SDK chooser](content/docs/sdk/choose-sdk.en.mdx)
+- [JavaScript Web golden sample](examples/javascript-web-quickstart/README.md)
+- [Documentation landing page](content/docs/guide/index.mdx)
+
+## Update Triggers
+
+Update this file when publication ownership, locale parity, planned/published
+behavior, generated outputs, authoritative content sources, or hosting boundary
+changes.

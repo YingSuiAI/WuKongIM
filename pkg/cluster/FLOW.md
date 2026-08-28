@@ -784,6 +784,15 @@ peer is unavailable, then returns the first send error after fanout; an offline
 peer therefore cannot suppress vote or heartbeat delivery to the remaining
 quorum members in the same Ready batch.
 
+The default Channel service now owns a durable quorum replication runtime and
+registers one stable node-RPC gateway for replication, probe, and suffix repair.
+Leader append visibility advances only after the configured MinISR durable
+checkpoint; followers may catch up through bounded exchange batches without
+becoming quorum voters. CenterIM's published RPC IDs 84-87 remain fixed, and
+the quorum exchange uses the next non-conflicting service ID 88. Mixed binaries
+that assign different meanings to these service IDs are not a supported rolling
+upgrade topology.
+
 ## Distributed Log Inspection Flow
 
 `Node.LocalControllerLogEntries` reads the local Controller Raft WAL through

@@ -137,6 +137,45 @@ func TestAppStopReturnsManagedGoroutineWaitEvidence(t *testing.T) {
 	close(release)
 }
 
+func TestAppStopFencesGatewayHandlerBeforeStoppingGatewayRuntime(t *testing.T) {
+	handler := accessgateway.New(accessgateway.Options{})
+	gatewayRuntime := &assertGatewayShutdownFenceRuntime{t: t, handler: handler}
+	app := &App{
+		started:        true,
+		gatewayStarted: true,
+		gateway:        gatewayRuntime,
+		handler:        handler,
+		logger:         wklog.NewNop(),
+	}
+
+	if err := app.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+	if !gatewayRuntime.stopped {
+		t.Fatal("gateway runtime was not stopped")
+	}
+}
+
+type assertGatewayShutdownFenceRuntime struct {
+	t       *testing.T
+	handler *accessgateway.Handler
+	stopped bool
+}
+
+func (r *assertGatewayShutdownFenceRuntime) Start() error { return nil }
+
+func (r *assertGatewayShutdownFenceRuntime) Stop() error {
+	r.t.Helper()
+	// A package-level behavior assertion lives in access/gateway; this runtime
+	// verifies only that App.Stop crossed the handler boundary before invoking
+	// the gateway runtime stop hook.
+	if !r.handler.IsPlannedShutdown() {
+		r.t.Fatal("gateway handler planned-shutdown fence was not set before runtime Stop")
+	}
+	r.stopped = true
+	return nil
+}
+
 func TestAppStopBeforeStartReleasesChannelAppendPools(t *testing.T) {
 	registry := goruntimeregistry.Default()
 	baseline := registry.Baseline()
@@ -3022,8 +3061,8 @@ func TestDefaultDeliveryConfigKeepsDisabledAndUsesRuntimeDefaults(t *testing.T) 
 	if cfg.EventQueueSize != 1024 {
 		t.Fatalf("EventQueueSize = %d, want 1024", cfg.EventQueueSize)
 	}
-	if cfg.RecipientWorkerConcurrency != 100 {
-		t.Fatalf("RecipientWorkerConcurrency = %d, want 100", cfg.RecipientWorkerConcurrency)
+	if cfg.RecipientWorkerConcurrency != 320 {
+		t.Fatalf("RecipientWorkerConcurrency = %d, want 320", cfg.RecipientWorkerConcurrency)
 	}
 
 	negative := defaultDeliveryConfig(DeliveryConfig{
@@ -5083,6 +5122,159 @@ func TestAppWiresConversationListRouteToUsecase(t *testing.T) {
 	}
 }
 
+func TestAppWiresLegacyConversationSyncRouteToDirectoryAndMessageReads(t *testing.T) {
+	cluster := &fakeAuthoritativePresenceCluster{fakePresenceCluster: newFakePresenceCluster(1, nil)}
+	cluster.snapshot = readyFakeClusterSnapshot(1, 16)
+	cluster.channels = map[metadb.ChannelKey]metadb.Channel{
+		{ChannelID: "g1", ChannelType: 2}: {ChannelID: "g1", ChannelType: 2, SubscriberMutationVersion: 1},
+	}
+	cluster.subscribers = map[string][]string{"g1": {"u1"}}
+	cluster.memberships = map[fakeMembershipKey]metadb.UserChannelMembership{
+		{uid: "u1", channelID: "g1", channelType: 2}: {
+			UID: "u1", ChannelID: "g1", ChannelType: 2, JoinSeq: 1, ActivatedAt: 100,
+		},
+	}
+	cluster.messages = map[metadb.ChannelKey][]channelruntime.Message{
+		{ChannelID: "g1", ChannelType: 2}: {{
+			MessageID: 9, MessageSeq: 1, ChannelID: "g1", ChannelType: 2,
+			FromUID: "u2", ClientMsgNo: "client-1", ServerTimestampMS: 1_700_000_000_000,
+			Payload: []byte("legacy"),
+		}},
+	}
+	app, err := newTestApp(t, Config{
+		API: APIConfig{ListenAddr: "127.0.0.1:0"},
+	}, WithCluster(cluster))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	apiSrv, ok := app.api.(*accessapi.Server)
+	if !ok {
+		t.Fatalf("api runtime = %T, want *accessapi.Server", app.api)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/conversation/sync", strings.NewReader(`{"uid":"u1","msg_count":1}`))
+	req.Header.Set("Content-Type", "application/json")
+	apiSrv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s, want 200", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"channel_id":"g1"`) || !strings.Contains(rec.Body.String(), `"last_msg_seq":1`) || !strings.Contains(rec.Body.String(), `"payload":"bGVnYWN5"`) {
+		t.Fatalf("body = %s, want legacy conversation with committed message", rec.Body.String())
+	}
+}
+
+type fakeAuthoritativePresenceCluster struct {
+	*fakePresenceCluster
+}
+
+func (f *fakeAuthoritativePresenceCluster) UpsertChannelMetadata(_ context.Context, channel metadb.Channel) error {
+	if f.channels == nil {
+		f.channels = make(map[metadb.ChannelKey]metadb.Channel)
+	}
+	f.channels[metadb.ChannelKey{ChannelID: channel.ChannelID, ChannelType: channel.ChannelType}] = channel
+	return nil
+}
+
+func (f *fakeAuthoritativePresenceCluster) DeleteChannelMetadata(_ context.Context, channelID string, channelType int64) error {
+	delete(f.channels, metadb.ChannelKey{ChannelID: channelID, ChannelType: channelType})
+	delete(f.subscribers, channelID)
+	return nil
+}
+
+func (f *fakeAuthoritativePresenceCluster) AddChannelSubscribers(_ context.Context, channelID string, _ int64, uids []string, _ uint64) error {
+	if f.subscribers == nil {
+		f.subscribers = make(map[string][]string)
+	}
+	f.subscribers[channelID] = append(f.subscribers[channelID], uids...)
+	return nil
+}
+
+func (f *fakeAuthoritativePresenceCluster) RemoveChannelSubscribers(_ context.Context, channelID string, _ int64, uids []string, _ uint64) error {
+	remove := make(map[string]struct{}, len(uids))
+	for _, uid := range uids {
+		remove[uid] = struct{}{}
+	}
+	kept := f.subscribers[channelID][:0]
+	for _, uid := range f.subscribers[channelID] {
+		if _, found := remove[uid]; !found {
+			kept = append(kept, uid)
+		}
+	}
+	f.subscribers[channelID] = kept
+	return nil
+}
+
+func (f *fakeAuthoritativePresenceCluster) ListChannelSubscribersAuthoritative(ctx context.Context, channelID string, channelType int64, afterUID string, limit int) ([]string, string, bool, error) {
+	return f.ListChannelSubscribersPage(ctx, channelID, channelType, afterUID, limit)
+}
+
+func (f *fakeAuthoritativePresenceCluster) ContainsChannelSubscriberAuthoritative(_ context.Context, channelID string, _ int64, uid string) (bool, error) {
+	for _, existing := range f.subscribers[channelID] {
+		if existing == uid {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (f *fakeAuthoritativePresenceCluster) HasChannelSubscribersAuthoritative(_ context.Context, channelID string, _ int64) (bool, error) {
+	return len(f.subscribers[channelID]) > 0, nil
+}
+
+func (f *fakeAuthoritativePresenceCluster) ReadPermissionMetadataBatchAuthoritative(ctx context.Context, reads []slotproxy.PermissionMetadataRead) []slotproxy.PermissionMetadataReadResult {
+	results := make([]slotproxy.PermissionMetadataReadResult, len(reads))
+	for index, read := range reads {
+		switch read.Kind {
+		case slotproxy.PermissionMetadataReadChannel:
+			channel, err := f.GetChannelMetadataAuthoritative(ctx, read.ChannelID, read.ChannelType)
+			if errors.Is(err, metadb.ErrNotFound) {
+				continue
+			}
+			results[index].Channel = channel
+			results[index].Found = err == nil
+			results[index].Err = err
+		case slotproxy.PermissionMetadataReadSubscriberContains:
+			for _, uid := range f.subscribers[read.ChannelID] {
+				if uid == read.UID {
+					results[index].Value = true
+					break
+				}
+			}
+		case slotproxy.PermissionMetadataReadSubscriberHasAny:
+			results[index].Value = len(f.subscribers[read.ChannelID]) > 0
+		default:
+			results[index].Err = metadb.ErrInvalidArgument
+		}
+	}
+	return results
+}
+
+func (f *fakeAuthoritativePresenceCluster) UpsertUserChannelMemberships(_ context.Context, channelID string, channelType int64, uids []string, joinSeq, sourceVersion uint64, updatedAt int64) error {
+	for _, uid := range uids {
+		f.memberships[fakeMembershipKey{uid: uid, channelID: channelID, channelType: channelType}] = metadb.UserChannelMembership{
+			UID: uid, ChannelID: channelID, ChannelType: channelType, JoinSeq: joinSeq,
+			SourceVersion: sourceVersion, UpdatedAt: updatedAt,
+		}
+	}
+	return nil
+}
+
+func (f *fakeAuthoritativePresenceCluster) TombstoneUserChannelMemberships(_ context.Context, channelID string, channelType int64, uids []string, sourceVersion uint64, updatedAt int64) error {
+	for _, uid := range uids {
+		key := fakeMembershipKey{uid: uid, channelID: channelID, channelType: channelType}
+		row, ok := f.memberships[key]
+		if ok && sourceVersion > row.SourceVersion {
+			row.Tombstone = true
+			row.SourceVersion = sourceVersion
+			row.UpdatedAt = updatedAt
+			f.memberships[key] = row
+		}
+	}
+	return nil
+}
+
 func TestAppWiresMessageSyncRouteToCMDSyncUsecase(t *testing.T) {
 	cluster := newFakePresenceCluster(1, nil)
 	cluster.snapshot = readyFakeClusterSnapshot(1, 16)
@@ -6947,12 +7139,44 @@ func (f *fakePresenceCluster) ReadChannelLastVisible(_ context.Context, id chann
 	return channelruntime.Message{}, false, nil
 }
 
-func (f *fakePresenceCluster) ReadChannelCommitted(context.Context, channelruntime.ChannelID, channelstore.ReadCommittedRequest) (channelstore.ReadCommittedResult, error) {
-	return channelstore.ReadCommittedResult{}, nil
+func (f *fakePresenceCluster) ReadChannelCommitted(_ context.Context, id channelruntime.ChannelID, req channelstore.ReadCommittedRequest) (channelstore.ReadCommittedResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	source := f.messages[metadb.ChannelKey{ChannelID: id.ID, ChannelType: int64(id.Type)}]
+	messages := make([]channelruntime.Message, 0, len(source))
+	for _, message := range source {
+		if req.MinSeq > 0 && message.MessageSeq < req.MinSeq {
+			continue
+		}
+		if req.MaxSeq > 0 && message.MessageSeq > req.MaxSeq {
+			continue
+		}
+		if !req.Reverse && req.FromSeq > 0 && message.MessageSeq < req.FromSeq {
+			continue
+		}
+		if req.Reverse && req.FromSeq > 0 && message.MessageSeq > req.FromSeq {
+			continue
+		}
+		message.Payload = append([]byte(nil), message.Payload...)
+		messages = append(messages, message)
+	}
+	if req.Reverse {
+		for left, right := 0, len(messages)-1; left < right; left, right = left+1, right-1 {
+			messages[left], messages[right] = messages[right], messages[left]
+		}
+	}
+	if req.Limit > 0 && len(messages) > req.Limit {
+		messages = messages[:req.Limit]
+	}
+	return channelstore.ReadCommittedResult{Messages: messages}, nil
 }
 
-func (f *fakePresenceCluster) ReadChannelCommittedBatch(_ context.Context, reads []clusterchannels.CommittedRead) ([]clusterchannels.CommittedReadResult, error) {
-	return make([]clusterchannels.CommittedReadResult, len(reads)), nil
+func (f *fakePresenceCluster) ReadChannelCommittedBatch(ctx context.Context, reads []clusterchannels.CommittedRead) ([]clusterchannels.CommittedReadResult, error) {
+	results := make([]clusterchannels.CommittedReadResult, len(reads))
+	for index, read := range reads {
+		results[index].Read, results[index].Err = f.ReadChannelCommitted(ctx, read.ChannelID, read.Request)
+	}
+	return results, nil
 }
 
 func (f *fakePresenceCluster) LookupMessageEventAnchor(_ context.Context, channelID string, channelType int64, messageID uint64) (clusterpkg.MessageEventAnchor, bool, error) {

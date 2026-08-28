@@ -36,6 +36,9 @@ func (l *ChannelLog) TruncateFrom(ctx context.Context, fromSeq uint64) error {
 
 	batch := l.db.engine.NewBatch()
 	defer batch.Close()
+	if err := l.channelEntry.stageTruncateDurableProposals(ctx, batch, fromSeq-1); err != nil {
+		return err
+	}
 	for _, msg := range messages {
 		if err := l.stageDeleteMessage(batch, msg); err != nil {
 			return err
@@ -49,6 +52,7 @@ func (l *ChannelLog) TruncateFrom(ctx context.Context, fromSeq uint64) error {
 	}
 	l.leo.Store(fromSeq - 1)
 	l.loaded.Store(true)
+	l.clearDurableProposalTailLocked()
 	return nil
 }
 

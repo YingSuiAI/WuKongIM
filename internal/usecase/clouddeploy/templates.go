@@ -16,7 +16,20 @@ initial_slot_count = 12
 hash_slot_count = 256
 slot_replica_n = 3
 channel_replica_n = 3
+# A 100ms heartbeat and two-second minimum election window keep transient
+# Cloud Medium storage/transport tails from causing unnecessary Slot terms.
+slot_tick_interval = "50ms"
+slot_heartbeat_tick = 2
+slot_election_tick = 40
 max_channels = 50000
+# These bounded Cloud Medium capacities are calibrated for the fixed
+# 10,000-online, 2,000-SEND/s chat-lifecycle workload. In particular, the
+# append pool must absorb the initial cold-Channel quorum-write wave without
+# consuming the five-second gateway SEND deadline.
+channel_store_append_workers = 128
+channel_store_apply_workers = 8
+channel_rpc_workers = 96
+channel_rpc_batch_max_items = 8
 
 [api]
 listen_addr = "0.0.0.0:5001"
@@ -29,6 +42,15 @@ auth_on = true
 
 [bench]
 api_enable = true
+
+[gateway]
+gnet_multicore = true
+gnet_num_event_loop = 4
+runtime_async_send_workers = 1000
+runtime_async_send_queue_capacity = 131072
+
+[delivery]
+recipient_worker_concurrency = 320
 
 [observability]
 metrics_enable = true
@@ -200,6 +222,11 @@ case "$stage" in
     config=/etc/wukongim/chat-lifecycle-rehearsal.yaml
     stage_unit=wkbench-rehearsal.service
     command=(/opt/wukongim/bin/wkbench soak chat-lifecycle --config "$config" --output-dir /var/lib/wukongim-cloud/reports/rehearsal)
+    if [[ -n "${WK_CHAT_LAB_MAX_DURATION_SECONDS:-}" ]]; then
+      [[ "$WK_CHAT_LAB_MAX_DURATION_SECONDS" =~ ^[1-9][0-9]*$ ]]
+      (( WK_CHAT_LAB_MAX_DURATION_SECONDS >= 960 && WK_CHAT_LAB_MAX_DURATION_SECONDS <= 260100 ))
+      command+=(--duration "${WK_CHAT_LAB_MAX_DURATION_SECONDS}s")
+    fi
     ;;
   formal)
     config=/etc/wukongim/chat-lifecycle.yaml
@@ -455,6 +482,7 @@ EnvironmentFile=/etc/wukongim/secrets/load.env
 Environment=WK_CHAT_LIFECYCLE_CONFIG=/etc/wukongim/chat-lifecycle-rehearsal.yaml
 ExecStartPre=/opt/wukongim/scripts/wait-coordinator-dependencies.sh
 ExecStart=/opt/wukongim/scripts/run-chat-lifecycle-stage.sh rehearsal
+SuccessExitStatus=130
 TimeoutStartSec=960
 Restart=no
 LimitNOFILE=1048576

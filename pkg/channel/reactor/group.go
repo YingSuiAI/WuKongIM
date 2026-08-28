@@ -8,6 +8,7 @@ import (
 	"time"
 
 	ch "github.com/WuKongIM/WuKongIM/pkg/channel"
+	"github.com/WuKongIM/WuKongIM/pkg/channel/replication"
 	"github.com/WuKongIM/WuKongIM/pkg/channel/store"
 	"github.com/WuKongIM/WuKongIM/pkg/channel/transport"
 	"github.com/WuKongIM/WuKongIM/pkg/channel/worker"
@@ -15,9 +16,6 @@ import (
 )
 
 const (
-	defaultStoreAppendWorkerMultiplier  = 2
-	defaultStoreApplyWorkerMultiplier   = 2
-	defaultStoreWorkerCap               = 128
 	defaultMetaResolveWorkers           = 2
 	defaultMetaResolveQueueSize         = 64
 	defaultColdActivationMinWorkers     = 4
@@ -52,6 +50,8 @@ type Config struct {
 	Transport transport.Client
 	// MetaResolver authorizes unloaded cold activation and refreshes loaded runtimes after newer PullHint fences.
 	MetaResolver ch.MetaResolver
+	// QuorumLog owns authority recovery and quorum-durable leader commits.
+	QuorumLog replication.DurableQuorumLog
 	// WorkerPools configures bounded pools for blocking store and RPC effects.
 	WorkerPools worker.PoolsConfig
 	// AppendBatchMaxRecords is the queued record count that triggers a store append flush.
@@ -137,7 +137,7 @@ func NewGroup(cfg Config) (*Group, error) {
 		return nil, err
 	}
 	g := &Group{cfg: cfg, router: router, reactors: make([]*Reactor, cfg.ReactorCount), storeCloses: newStoreCloseTracker()}
-	pools, err := worker.NewPools(defaultWorkerPools(cfg), worker.Deps{LocalNode: cfg.LocalNode, Stores: cfg.Store, Transport: cfg.Transport, MetaResolver: cfg.MetaResolver}, g)
+	pools, err := worker.NewPools(defaultWorkerPools(cfg), worker.Deps{LocalNode: cfg.LocalNode, Stores: cfg.Store, Transport: cfg.Transport, MetaResolver: cfg.MetaResolver, QuorumLog: cfg.QuorumLog}, g)
 	if err != nil {
 		return nil, err
 	}
@@ -176,6 +176,7 @@ func NewGroup(cfg Config) (*Group, error) {
 			FollowerRecoveryProbeJitter:   cfg.FollowerRecoveryProbeJitter,
 			CommittedCheckpointInterval:   cfg.CommittedCheckpointInterval,
 			Observer:                      cfg.Observer,
+			QuorumLog:                     cfg.QuorumLog,
 			NextOpID:                      g.NextOpID,
 			storeCloses:                   g.storeCloses,
 		})
@@ -447,8 +448,8 @@ func eventPriority(kind EventKind) Priority {
 
 func defaultWorkerPools(cfg Config) worker.PoolsConfig {
 	workers := max(1, cfg.ReactorCount)
-	storeAppendWorkers := DefaultStoreAppendWorkerCount(workers)
-	storeApplyWorkers := DefaultStoreApplyWorkerCount(workers)
+	storeAppendWorkers := worker.DefaultStoreAppendWorkers
+	storeApplyWorkers := worker.DefaultStoreApplyWorkers
 	queueSize := max(64, cfg.MailboxSize)
 	pools := cfg.WorkerPools
 	effectiveStoreApplyWorkers := storeApplyWorkers
@@ -463,7 +464,7 @@ func defaultWorkerPools(cfg Config) worker.PoolsConfig {
 	pools.StoreRead = defaultPoolConfig(pools.StoreRead, defaultStoreReadPoolName, workers, queueSize)
 	pools.StoreApply = defaultPoolConfig(pools.StoreApply, defaultStoreApplyPoolName, storeApplyWorkers, queueSize)
 	pools.StoreCheckpoint = defaultPoolConfig(pools.StoreCheckpoint, "channelv2-store-checkpoint", storeCheckpointWorkers, queueSize)
-	pools.RPC = defaultPoolConfig(pools.RPC, defaultRPCPoolName, DefaultRPCWorkerCount(workers), queueSize)
+	pools.RPC = defaultPoolConfig(pools.RPC, defaultRPCPoolName, worker.DefaultRPCWorkers, queueSize)
 	if cfg.MetaResolver != nil {
 		pools.MetaResolve = defaultPoolConfig(pools.MetaResolve, defaultMetaResolvePoolName, defaultMetaResolveWorkers, defaultMetaResolveQueueSize)
 		coldWorkers := min(max(defaultColdActivationMinWorkers, workers), defaultColdActivationWorkerCap)
@@ -471,23 +472,6 @@ func defaultWorkerPools(cfg Config) worker.PoolsConfig {
 		pools.ColdActivation = defaultPoolConfig(pools.ColdActivation, defaultColdActivationPoolName, coldWorkers, coldQueueSize)
 	}
 	return pools
-}
-
-// DefaultStoreAppendWorkerCount returns the runtime-derived leader append pool size.
-func DefaultStoreAppendWorkerCount(reactorCount int) int {
-	return min(max(1, reactorCount)*defaultStoreAppendWorkerMultiplier, defaultStoreWorkerCap)
-}
-
-// DefaultStoreApplyWorkerCount returns the runtime-derived follower apply pool size.
-func DefaultStoreApplyWorkerCount(reactorCount int) int {
-	return min(max(1, reactorCount)*defaultStoreApplyWorkerMultiplier, defaultStoreWorkerCap)
-}
-
-// DefaultRPCWorkerCount returns the QPS-validated replication RPC pool size.
-// The parameter is retained for source compatibility with callers that
-// previously consumed a reactor-derived default.
-func DefaultRPCWorkerCount(_ int) int {
-	return worker.DefaultRPCWorkers
 }
 
 func defaultPoolConfig(cfg worker.PoolConfig, name string, workers int, queueSize int) worker.PoolConfig {

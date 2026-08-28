@@ -24,11 +24,27 @@ func TestAppendRecordsFromMessagesPreservesConversationFields(t *testing.T) {
 	records := appendRecordsFromMessages([]ch.Message{
 		{MessageID: 10, FromUID: "u1", ClientMsgNo: "client-1", Payload: []byte("payload"), ServerTimestampMS: 5678},
 		{MessageID: 11, FromUID: "u2", ClientMsgNo: "client-2", Payload: []byte("fallback")},
-	}, admittedAt)
+	}, admittedAt, false)
 
 	require.Len(t, records, 2)
 	require.Equal(t, ch.Record{ID: 10, FromUID: "u1", ClientMsgNo: "client-1", Payload: []byte("payload"), SizeBytes: len("payload"), ServerTimestampMS: 5678}, records[0])
 	require.Equal(t, ch.Record{ID: 11, FromUID: "u2", ClientMsgNo: "client-2", Payload: []byte("fallback"), SizeBytes: len("fallback"), ServerTimestampMS: 1234}, records[1])
+}
+
+func TestAppendRecordsFromMessagesSharesDeclaredImmutablePayload(t *testing.T) {
+	payload := []byte("immutable")
+	records := appendRecordsFromMessages([]ch.Message{{MessageID: 10, Payload: payload}}, time.UnixMilli(1234), true)
+
+	require.Len(t, records, 1)
+	require.Same(t, &payload[0], &records[0].Payload[0])
+}
+
+func TestAppendRecordsFromMessagesOwnsBorrowedPayload(t *testing.T) {
+	payload := []byte("borrowed")
+	records := appendRecordsFromMessages([]ch.Message{{MessageID: 10, Payload: payload}}, time.UnixMilli(1234), false)
+	payload[0] = 'B'
+
+	require.Equal(t, "borrowed", string(records[0].Payload))
 }
 
 func TestAppendQueueFlushesByMaxWait(t *testing.T) {
@@ -297,6 +313,21 @@ func TestAppendQueuePressureTracksLoadedRuntimeCapacityAndClear(t *testing.T) {
 func TestDefaultObserverDoesNotImplementAppendQueuePressureObserver(t *testing.T) {
 	_, ok := defaultObserver(nil).(AppendQueuePressureObserver)
 	require.False(t, ok)
+}
+
+func TestAppendQueuePopProposalKeepsRemainderImmediatelyDue(t *testing.T) {
+	now := time.Unix(10, 0)
+	q := newAppendQueue(appendQueueConfig{MaxRecords: 2, MaxWait: time.Hour})
+	require.NoError(t, q.push(appendRequest{opID: 1, enqueuedAt: now, records: []ch.Record{{ID: 1, SizeBytes: 1}}}))
+	require.NoError(t, q.push(appendRequest{opID: 2, enqueuedAt: now, records: []ch.Record{{ID: 2, SizeBytes: 1}}}))
+
+	proposal := q.popProposal(10, nil, now)
+
+	require.Len(t, proposal.requests, 1)
+	require.Equal(t, ch.OpID(1), proposal.requests[0].opID)
+	require.Len(t, q.pending, 1)
+	q.storeBlocked = false
+	require.True(t, q.shouldFlush(now))
 }
 
 type recordingAppendQueuePressureObserver struct {

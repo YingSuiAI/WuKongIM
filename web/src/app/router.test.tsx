@@ -1,12 +1,15 @@
-import { render, screen } from "@testing-library/react"
+import { render, screen, waitFor } from "@testing-library/react"
+import userEvent from "@testing-library/user-event"
 import { RouterProvider, createMemoryRouter } from "react-router-dom"
 import { beforeEach, expect, test, vi } from "vitest"
 
 import { AppProviders } from "@/app/providers"
 import { createAnonymousAuthState, useAuthStore } from "@/auth/auth-store"
 import { routes } from "@/app/router"
+import { healthyManagerOverview } from "@/test/manager-fixtures"
 
 const getNodesMock = vi.fn()
+const getOverviewMock = vi.fn()
 const getApplicationLogSourcesMock = vi.fn()
 const getApplicationLogEntriesMock = vi.fn()
 const getPermissionsMock = vi.fn()
@@ -17,6 +20,7 @@ vi.mock("@/lib/manager-api", async (importOriginal) => {
   return {
     ...actual,
     getNodes: (...args: unknown[]) => getNodesMock(...args),
+    getOverview: (...args: unknown[]) => getOverviewMock(...args),
     getApplicationLogSources: (...args: unknown[]) => getApplicationLogSourcesMock(...args),
     getApplicationLogEntries: (...args: unknown[]) => getApplicationLogEntriesMock(...args),
     getPermissions: (...args: unknown[]) => getPermissionsMock(...args),
@@ -39,6 +43,7 @@ function authenticatedState() {
 beforeEach(() => {
   localStorage.clear()
   getNodesMock.mockReset()
+  getOverviewMock.mockReset()
   getApplicationLogSourcesMock.mockReset()
   getApplicationLogEntriesMock.mockReset()
   getPermissionsMock.mockReset()
@@ -66,6 +71,7 @@ beforeEach(() => {
       channel_runtime: { active_total: 0, active_leader: 0, active_follower: 0, unknown: false },
     }],
   })
+  getOverviewMock.mockResolvedValue(healthyManagerOverview(1))
   getApplicationLogSourcesMock.mockResolvedValue({
     node_id: 1,
     sources: [{ name: "app", file: "app.log", available: true, size_bytes: 0 }],
@@ -133,7 +139,7 @@ test("confines the auth-disabled readonly session to backup management", async (
 
   expect(await screen.findByRole("heading", { name: "Backups" })).toBeInTheDocument()
   expect(router.state.location.pathname).toBe("/cluster/backups")
-  expect(getNodesMock).not.toHaveBeenCalled()
+  expect(getOverviewMock).toHaveBeenCalledTimes(1)
 })
 
 test("redirects authenticated /login visits to the cluster live monitor", async () => {
@@ -165,6 +171,58 @@ test("renders the app shell for authenticated routes", async () => {
   expect(await screen.findByLabelText("Primary navigation")).toBeInTheDocument()
   expect(screen.getByRole("banner")).toBeInTheDocument()
   expect(screen.getByRole("main")).toBeInTheDocument()
+  await waitFor(() => {
+    expect(document.title).toBe("Nodes · WuKongIM Manager")
+  })
+})
+
+test("explicit logout redirects without an anonymous permissions probe", async () => {
+  useAuthStore.setState(authenticatedState())
+  const user = userEvent.setup()
+  const router = createMemoryRouter(routes, { initialEntries: ["/cluster/nodes"] })
+
+  render(
+    <AppProviders>
+      <RouterProvider router={router} />
+    </AppProviders>,
+  )
+
+  await user.click(await screen.findByRole("button", { name: "Logout" }))
+
+  expect(await screen.findByRole("heading", { name: /sign in/i })).toBeInTheDocument()
+  expect(getPermissionsMock).not.toHaveBeenCalled()
+})
+
+test("redirects the sample business dashboard route to live business data", async () => {
+  useAuthStore.setState(authenticatedState())
+  const router = createMemoryRouter(routes, { initialEntries: ["/business/dashboard"] })
+
+  render(
+    <AppProviders>
+      <RouterProvider router={router} />
+    </AppProviders>,
+  )
+
+  expect((await screen.findAllByRole("heading", { name: "Connections" })).length).toBeGreaterThan(0)
+  expect(router.state.location.pathname).toBe("/business/connections")
+  expect(screen.queryByText("UI preview")).not.toBeInTheDocument()
+})
+
+test("renders a localized not-found page for unknown manager routes", async () => {
+  useAuthStore.setState(authenticatedState())
+  const router = createMemoryRouter(routes, { initialEntries: ["/unknown-manager-page"] })
+
+  render(
+    <AppProviders>
+      <RouterProvider router={router} />
+    </AppProviders>,
+  )
+
+  expect(await screen.findByRole("heading", { level: 1, name: "Page not found" })).toBeInTheDocument()
+  expect(screen.getByRole("link", { name: "Return to live monitor" })).toHaveAttribute("href", "/cluster/monitor")
+  await waitFor(() => {
+    expect(document.title).toBe("Page not found · WuKongIM Manager")
+  })
 })
 
 test("renders the shell for redesigned cluster routes", async () => {
@@ -183,7 +241,8 @@ test("renders the shell for redesigned cluster routes", async () => {
 
 test.each([
   ["/", "/cluster/monitor"],
-  ["/dashboard", "/cluster/dashboard"],
+  ["/dashboard", "/cluster/monitor"],
+  ["/cluster/dashboard", "/cluster/monitor"],
   ["/nodes", "/cluster/nodes"],
   ["/workqueues", "/cluster/workqueues"],
   ["/channel-cluster/unhealthy", "/cluster/channels"],
@@ -202,8 +261,9 @@ test.each([
     </AppProviders>,
   )
 
-  await screen.findByRole("main")
-  expect(router.state.location.pathname + router.state.location.search).toBe(to)
+  await waitFor(() => {
+    expect(router.state.location.pathname + router.state.location.search).toBe(to)
+  })
 })
 
 test("does not register retired monitor route aliases", () => {

@@ -28,7 +28,7 @@ func TestLocalConfigValid(t *testing.T) {
 	if cfg.RunID != "local-chat-lifecycle" || cfg.Seed != 1 || cfg.Profile != ProfileLocal || cfg.Mode != ModeSoak || cfg.Stage != StageShakeout {
 		t.Fatalf("identity/profile/mode = %q/%d/%q/%q", cfg.RunID, cfg.Seed, cfg.Profile, cfg.Mode)
 	}
-	if cfg.Workload.Workers != 3 || cfg.Workload.OnlineUsers != 100 || cfg.Workload.BootstrapLoginsPerSecond != 25 || cfg.Workload.NewUsersPerDay != 250_000 || cfg.Workload.SendRatePerSecond != 100 {
+	if cfg.Workload.Workers != 3 || cfg.Workload.OnlineUsers != 100 || cfg.Workload.BootstrapLoginsPerSecond != 100 || cfg.Workload.NewUsersPerDay != 250_000 || cfg.Workload.SendRatePerSecond != 100 {
 		t.Fatalf("core workload = %+v", cfg.Workload)
 	}
 	if cfg.Workload.HotSet != (HotSetConfig{PersonChannels: 80, GroupChannels: 20}) {
@@ -65,7 +65,7 @@ func TestLocalConfigValid(t *testing.T) {
 	if !reflect.DeepEqual(cfg.Observation, wantObservation) {
 		t.Fatalf("observation = %+v, want %+v", cfg.Observation, wantObservation)
 	}
-	if cfg.Thresholds.MinimumDataFilesystemBytes != 10_000_000_000 || cfg.Thresholds.Timeline != (TimelineThresholds{Warmup: 10 * time.Minute, Checkpoint: 20 * time.Minute, Final: 30 * time.Minute}) {
+	if cfg.Thresholds.MinimumDataFilesystemBytes != 10_000_000_000 || cfg.Thresholds.Resource.MinimumLoadFilesystemBytes != 10_000_000_000 || cfg.Thresholds.Timeline != (TimelineThresholds{Warmup: 10 * time.Minute, Checkpoint: 20 * time.Minute, Final: 30 * time.Minute}) {
 		t.Fatalf("local thresholds = %+v", cfg.Thresholds)
 	}
 	if err := cfg.Validate(); err != nil {
@@ -83,6 +83,26 @@ func TestRehearsalConfigChangesOnlyRunIdentityAndEvidenceStage(t *testing.T) {
 	formal.Stage, rehearsal.Stage = "", ""
 	if !reflect.DeepEqual(formal, rehearsal) {
 		t.Fatal("rehearsal changed the reviewed formal workload or thresholds")
+	}
+}
+
+func TestRehearsalRunDurationOverrideIsBoundedAndStageSpecific(t *testing.T) {
+	cfg := RehearsalConfig()
+	cfg.RunDuration = 72*time.Hour + 15*time.Minute
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("72h15m rehearsal override rejected: %v", err)
+	}
+	if got := cfg.measuredDuration(); got != 72*time.Hour+15*time.Minute {
+		t.Fatalf("measured duration = %v", got)
+	}
+	cfg.RunDuration = 72*time.Hour + 15*time.Minute + time.Second
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("oversized rehearsal override accepted")
+	}
+	cfg = FormalConfig()
+	cfg.RunDuration = time.Hour
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("formal run accepted a direct rehearsal duration override")
 	}
 }
 
@@ -113,7 +133,7 @@ func TestLifecycleDistributionUsesNamedClasses(t *testing.T) {
 func TestFormalConfigDefaults(t *testing.T) {
 	cfg := FormalConfig()
 
-	if cfg.Workload.Workers != 3 || cfg.Workload.OnlineUsers != 10_000 || cfg.Workload.BootstrapLoginsPerSecond != 25 || cfg.Workload.NewUsersPerDay != 250_000 || cfg.Workload.SendRatePerSecond != 2_000 {
+	if cfg.Workload.Workers != 3 || cfg.Workload.OnlineUsers != 10_000 || cfg.Workload.BootstrapLoginsPerSecond != 100 || cfg.Workload.NewUsersPerDay != 250_000 || cfg.Workload.SendRatePerSecond != 2_000 {
 		t.Fatalf("core workload = %+v", cfg.Workload)
 	}
 	if cfg.Workload.Traffic.PersonPercent != 90 || cfg.Workload.Traffic.GroupPercent != 10 || cfg.Workload.HotSet.PersonChannels != 8_000 || cfg.Workload.HotSet.GroupChannels != 2_000 {
@@ -160,7 +180,7 @@ func TestFormalConfigDefaults(t *testing.T) {
 	if cfg.Thresholds.MinimumDataFilesystemBytes != 500_000_000_000 || cfg.Thresholds.DiskSafeStopFreePercent != 5 {
 		t.Fatalf("disk thresholds = %+v", cfg.Thresholds)
 	}
-	if cfg.Thresholds.Cluster.HealthPollEvery != 5*time.Second || cfg.Thresholds.Cluster.UnhealthyFailAfter != 30*time.Second || cfg.Thresholds.Cluster.LeaderImbalancePercent != 20 || cfg.Thresholds.Cluster.LeaderImbalanceFor != 10*time.Minute {
+	if cfg.Thresholds.Cluster.HealthPollEvery != 5*time.Second || cfg.Thresholds.Cluster.UnhealthyFailAfter != 30*time.Second || cfg.Thresholds.Cluster.MaxHotReplicaLagEntries != 64 || cfg.Thresholds.Cluster.LeaderImbalancePercent != 20 || cfg.Thresholds.Cluster.LeaderImbalanceFor != 10*time.Minute {
 		t.Fatalf("cluster thresholds = %+v", cfg.Thresholds.Cluster)
 	}
 	if cfg.Thresholds.Timeline.Warmup != 2*time.Hour || cfg.Thresholds.Timeline.Checkpoint != 24*time.Hour || cfg.Thresholds.Timeline.Final != 72*time.Hour {
@@ -172,10 +192,10 @@ func TestFormalConfigDefaults(t *testing.T) {
 	if cfg.Thresholds.Correctness.OverallFirstAttemptFailure != (FailureRateLimit{MaxFailures: 1, PerAttempts: 10_000, Operator: ComparisonLessThan}) || cfg.Thresholds.Correctness.AnyMinuteFirstAttemptFailure != (FailureRateLimit{MaxFailures: 1, PerAttempts: 1_000, Operator: ComparisonLessOrEqual}) {
 		t.Fatalf("failure limits = %+v", cfg.Thresholds.Correctness)
 	}
-	if cfg.Thresholds.Latency.HotSendACK != (LatencyLimit{P99: 200 * time.Millisecond, P999: time.Second}) || cfg.Thresholds.Latency.Cold != (LatencyLimit{P99: 2 * time.Second, P999: 5 * time.Second}) || cfg.Thresholds.Latency.Sync != (LatencyLimit{P99: time.Second, P999: 3 * time.Second}) || cfg.Thresholds.Latency.SingleAnomaly != 10*time.Second || cfg.Thresholds.Latency.SustainedBreachWindow != 5*time.Minute {
+	if cfg.Thresholds.Latency.HotSendACK != (LatencyLimit{P99: 400 * time.Millisecond, P999: time.Second}) || cfg.Thresholds.Latency.Cold != (LatencyLimit{P99: 2 * time.Second, P999: 5 * time.Second}) || cfg.Thresholds.Latency.Sync != (LatencyLimit{P99: time.Second, P999: 3 * time.Second}) || cfg.Thresholds.Latency.SingleAnomaly != 10*time.Second || cfg.Thresholds.Latency.SustainedBreachWindow != 5*time.Minute {
 		t.Fatalf("latency = %+v", cfg.Thresholds.Latency)
 	}
-	if cfg.Thresholds.Resource.ForcedGCLiveHeapGrowthPercent != 5 || cfg.Thresholds.Resource.ForcedGCLiveHeapWindow != 6*time.Hour || cfg.Thresholds.Resource.GoroutineGrowthPercent != 5 || cfg.Thresholds.Resource.GoroutineGrowthWindow != 24*time.Hour {
+	if cfg.Thresholds.Resource.ForcedGCLiveHeapGrowthPercent != 5 || cfg.Thresholds.Resource.ForcedGCLiveHeapWindow != 6*time.Hour || cfg.Thresholds.Resource.GoroutineGrowthPercent != 5 || cfg.Thresholds.Resource.GoroutineGrowthWindow != 24*time.Hour || cfg.Thresholds.Resource.MinimumLoadFilesystemBytes != 200_000_000_000 || cfg.Thresholds.Resource.PrometheusSafeStopBytes != 140_000_000_000 {
 		t.Fatalf("resource = %+v", cfg.Thresholds.Resource)
 	}
 	if cfg.Capacity.StartRatePerSecond != 2_000 || cfg.Capacity.RecoveryRatePerSecond != 2_000 || cfg.Capacity.StepPercent != 25 || cfg.Capacity.RefinePercent != 10 || cfg.Capacity.Step.Stabilize != 10*time.Minute || cfg.Capacity.Step.Measure != 20*time.Minute || cfg.Capacity.RecoveryDuration != 30*time.Minute {

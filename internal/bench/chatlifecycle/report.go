@@ -14,7 +14,7 @@ import (
 
 const (
 	// ReportSchemaVersion identifies the persisted JSON and Markdown contract.
-	ReportSchemaVersion = "wukongim/chat-lifecycle-report/v3"
+	ReportSchemaVersion = "wukongim/chat-lifecycle-report/v5"
 	// ReportThresholdVersion binds reports to the reviewed exact threshold semantics.
 	ReportThresholdVersion = "wukongim/chat-lifecycle-thresholds/v1"
 	// ReportDesignProfile identifies the approved lifecycle-soak design baseline.
@@ -75,6 +75,8 @@ type ReportFence struct {
 }
 
 // ReportTimeWindow binds one checkpoint to the same process-lifetime interval.
+// Start and End are wall-clock audit timestamps; Elapsed is the process-local
+// monotonic duration captured before the timestamps are serialized.
 type ReportTimeWindow struct {
 	Start           time.Time     `json:"start"`
 	WarmupEnd       time.Time     `json:"warmup_end"`
@@ -103,13 +105,17 @@ type ReportWorkerGeneration struct {
 
 // ReportLatencyEvidence combines bounded worker histograms with verdict-window evidence.
 type ReportLatencyEvidence struct {
-	SendACK      WorkerHistogramSnapshot `json:"sendack"`
-	ReceiveACK   WorkerHistogramSnapshot `json:"receive_ack"`
-	FullSync     WorkerHistogramSnapshot `json:"full_sync"`
-	Warnings     ReportLatencyWarnings   `json:"warnings"`
-	AnomalyCount uint64                  `json:"anomaly_count"`
-	Anomalies    []ReportLatencyAnomaly  `json:"anomalies,omitempty"`
-	Retention    ReportWindowRetention   `json:"retention"`
+	HotSendACK                   WorkerHistogramSnapshot `json:"hot_sendack"`
+	ColdFirstCreateSendACK       WorkerHistogramSnapshot `json:"cold_first_create_sendack"`
+	WorkerLifecycleReheatSendACK WorkerHistogramSnapshot `json:"worker_lifecycle_reheat_sendack"`
+	ReceiveACK                   WorkerHistogramSnapshot `json:"receive_ack"`
+	SendPendingToWrite           WorkerHistogramSnapshot `json:"send_pending_to_write"`
+	SendWriteToACK               WorkerHistogramSnapshot `json:"send_write_to_ack"`
+	FullSync                     WorkerHistogramSnapshot `json:"full_sync"`
+	Warnings                     ReportLatencyWarnings   `json:"warnings"`
+	AnomalyCount                 uint64                  `json:"anomaly_count"`
+	Anomalies                    []ReportLatencyAnomaly  `json:"anomalies,omitempty"`
+	Retention                    ReportWindowRetention   `json:"retention"`
 }
 
 // ReportLatencyWarnings is the tagged fixed warning projection.
@@ -286,9 +292,11 @@ type Report struct {
 	Profile       Profile          `json:"profile"`
 	Mode          Mode             `json:"mode"`
 	Stage         Stage            `json:"stage"`
-	Kind          CheckpointKind   `json:"kind"`
-	Final         bool             `json:"final"`
-	Continue      bool             `json:"continue"`
+	// RunDuration records the trusted direct-rehearsal override; zero retains the reviewed stage duration.
+	RunDuration time.Duration  `json:"run_duration,omitempty"`
+	Kind        CheckpointKind `json:"kind"`
+	Final       bool           `json:"final"`
+	Continue    bool           `json:"continue"`
 	// Continuous marks an in-process formal-chain boundary whose worker fence
 	// remains live. It is not authorization to resume from this report.
 	Continuous             bool                            `json:"continuous"`
@@ -398,11 +406,11 @@ func validateReport(report Report) error {
 		validateThresholds(report.Thresholds) != nil ||
 		(report.Profile != ProfileFormal && report.Profile != ProfileLocal) ||
 		(report.Mode != ModeSoak && report.Mode != ModeCapacity) ||
-		!validReportStage(report) ||
+		!validReportStage(report) || !validReportRunDuration(report) ||
 		(report.Kind != CheckpointQualification && report.Kind != CheckpointFinal) ||
 		!validReportHash(report.Fence.RunHash) || !validReportHash(report.Fence.AssignmentHash) ||
 		report.Fence.Generation == 0 || report.Window.Start.IsZero() || report.Window.End.Before(report.Window.Start) ||
-		report.Window.Elapsed != report.Window.End.Sub(report.Window.Start) ||
+		report.Window.Elapsed < 0 ||
 		report.MinimumWorkerUptime < report.Window.Elapsed ||
 		!report.Window.WarmupEnd.Equal(report.Window.Start.Add(report.Thresholds.Timeline.Warmup)) ||
 		!report.Window.QualificationAt.Equal(report.Window.Start.Add(report.Thresholds.Timeline.Checkpoint)) ||
@@ -413,7 +421,12 @@ func validateReport(report Report) error {
 		len(report.Samples) > maxReportSamples || !validReportVerdict(report) || !validReportCapacity(report.Capacity) ||
 		!validReportCapacityResources(report.Resources.Capacity) ||
 		!validMetaCreateAccountingSnapshot(report.MetaCreate) || !validMetaCreateVerdict(report.MetaCreate, report.Verdict) ||
-		!validCoordinatorHistogram(report.Latency.SendACK) || !validCoordinatorHistogram(report.Latency.ReceiveACK) ||
+		!validCoordinatorHistogram(report.Latency.HotSendACK) ||
+		!validCoordinatorHistogram(report.Latency.ColdFirstCreateSendACK) ||
+		!validCoordinatorHistogram(report.Latency.WorkerLifecycleReheatSendACK) ||
+		!validCoordinatorHistogram(report.Latency.ReceiveACK) ||
+		!validCoordinatorHistogram(report.Latency.SendPendingToWrite) ||
+		!validCoordinatorHistogram(report.Latency.SendWriteToACK) ||
 		!validCoordinatorHistogram(report.Latency.FullSync) || !validCoordinatorHistogram(report.Lifecycle.ReheatLatency) {
 		return ErrReportInvalid
 	}
@@ -557,7 +570,7 @@ func validReportVerdict(report Report) bool {
 		report.Verdict.Outcome == VerdictPassedWithCapacityWarning || report.Verdict.Cause == VerdictCauseCompleted ||
 		report.Verdict.Cause == VerdictCauseRehearsalCompleted || report.Verdict.Cause == VerdictCauseInfrastructureCapacity {
 		if !validSuccessfulVerdictPair(report.Verdict.Outcome, report.Verdict.Cause) || report.Kind != CheckpointFinal ||
-			(report.Mode == ModeSoak && report.Window.End.Before(report.Window.FinalAt)) ||
+			(report.Mode == ModeSoak && report.Window.Elapsed < reportMeasuredDuration(report)) ||
 			(report.Verdict.Outcome == VerdictPass && report.Stage != StageFormal) ||
 			(report.Verdict.Outcome == VerdictRehearsalPass && report.Stage != StageRehearsal) {
 			return false
@@ -723,7 +736,18 @@ func validReportStage(report Report) bool {
 	}
 }
 
+func validReportRunDuration(report Report) bool {
+	if report.RunDuration == 0 {
+		return true
+	}
+	return report.Stage == StageRehearsal &&
+		report.RunDuration >= minDirectRunDuration && report.RunDuration <= maxDirectRunDuration
+}
+
 func reportMeasuredDuration(report Report) time.Duration {
+	if report.Stage == StageRehearsal && report.RunDuration > 0 {
+		return report.RunDuration
+	}
 	if report.Stage == StageRehearsal {
 		return rehearsalDuration
 	}

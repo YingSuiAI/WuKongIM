@@ -12,23 +12,35 @@ initial_slot_count = 10
 # Stable physical hash-slot fence count used to route keys to logical Slot Raft Groups.
 hash_slot_count = 256
 slot_replica_n = 1
+# Slot Raft ticks every 50ms. Heartbeats are sent every two ticks (100ms),
+# while elections start after at least 40 ticks (2s, randomized by Raft).
+# This leaves headroom for bounded storage and RPC tail latency without slowing
+# ordinary proposal replication; set all three values together when tuning.
+slot_tick_interval = "50ms"
+slot_heartbeat_tick = 2
+slot_election_tick = 40
 node_health_report_interval = "5s"
 node_health_report_ttl = "30s"
+# Reactor partitions remain CPU-aware. The blocking pools below use the
+# qualified sustained 2,000 SEND/s, three-replica runtime profile.
 channel_reactor_count = 0
-channel_store_append_workers = 0
-channel_store_apply_workers = 0
-# Bounds blocking replication RPC work. The 160-worker default avoids the scheduler
-# and allocation overhead observed with oversized pools while retaining burst headroom.
-channel_rpc_workers = 160
+channel_store_append_workers = 128
+channel_store_apply_workers = 8
+# Bounds blocking replication RPC work. The 96-worker default preserves measured
+# 2,000 SEND/s headroom without oversized-pool scheduler and allocation overhead.
+channel_rpc_workers = 96
 # Maximum same-target Pull or PullHint items coalesced into one bounded
-# replication transport call. Zero uses the runtime default.
-channel_rpc_batch_max_items = 16
+# replication transport call. The qualified default is eight items.
+channel_rpc_batch_max_items = 8
 max_channels = 0
 channel_append_batch_max_records = 0
 channel_append_batch_max_wait = "0"
 channel_follower_recovery_probe_interval = "2s"
 channel_follower_recovery_probe_jitter = "1s"
-commit_coordinator_flush_window = "200us"
+# Maximum time to collect adjacent durable commit requests. The measured
+# 500us default favors low caller latency and is also the reviewed three-node
+# cluster profile value at sustained write rates.
+commit_coordinator_flush_window = "500us"
 commit_coordinator_max_requests = 0
 commit_coordinator_max_records = 0
 commit_coordinator_max_bytes = 0
@@ -119,9 +131,11 @@ format = "console"
 
 [gateway]
 listeners = [{ name = "tcp-wkproto", network = "tcp", address = "0.0.0.0:5100", transport = "gnet", protocol = "wkproto" }, { name = "ws-gateway", network = "websocket", address = "0.0.0.0:5200", transport = "gnet", protocol = "wsmux" }]
+# Four multicore event loops and 1,000 bounded async SEND workers are the
+# qualified profile; the queue remains capped at 131,072 frames.
 gnet_multicore = true
-gnet_num_event_loop = 0
-runtime_async_send_workers = 128
+gnet_num_event_loop = 4
+runtime_async_send_workers = 1000
 runtime_async_send_queue_capacity = 131072
 runtime_async_auth_workers = 16
 runtime_async_auth_queue_capacity = 8192
@@ -160,7 +174,7 @@ event_queue_size = 1024
 # Number of stable Channel-order delivery shards processed concurrently by this node.
 # Plans for one Channel stay FIFO on one shard; different Channels may run in parallel.
 # This is independent from channel_append.recipient_authority_dispatch_concurrency.
-recipient_worker_concurrency = 100
+recipient_worker_concurrency = 320
 
 [channel_append]
 shard_count = 0

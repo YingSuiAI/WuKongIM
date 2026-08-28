@@ -134,7 +134,7 @@ test("renders summary and pressure rows", async () => {
   getRuntimeWorkqueuesMock.mockResolvedValue(workqueueResponse)
   renderPage()
   expect(await screen.findByRole("heading", { name: "Workqueue Monitor" })).toBeInTheDocument()
-  expect(screen.getByText("degraded")).toBeInTheDocument()
+  expect(screen.getByText("Degraded")).toBeInTheDocument()
   expect(screen.getAllByText("gateway").length).toBeGreaterThan(0)
   expect(screen.getByText("async_send")).toBeInTheDocument()
   expect(screen.getByText("82 / 100")).toBeInTheDocument()
@@ -144,6 +144,17 @@ test("renders summary and pressure rows", async () => {
   expect(screen.getByText("0.30/s")).toBeInTheDocument()
 })
 
+test("renders consistent Chinese workqueue terminology", async () => {
+  localStorage.setItem("wukongim_manager_locale", "zh-CN")
+  getRuntimeWorkqueuesMock.mockResolvedValue(workqueueResponse)
+
+  renderPage()
+
+  expect(await screen.findByRole("heading", { name: "工作队列监控" })).toBeInTheDocument()
+  expect(screen.getByRole("option", { name: "当前管理节点" })).toBeInTheDocument()
+  expect(screen.queryByText(/Workqueue|worker/)).not.toBeInTheDocument()
+})
+
 test("uses an editorial workqueue toolbar status strip and named table", async () => {
   getRuntimeWorkqueuesMock.mockResolvedValue(workqueueResponse)
   renderPage()
@@ -151,6 +162,7 @@ test("uses an editorial workqueue toolbar status strip and named table", async (
   const toolbar = await screen.findByTestId("workqueues-query-toolbar")
   expect(toolbar).toHaveClass("rounded-lg", "border", "border-border", "bg-card", "p-3")
   expect(within(toolbar).getByLabelText("Node")).toBeInTheDocument()
+  expect(within(toolbar).getByRole("option", { name: "Current manager node" })).toBeInTheDocument()
   expect(within(toolbar).getByLabelText("Window")).toBeInTheDocument()
   expect(within(toolbar).getByLabelText("Component")).toBeInTheDocument()
 
@@ -160,7 +172,8 @@ test("uses an editorial workqueue toolbar status strip and named table", async (
 
   const statusStrip = screen.getByTestId("workqueues-status-strip")
   expect(statusStrip).toHaveClass("grid", "border", "border-border")
-  expect(within(statusStrip).getByText("degraded overall")).toBeInTheDocument()
+  expect(within(statusStrip).getByText("Degraded overall")).toBeInTheDocument()
+  expect(within(screen.getByTestId("workqueues-metadata-row")).getByText("Showing 1 of 2 rows")).toBeInTheDocument()
 
   const table = screen.getByRole("table", { name: "Workqueue Monitor" })
   const surface = table.closest("[data-workqueues-surface='inventory']")
@@ -205,6 +218,7 @@ test("renders API-provided operator-facing service labels", async () => {
 
   expect(await screen.findByText("slot propose")).toBeInTheDocument()
   expect(screen.getByText("inflight")).toBeInTheDocument()
+  fireEvent.click(screen.getByLabelText("Abnormal only"))
   expect(screen.getByText("service")).toBeInTheDocument()
   expect(await screen.findByText("controller raft")).toBeInTheDocument()
 })
@@ -235,19 +249,21 @@ test("renders component option labels without a hard-coded suffix", async () => 
   expect(within(component).queryByRole("option", { name: "db component" })).not.toBeInTheDocument()
 })
 
-test("filters ok rows when abnormal only is enabled", async () => {
+test("shows abnormal rows by default and lets operators include healthy rows", async () => {
   getRuntimeWorkqueuesMock.mockResolvedValue(workqueueResponse)
   renderPage()
-  expect(await screen.findByText("message_commit")).toBeInTheDocument()
-  fireEvent.click(screen.getByLabelText("Abnormal only"))
+  expect(await screen.findByText("async_send")).toBeInTheDocument()
+  expect(screen.getByLabelText("Abnormal only")).toBeChecked()
   expect(screen.queryByText("message_commit")).not.toBeInTheDocument()
-  expect(screen.getByText("async_send")).toBeInTheDocument()
+  fireEvent.click(screen.getByLabelText("Abnormal only"))
+  expect(screen.getByText("message_commit")).toBeInTheDocument()
 })
 
 test("filters rows by component", async () => {
   getRuntimeWorkqueuesMock.mockResolvedValue(workqueueResponse)
   renderPage()
   const component = await screen.findByLabelText("Component")
+  fireEvent.click(screen.getByLabelText("Abnormal only"))
   fireEvent.change(component, { target: { value: "db" } })
   expect(screen.getByText("message_commit")).toBeInTheDocument()
   expect(screen.queryByText("async_send")).not.toBeInTheDocument()

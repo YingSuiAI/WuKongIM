@@ -51,17 +51,18 @@ var (
 type RuntimeFailureCode string
 
 const (
-	RuntimeFailureRetryQueueSaturated       RuntimeFailureCode = "retry_queue_saturated"
-	RuntimeFailureEngineQueueSaturated      RuntimeFailureCode = "engine_queue_saturated"
-	RuntimeFailureEngineCPUSaturated        RuntimeFailureCode = "engine_cpu_saturated"
-	RuntimeFailureInflightSaturated         RuntimeFailureCode = "engine_inflight_saturated"
-	RuntimeFailureLoginSaturated            RuntimeFailureCode = "session_login_saturated"
-	RuntimeFailureUnderDelivery             RuntimeFailureCode = "offered_load_under_delivery"
-	RuntimeFailureSchedulerCPUSaturated     RuntimeFailureCode = "session_scheduler_cpu_saturated"
-	RuntimeFailureClockMovedBackwards       RuntimeFailureCode = "engine_clock_moved_backwards"
-	RuntimeFailureLifecycleFenceExhausted   RuntimeFailureCode = "lifecycle_fence_exhausted"
-	RuntimeFailureLifecycleLeaseInvalidated RuntimeFailureCode = "lifecycle_lease_invalidated"
-	RuntimeFailureLifecycleReplaySaturated  RuntimeFailureCode = "lifecycle_replay_saturated"
+	RuntimeFailureRetryQueueSaturated         RuntimeFailureCode = "retry_queue_saturated"
+	RuntimeFailureEngineQueueSaturated        RuntimeFailureCode = "engine_queue_saturated"
+	RuntimeFailureEngineCPUSaturated          RuntimeFailureCode = "engine_cpu_saturated"
+	RuntimeFailureInflightSaturated           RuntimeFailureCode = "engine_inflight_saturated"
+	RuntimeFailureLoginSaturated              RuntimeFailureCode = "session_login_saturated"
+	RuntimeFailureUnderDelivery               RuntimeFailureCode = "offered_load_under_delivery"
+	RuntimeFailureSchedulerCPUSaturated       RuntimeFailureCode = "session_scheduler_cpu_saturated"
+	RuntimeFailureClockMovedBackwards         RuntimeFailureCode = "engine_clock_moved_backwards"
+	RuntimeFailureLifecycleFenceExhausted     RuntimeFailureCode = "lifecycle_fence_exhausted"
+	RuntimeFailureLifecycleLeaseInvalidated   RuntimeFailureCode = "lifecycle_lease_invalidated"
+	RuntimeFailureLifecycleReplaySaturated    RuntimeFailureCode = "lifecycle_replay_saturated"
+	RuntimeFailureTransportAdmissionSaturated RuntimeFailureCode = "transport_admission_saturated"
 )
 
 // RuntimeError is redacted worker-runtime evidence with harness ownership.
@@ -76,7 +77,7 @@ func validRuntimeFailureCode(code RuntimeFailureCode) bool {
 		RuntimeFailureLoginSaturated, RuntimeFailureUnderDelivery,
 		RuntimeFailureSchedulerCPUSaturated, RuntimeFailureClockMovedBackwards,
 		RuntimeFailureLifecycleFenceExhausted, RuntimeFailureLifecycleLeaseInvalidated,
-		RuntimeFailureLifecycleReplaySaturated:
+		RuntimeFailureLifecycleReplaySaturated, RuntimeFailureTransportAdmissionSaturated:
 		return true
 	default:
 		return false
@@ -134,6 +135,16 @@ type TrafficIntent struct {
 	// MetaCreateCandidate marks the one deterministic initial SEND whose
 	// successful SENDACK closes this person channel's expected unique create.
 	MetaCreateCandidate bool
+	// ColdAttempt keeps every SEND on an ACK-unproven person channel inside the
+	// cold observation bound without counting it as another metadata create.
+	ColdAttempt bool
+	// correlationRecipient is the exact online witness whose session remains
+	// routable until this sampled SEND is observed or its delivery deadline
+	// expires. It is empty for the other ninety-nine percent of traffic.
+	correlationRecipient string
+	// lifecycleTimerToken binds initial revisit-channel activity to the exact
+	// live timer whose candidate fence it may advance. Other traffic keeps zero.
+	lifecycleTimerToken uint64
 }
 
 // TrafficTickSnapshot is one streaming aggregate; it never retains intents.
@@ -295,8 +306,11 @@ func (g *TrafficGenerator) ApplyGrant(released uint64, emit func(TrafficIntent) 
 	return snapshot, nil
 }
 
-// NextCanary emits at most one due very-large-group probe. Calling it again at
-// the same instant cannot duplicate the minute; catch-up remains caller paced.
+// NextCanary peeks at most one due very-large-group probe. The owner commits it
+// only after successful admission, so a temporary roster gap can
+// retry the same correctness identity without interrupting primary traffic.
+// Non-owner workers consume the shared cadence immediately because they never
+// route the fixed canary group.
 func (g *TrafficGenerator) NextCanary(now time.Time) (TrafficIntent, bool, error) {
 	if g.nextCanary.IsZero() || now.Before(g.nextCanary) {
 		return TrafficIntent{}, false, nil
@@ -322,13 +336,32 @@ func (g *TrafficGenerator) NextCanary(now time.Time) (TrafficIntent, bool, error
 		Logical: LogicalSend{LogicalSend: logicalOrdinal, WorkerID: uint32(workerID), Kind: TrafficGroup}, Kind: TrafficGroup,
 		ChannelID: group.ID, GroupCategory: GroupVeryLarge, PayloadBytes: payloadBytes, Canary: true, Domain: LogicalDomainCanary,
 	}
-	g.canaryOrdinal++
-	g.nextCanary = g.nextCanary.Add(canary.Every)
 	if workerID != g.workerID {
+		g.advanceCanary(canary.Every, false)
 		return TrafficIntent{}, false, nil
 	}
-	g.snapshot.Canaries++
 	return intent, true, nil
+}
+
+// commitCanary advances one owner-routed canary only after it owns engine work.
+func (g *TrafficGenerator) commitCanary() error {
+	if g == nil || g.nextCanary.IsZero() {
+		return errTrafficGeneratorConfig
+	}
+	canary, err := g.catalog.VeryLargeCanary(g.canaryOrdinal)
+	if err != nil {
+		return err
+	}
+	g.advanceCanary(canary.Every, true)
+	return nil
+}
+
+func (g *TrafficGenerator) advanceCanary(every time.Duration, count bool) {
+	g.canaryOrdinal++
+	g.nextCanary = g.nextCanary.Add(every)
+	if count {
+		g.snapshot.Canaries++
+	}
 }
 
 // Snapshot returns a constant-size copy.
