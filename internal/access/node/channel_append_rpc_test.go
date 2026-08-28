@@ -246,7 +246,7 @@ func TestChannelAppendClientMapsStatusesAndErrorsToItemAlignedResults(t *testing
 		{name: "transport canceled", node: &fakeChannelAppendRPCNode{err: transport.ErrCanceled}, wantIs: context.Canceled},
 		{name: "transport timeout", node: &fakeChannelAppendRPCNode{err: transport.ErrTimeout}, wantIs: context.DeadlineExceeded},
 		{name: "transport dial failed", node: &fakeChannelAppendRPCNode{err: fmt.Errorf("%w: connection refused", transport.ErrDialFailed)}, wantIs: channelappend.ErrRouteNotReady, wantUnavailable: true},
-		{name: "transport node not found", node: &fakeChannelAppendRPCNode{err: transport.ErrNodeNotFound}, wantIs: channelappend.ErrRouteNotReady, wantUnavailable: true},
+		{name: "transport node not found", node: &fakeChannelAppendRPCNode{err: transport.ErrNodeNotFound}, wantIs: channelappend.ErrRouteNotReady},
 		{name: "transport stopped", node: &fakeChannelAppendRPCNode{err: transport.ErrStopped}, wantIs: channelappend.ErrAppendOutcomeUnknown},
 		{name: "remote transport stopped", node: &fakeChannelAppendRPCNode{err: transport.RemoteError{Code: transport.RemoteErrorCodeGeneric, Message: transport.ErrStopped.Error()}}, wantIs: channelappend.ErrAppendOutcomeUnknown},
 		{name: "transport connection reset", node: &fakeChannelAppendRPCNode{err: channelAppendNetOpError(syscall.ECONNRESET)}, wantIs: channelappend.ErrAppendOutcomeUnknown},

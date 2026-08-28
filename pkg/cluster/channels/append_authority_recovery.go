@@ -51,6 +51,14 @@ type ForegroundAppendAuthorityRecovery struct {
 	planFIFO []appendRecoveryPlanKey
 }
 
+type currentAppendAuthorityState uint8
+
+const (
+	currentAppendAuthorityUnknown currentAppendAuthorityState = iota
+	currentAppendAuthorityUsable
+	currentAppendAuthorityUnavailable
+)
+
 // NewForegroundAppendAuthorityRecovery creates a bounded foreground recovery seam.
 func NewForegroundAppendAuthorityRecovery(source AppendAuthorityRecoverySource, store *MigrationStore) *ForegroundAppendAuthorityRecovery {
 	var recoveryStore appendAuthorityRecoveryStore
@@ -91,8 +99,14 @@ func (r *ForegroundAppendAuthorityRecovery) EnsureAppendAuthorityRecovery(ctx co
 		if err != nil {
 			return AppendAuthorityRecoveryPending, err
 		}
-		if r.currentLeaderUsable(recoveryCtx, snapshot, meta) {
+		switch r.currentLeaderState(recoveryCtx, snapshot, meta) {
+		case currentAppendAuthorityUsable:
 			return AppendAuthorityRecoveryCurrent, nil
+		case currentAppendAuthorityUnknown:
+			// A schedulable leader whose probe has an indeterminate transport
+			// outcome is not death evidence. Let bounded foreground retries and
+			// the control-plane health view establish the next fact.
+			return AppendAuthorityRecoveryPending, nil
 		}
 		req, err = r.plan(recoveryCtx, snapshot, meta)
 		if err != nil {
@@ -107,9 +121,9 @@ func (r *ForegroundAppendAuthorityRecovery) EnsureAppendAuthorityRecovery(ctx co
 	return AppendAuthorityRecoveryPending, err
 }
 
-func (r *ForegroundAppendAuthorityRecovery) currentLeaderUsable(ctx context.Context, snapshot control.Snapshot, meta ch.Meta) bool {
+func (r *ForegroundAppendAuthorityRecovery) currentLeaderState(ctx context.Context, snapshot control.Snapshot, meta ch.Meta) currentAppendAuthorityState {
 	if !appendRecoveryNodeSchedulable(snapshot.Nodes, uint64(meta.Leader)) {
-		return false
+		return currentAppendAuthorityUnavailable
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, foregroundCandidateProbeTimeout)
 	probe, err := r.source.ProbeChannelReplica(probeCtx, uint64(meta.Leader), runtimeMetaFromAppendMeta(meta))
@@ -118,13 +132,19 @@ func (r *ForegroundAppendAuthorityRecovery) currentLeaderUsable(ctx context.Cont
 		// An empty new Channel has no durable authority identity yet. A direct
 		// not-found response from its current, schedulable leader still proves
 		// that the authority node is reachable and can perform first install.
-		return ch.ErrorMatches(err, ch.ErrChannelNotFound)
+		if ch.ErrorMatches(err, ch.ErrChannelNotFound) {
+			return currentAppendAuthorityUsable
+		}
+		return currentAppendAuthorityUnknown
 	}
-	return probe.ChannelID == meta.ID &&
+	if probe.ChannelID == meta.ID &&
 		probe.ChannelEpoch == meta.Epoch &&
 		probe.LeaderEpoch == meta.LeaderEpoch &&
 		probe.Role == ch.RoleLeader &&
-		probe.Status == ch.StatusActive
+		probe.Status == ch.StatusActive {
+		return currentAppendAuthorityUsable
+	}
+	return currentAppendAuthorityUnavailable
 }
 
 func appendRecoveryNodeSchedulable(nodes []control.Node, nodeID uint64) bool {

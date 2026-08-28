@@ -77,6 +77,7 @@ func TestServiceHealthyFailedMarkerClearsAndReusesCurrentAuthority(t *testing.T)
 	require.NoError(t, err)
 	require.Equal(t, meta, got)
 	require.Len(t, recovery.metas, 1, "confirmed current authority must clear the exact failed marker")
+	require.Equal(t, 2, source.ensureCalls, "confirmed current authority must be restored to the hot cache")
 }
 
 func TestForegroundAppendAuthorityRecoveryReusesExactCreateCommandAfterUncertainResult(t *testing.T) {
@@ -176,6 +177,25 @@ func TestForegroundAppendAuthorityRecoveryKeepsReachableEmptyCurrentLeader(t *te
 	require.Empty(t, store.requests)
 }
 
+func TestForegroundAppendAuthorityRecoveryDoesNotMigrateOnIndeterminateCurrentLeaderProbe(t *testing.T) {
+	id := ch.ChannelID{ID: "indeterminate-current-leader", Type: 1}
+	meta := ch.Meta{Key: ch.ChannelKeyForID(id), ID: id, Epoch: 1, LeaderEpoch: 1, RouteGeneration: 1, Leader: 4, Replicas: []ch.NodeID{1, 3, 4}, ISR: []ch.NodeID{1, 3, 4}, MinISR: 2, Status: ch.StatusActive}
+	source := &foregroundRecoverySourceFake{
+		snapshot:  control.Snapshot{Nodes: failoverHealthyNodes(1, 3, 4)},
+		probes:    map[uint64]ch.RuntimeProbeChannel{},
+		probeErrs: map[uint64]error{4: errors.New("temporary discovery miss")},
+	}
+	store := &foregroundRecoveryStoreFake{}
+	recovery := &ForegroundAppendAuthorityRecovery{source: source, store: store, now: time.Now}
+
+	disposition, err := recovery.EnsureAppendAuthorityRecovery(context.Background(), meta)
+
+	require.NoError(t, err)
+	require.Equal(t, AppendAuthorityRecoveryPending, disposition)
+	require.Equal(t, []uint64{4}, source.probeCalls)
+	require.Empty(t, store.requests, "indeterminate leader probe must not create durable failover")
+}
+
 type recordingAppendAuthorityRecovery struct {
 	metas       []ch.Meta
 	disposition AppendAuthorityRecoveryDisposition
@@ -189,6 +209,7 @@ func (r *recordingAppendAuthorityRecovery) EnsureAppendAuthorityRecovery(_ conte
 type foregroundRecoverySourceFake struct {
 	snapshot          control.Snapshot
 	probes            map[uint64]ch.RuntimeProbeChannel
+	probeErrs         map[uint64]error
 	snapshotCalls     int
 	probeCalls        []uint64
 	runtimeProbeCalls int
@@ -206,6 +227,9 @@ func (s *foregroundRecoverySourceFake) ControlSnapshot(context.Context) (control
 
 func (s *foregroundRecoverySourceFake) ProbeChannelReplica(_ context.Context, nodeID uint64, _ metadb.ChannelRuntimeMeta) (ch.RuntimeProbeChannel, error) {
 	s.probeCalls = append(s.probeCalls, nodeID)
+	if err := s.probeErrs[nodeID]; err != nil {
+		return ch.RuntimeProbeChannel{}, err
+	}
 	probe, ok := s.probes[nodeID]
 	if !ok {
 		return ch.RuntimeProbeChannel{}, ch.ErrChannelNotFound

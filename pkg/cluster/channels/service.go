@@ -405,7 +405,7 @@ func (s *Service) ResolveAppendAuthority(ctx context.Context, id ch.ChannelID) (
 			return ch.Meta{}, fmt.Errorf("%w: append authority recovery: %v", ch.ErrNotReady, err)
 		}
 		if disposition == AppendAuthorityRecoveryCurrent {
-			s.metaCache.clearFailedAuthority(id, meta)
+			s.metaCache.restoreCurrentAuthority(id, meta)
 			return meta, nil
 		}
 		// The current metadata still names the failed leader. Existing Router

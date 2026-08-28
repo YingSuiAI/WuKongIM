@@ -200,14 +200,18 @@ func (c *channelMetaCache) markAuthorityFailed(id ch.ChannelID, leader ch.NodeID
 	return c.markStaleLocked(id)
 }
 
-func (c *channelMetaCache) clearFailedAuthority(id ch.ChannelID, meta ch.Meta) bool {
+// restoreCurrentAuthority makes one exact, independently probed current
+// authority hot again. It cannot clear a stale marker for a concurrent version.
+func (c *channelMetaCache) restoreCurrentAuthority(id ch.ChannelID, meta ch.Meta) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	current, installed := c.items[id]
 	failed, ok := c.failed[id]
-	if !ok || !failed.matches(meta) {
+	if !installed || !ok || !sameCompleteAppendMeta(current, meta) || !failed.matches(meta) {
 		return false
 	}
 	delete(c.failed, id)
+	delete(c.stale, id)
 	return true
 }
 

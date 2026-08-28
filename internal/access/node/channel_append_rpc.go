@@ -156,6 +156,11 @@ func channelAppendRPCError(err error, attemptTimedOut bool) error {
 		return context.Canceled
 	case errors.Is(err, transport.ErrTimeout):
 		return context.DeadlineExceeded
+	case errors.Is(err, transport.ErrNodeNotFound):
+		// A missing local peer/discovery entry only means this ingress cannot
+		// currently route to the authority. It is not evidence that the
+		// authority itself is unavailable.
+		return fmt.Errorf("%w: %w", channelappend.ErrRouteNotReady, err)
 	case channelAppendTransportUnavailableBeforeSubmit(err):
 		return fmt.Errorf("%w: %w", channelappend.ErrAppendAuthorityUnavailable, err)
 	case channelAppendTransportOutcomeUnknown(err):
@@ -168,7 +173,6 @@ func channelAppendRPCError(err error, attemptTimedOut bool) error {
 func channelAppendTransportUnavailableBeforeSubmit(err error) bool {
 	switch {
 	case errors.Is(err, transport.ErrDialFailed),
-		errors.Is(err, transport.ErrNodeNotFound),
 		errors.Is(err, syscall.ECONNREFUSED):
 		return true
 	default:
