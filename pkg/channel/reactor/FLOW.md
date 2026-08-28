@@ -32,7 +32,9 @@ typed bounded workers and returns as `EventWorkerResult`.
    validate metadata/capacity, flush to workers, and apply fenced completions.
    Exact durable-quorum proposals flush immediately from the reactor; the
    MessageDB coordinator below this seam remains the physical group-commit
-   batching owner.
+   batching owner. When the durable owner binds a new server-allocated waiter
+   to an older pending proposal, the fenced completion carries the old records
+   through the machine so SENDACK identity matches durable storage.
 2. Leaders apply `AckOffset`, serve cached or stored pulls, and advance quorum;
    followers run one continuous pull/apply chain, return progress, checkpoint
    idle HW, and activate from hints only after authoritative bounded loading.

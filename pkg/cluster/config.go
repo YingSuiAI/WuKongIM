@@ -238,7 +238,7 @@ type ChannelMigrationConfig struct {
 	MaxPagesPerTick int
 	// MaxTasksPerTick caps repair tasks created per scanner tick.
 	MaxTasksPerTick int
-	// TaskLimit caps active migration tasks inspected by the executor per tick.
+	// TaskLimit caps runnable migration candidates returned to the executor per tick.
 	TaskLimit int
 }
 

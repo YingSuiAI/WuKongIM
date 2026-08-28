@@ -235,6 +235,120 @@ func TestQuorumLogRetriesSameImmutableRangeAfterLostDurabilityResponses(t *testi
 	}
 }
 
+func TestQuorumLogBindsServerAllocatedLogicalRetryToPendingProposal(t *testing.T) {
+	harness := newReplicaHarness(t, 1, 2, 3)
+	log, err := newQuorumLog(quorumLogConfig{
+		Local: 1, Store: harness.stores[1], Recovery: harness, Durability: harness,
+		RecoveryTimeout: time.Minute, RecoveryPageBytes: 64 << 10,
+		MaxChannels: 8, MaxVoters: 3, MaxProposalRecords: 256, MaxProposalBytes: 64 << 10, MaxRetainedCommands: 16,
+	})
+	if err != nil {
+		t.Fatalf("newQuorumLog() error = %v", err)
+	}
+	authority := Authority{
+		Key: "1:logical-retry", ChannelID: ch.ChannelID{ID: "logical-retry", Type: 1},
+		ID:     AuthorityID{ChannelEpoch: 3, LeaderTerm: 5, FenceVersion: 7},
+		Leader: 1, Voters: []ch.NodeID{1, 2, 3}, WriteQuorum: 2,
+	}
+	if _, err := log.Install(context.Background(), authority); err != nil {
+		t.Fatalf("Install() error = %v", err)
+	}
+	original := Proposal{
+		Key: authority.Key, Expected: authority.ID, CommandID: ch.CommandID{31: 41},
+		ServerAllocatedMessageIDs: true,
+		Records: []ch.Record{{
+			ID: 401, Epoch: authority.ID.ChannelEpoch, FromUID: "sender", ClientMsgNo: "client-401",
+			Setting: 2, SyncOnce: true, Payload: []byte("same payload"), SizeBytes: len("same payload"), ServerTimestampMS: 401,
+		}},
+	}
+	harness.loseResponses = len(authority.Voters)
+	if _, err := log.Commit(context.Background(), original); err == nil {
+		t.Fatal("Commit() error = nil after every durability response was lost")
+	}
+
+	retry := original
+	retry.CommandID = ch.CommandID{31: 42}
+	retry.Records = cloneRecords(original.Records)
+	retry.Records[0].ID = 402
+	retry.Records[0].ServerTimestampMS = 402
+	receipt, err := log.Commit(context.Background(), retry)
+	if err != nil {
+		t.Fatalf("Commit(logical retry) error = %v", err)
+	}
+	if receipt.CommandID != original.CommandID || receipt.First != 1 || receipt.Last != 1 || receipt.HW != 1 {
+		t.Fatalf("Commit(logical retry) = %+v, want original proposal identity and range", receipt)
+	}
+	if receipt.RetryBinding == nil || receipt.RetryBinding.RequestedCommandID != retry.CommandID ||
+		len(receipt.RetryBinding.Records) != 1 || receipt.RetryBinding.Records[0].ID != original.Records[0].ID ||
+		receipt.RetryBinding.Records[0].ServerTimestampMS != original.Records[0].ServerTimestampMS {
+		t.Fatalf("Commit(logical retry) binding = %+v, want original immutable record", receipt.RetryBinding)
+	}
+	for _, voter := range authority.Voters {
+		loaded, loadErr := harness.stores[voter].Load(context.Background(), LoadBatch{Items: []LoadRequest{{
+			ChannelKey: authority.Key, ChannelID: authority.ChannelID,
+		}}})
+		if loadErr != nil || len(loaded.Items) != 1 || loaded.Items[0].Err != nil || loaded.Items[0].State.LEO != 1 {
+			t.Fatalf("voter %d state = %+v, error %v; want exactly one durable row", voter, loaded, loadErr)
+		}
+	}
+}
+
+func TestQuorumLogDoesNotBindUnsafeOrDifferentLogicalRetry(t *testing.T) {
+	for _, testCase := range []struct {
+		name   string
+		mutate func(*Proposal)
+	}{
+		{name: "caller supplied id", mutate: func(proposal *Proposal) { proposal.ServerAllocatedMessageIDs = false }},
+		{name: "different sender", mutate: func(proposal *Proposal) { proposal.Records[0].FromUID = "other" }},
+		{name: "different client key", mutate: func(proposal *Proposal) { proposal.Records[0].ClientMsgNo = "other" }},
+		{name: "different payload", mutate: func(proposal *Proposal) {
+			proposal.Records[0].Payload = []byte("other")
+			proposal.Records[0].SizeBytes = len("other")
+		}},
+		{name: "different setting", mutate: func(proposal *Proposal) { proposal.Records[0].Setting++ }},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			harness := newReplicaHarness(t, 1, 2, 3)
+			log, err := newQuorumLog(quorumLogConfig{
+				Local: 1, Store: harness.stores[1], Recovery: harness, Durability: harness,
+				RecoveryTimeout: time.Minute, RecoveryPageBytes: 64 << 10,
+				MaxChannels: 8, MaxVoters: 3, MaxProposalRecords: 256, MaxProposalBytes: 64 << 10, MaxRetainedCommands: 16,
+			})
+			if err != nil {
+				t.Fatalf("newQuorumLog() error = %v", err)
+			}
+			authority := Authority{
+				Key: "1:unsafe-retry", ChannelID: ch.ChannelID{ID: "unsafe-retry", Type: 1},
+				ID: AuthorityID{ChannelEpoch: 1, LeaderTerm: 1, FenceVersion: 1}, Leader: 1,
+				Voters: []ch.NodeID{1, 2, 3}, WriteQuorum: 2,
+			}
+			if _, err := log.Install(context.Background(), authority); err != nil {
+				t.Fatalf("Install() error = %v", err)
+			}
+			original := Proposal{
+				Key: authority.Key, Expected: authority.ID, CommandID: ch.CommandID{31: 51}, ServerAllocatedMessageIDs: true,
+				Records: []ch.Record{{ID: 501, Epoch: 1, FromUID: "sender", ClientMsgNo: "client-501", Payload: []byte("payload"), SizeBytes: 7, ServerTimestampMS: 501}},
+			}
+			harness.loseResponses = len(authority.Voters)
+			if _, err := log.Commit(context.Background(), original); err == nil {
+				t.Fatal("Commit() error = nil after every durability response was lost")
+			}
+			before := harness.syncCalls
+			retry := original
+			retry.CommandID = ch.CommandID{31: 52}
+			retry.Records = cloneRecords(original.Records)
+			retry.Records[0].ID++
+			testCase.mutate(&retry)
+			if _, err := log.Commit(context.Background(), retry); !errors.Is(err, ch.ErrBackpressured) {
+				t.Fatalf("Commit(unsafe retry) error = %v, want %v", err, ch.ErrBackpressured)
+			}
+			if harness.syncCalls != before {
+				t.Fatalf("unsafe retry issued %d durable writes, want zero", harness.syncCalls-before)
+			}
+		})
+	}
+}
+
 func TestQuorumLogInstallWritesAuthorityBarrierAboveNonEmptyForeignFrontier(t *testing.T) {
 	harness := newReplicaHarness(t, 1, 2, 3)
 	newLog := func() *quorumLog {

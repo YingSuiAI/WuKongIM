@@ -2,6 +2,7 @@ package channels
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"testing"
 	"time"
@@ -114,7 +115,7 @@ func TestRepairScannerUsesDurableReplicaWhenFollowerRuntimeIsUnloaded(t *testing
 
 	require.NoError(t, err)
 	require.Zero(t, source.runtimeProbeCalls, "failover scan must not require a loaded follower reactor")
-	require.Equal(t, 2, source.replicaProbeCalls)
+	require.Equal(t, 3, source.replicaProbeCalls)
 	require.Equal(t, 1, result.TasksCreated)
 	require.Len(t, store.requests, 1)
 }
@@ -183,6 +184,7 @@ func TestRepairScannerPrioritizesLeaderFailoverBeforeReplicaRepair(t *testing.T)
 	source.nodes = repairPlannerNodes([]uint64{1, 2, 4}, []uint64{3})
 	meta := replicaRepairMeta(id)
 	meta.Leader = 3
+	source.probeErrs[3] = errors.New("leader unavailable")
 	source.slotPages[1] = [][]metadb.ChannelRuntimeMeta{{meta}}
 	store := &fakeRepairScannerStore{}
 
@@ -193,6 +195,88 @@ func TestRepairScannerPrioritizesLeaderFailoverBeforeReplicaRepair(t *testing.T)
 	require.Equal(t, 1, result.TasksCreated)
 	require.Len(t, store.requests, 1)
 	require.Empty(t, store.replicaRequests)
+}
+
+func TestRepairScannerDoesNotFailOverReachableLeaderDuringHealthStaleness(t *testing.T) {
+	id := ch.ChannelID{ID: "scan-stale-but-reachable-leader", Type: 1}
+	source := newFakeRepairScannerSource(id)
+	source.nodes = failoverHealthyNodes(1, 2, 3)
+	for index := range source.nodes {
+		if source.nodes[index].NodeID == 1 {
+			source.nodes[index].Health.Freshness = control.NodeHealthStale
+		}
+	}
+	leaderProbe := failoverProbe(id, 1, 11, 20, 10, 10).Probe
+	leaderProbe.Role = ch.RoleLeader
+	source.probes[1] = leaderProbe
+	delete(source.probeErrs, 1)
+	source.slotPages[1] = [][]metadb.ChannelRuntimeMeta{{failoverPlannerMeta(id)}}
+	store := &fakeRepairScannerStore{}
+
+	scanner := NewRepairScanner(RepairScannerConfig{Enabled: true, PageLimit: 10, MaxPagesPerTick: 10, MaxTasksPerTick: 10}, source, store)
+	result, err := scanner.RunOnce(context.Background())
+
+	require.NoError(t, err)
+	require.Zero(t, result.TasksCreated)
+	require.Empty(t, store.requests)
+}
+
+func TestRepairScannerFailsOverAfterLeaderHealthLeaseExpiresAndProbeFails(t *testing.T) {
+	id := ch.ChannelID{ID: "scan-indeterminate-active-leader", Type: 1}
+	source := newFakeRepairScannerSource(id)
+	source.nodes = failoverHealthyNodes(1, 2, 3)
+	for index := range source.nodes {
+		if source.nodes[index].NodeID == 1 {
+			source.nodes[index].Health.Freshness = control.NodeHealthStale
+		}
+	}
+	source.probeErrs[1] = errors.New("temporary probe timeout")
+	source.slotPages[1] = [][]metadb.ChannelRuntimeMeta{{failoverPlannerMeta(id)}}
+	store := &fakeRepairScannerStore{}
+
+	scanner := NewRepairScanner(RepairScannerConfig{Enabled: true, PageLimit: 10, MaxPagesPerTick: 10, MaxTasksPerTick: 10}, source, store)
+	result, err := scanner.RunOnce(context.Background())
+
+	require.NoError(t, err)
+	require.Equal(t, 1, result.TasksCreated)
+	require.Len(t, store.requests, 1)
+}
+
+func TestRepairScannerFailsOverWhenLeaderIsAbsentFromDurableMembership(t *testing.T) {
+	id := ch.ChannelID{ID: "scan-removed-current-leader", Type: 1}
+	source := newFakeRepairScannerSource(id)
+	source.nodes = failoverHealthyNodes(2, 3)
+	source.slotPages[1] = [][]metadb.ChannelRuntimeMeta{{failoverPlannerMeta(id)}}
+	store := &fakeRepairScannerStore{}
+
+	scanner := NewRepairScanner(RepairScannerConfig{Enabled: true, PageLimit: 10, MaxPagesPerTick: 10, MaxTasksPerTick: 10}, source, store)
+	result, err := scanner.RunOnce(context.Background())
+
+	require.NoError(t, err)
+	require.Equal(t, 1, result.TasksCreated)
+	require.Len(t, store.requests, 1)
+}
+
+func TestRepairScannerFailsOverWhenUnhealthyLeaderProbeShowsDemotedRuntime(t *testing.T) {
+	id := ch.ChannelID{ID: "scan-demoted-current-leader", Type: 1}
+	source := newFakeRepairScannerSource(id)
+	source.nodes = failoverHealthyNodes(1, 2, 3)
+	for index := range source.nodes {
+		if source.nodes[index].NodeID == 1 {
+			source.nodes[index].Health.Freshness = control.NodeHealthStale
+		}
+	}
+	source.probes[1] = failoverProbe(id, 1, 11, 20, 10, 10).Probe
+	delete(source.probeErrs, 1)
+	source.slotPages[1] = [][]metadb.ChannelRuntimeMeta{{failoverPlannerMeta(id)}}
+	store := &fakeRepairScannerStore{}
+
+	scanner := NewRepairScanner(RepairScannerConfig{Enabled: true, PageLimit: 10, MaxPagesPerTick: 10, MaxTasksPerTick: 10}, source, store)
+	result, err := scanner.RunOnce(context.Background())
+
+	require.NoError(t, err)
+	require.Equal(t, 1, result.TasksCreated)
+	require.Len(t, store.requests, 1)
 }
 
 func TestRepairScannerConfigKeepsTickIntervalForSchedulerLoop(t *testing.T) {
@@ -206,6 +290,7 @@ type fakeRepairScannerSource struct {
 	slotPages    map[uint32][][]metadb.ChannelRuntimeMeta
 	active       map[ch.ChannelID]bool
 	probes       map[uint64]ch.RuntimeProbeChannel
+	probeErrs    map[uint64]error
 	nodes        []control.Node
 	hashSlotByID map[ch.ChannelID]uint16
 	scannedSlots []uint32
@@ -234,12 +319,14 @@ func newFakeRepairScannerSource(ids ...ch.ChannelID) *fakeRepairScannerSource {
 		slotPages:    make(map[uint32][][]metadb.ChannelRuntimeMeta),
 		active:       make(map[ch.ChannelID]bool),
 		probes:       make(map[uint64]ch.RuntimeProbeChannel),
+		probeErrs:    make(map[uint64]error),
 		hashSlotByID: make(map[ch.ChannelID]uint16),
 	}
 	for _, id := range ids {
 		source.probes[2] = failoverProbe(id, 2, 11, 20, 10, 10).Probe
 		source.probes[3] = failoverProbe(id, 3, 11, 20, 9, 9).Probe
 	}
+	source.probeErrs[1] = errors.New("leader unavailable")
 	return source
 }
 
@@ -279,6 +366,9 @@ func (s *fakeRepairScannerSource) ActiveChannelMigrationInHashSlot(_ context.Con
 
 func (s *fakeRepairScannerSource) ProbeChannelReplica(_ context.Context, nodeID uint64, meta metadb.ChannelRuntimeMeta) (ch.RuntimeProbeChannel, error) {
 	s.replicaProbeCalls++
+	if err := s.probeErrs[nodeID]; err != nil {
+		return ch.RuntimeProbeChannel{}, err
+	}
 	probe := s.probes[nodeID]
 	probe.ChannelID = ch.ChannelID{ID: meta.ChannelID, Type: uint8(meta.ChannelType)}
 	return probe, nil
@@ -293,7 +383,7 @@ func (s *fakeRepairScannerSource) ControlSnapshot(context.Context) (control.Snap
 	if s.nodes != nil {
 		return control.Snapshot{Nodes: append([]control.Node(nil), s.nodes...)}, nil
 	}
-	return control.Snapshot{Nodes: failoverHealthyNodes(2, 3)}, nil
+	return control.Snapshot{Nodes: appendRecoveryNodesWithDownLeader(1, 1, 2, 3)}, nil
 }
 
 type fakeRepairScannerStore struct {

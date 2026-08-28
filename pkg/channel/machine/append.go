@@ -29,7 +29,10 @@ type QuorumCommittedResult struct {
 	First uint64
 	Last  uint64
 	HW    uint64
-	Err   error
+	// Records is set only when a new server-allocated waiter adopted an older
+	// pending proposal and must complete with that proposal's durable identities.
+	Records []ch.Record
+	Err     error
 }
 
 // FollowerAck reports follower replication progress to the leader.
@@ -168,6 +171,12 @@ func (s *ChannelState) ApplyQuorumCommitted(res QuorumCommittedResult) Decision 
 	if res.First == 0 || count == 0 || res.Last < res.First || res.Last-res.First+1 != count || res.HW != res.Last {
 		return s.failInflightAppend(ch.ErrLogConflict)
 	}
+	if len(res.Records) > 0 {
+		if !ch.SameServerAllocatedLogicalRecords(inflight.Records, res.Records) {
+			return s.failInflightAppend(ch.ErrLogConflict)
+		}
+		copyReboundRecords(inflight.Records, res.Records)
+	}
 	s.assignStoredOffsets(inflight.Records, res.First)
 	s.assignInflightRecordsToWaiters(inflight)
 	s.LEO = maxUint64(s.LEO, res.Last)
@@ -178,6 +187,13 @@ func (s *ChannelState) ApplyQuorumCommitted(res QuorumCommittedResult) Decision 
 	replyOrder := append([]ch.OpID(nil), inflight.WaiterOpIDs...)
 	s.InflightAppend = nil
 	return s.completeAppendWaiters(replyOrder)
+}
+
+func copyReboundRecords(target, source []ch.Record) {
+	for index := range source {
+		target[index] = source[index]
+		target[index].Payload = append([]byte(nil), source[index].Payload...)
+	}
 }
 
 // ApplyFollowerAck updates leader-side follower match progress.
@@ -266,10 +282,10 @@ func (s *ChannelState) assignInflightRecordsToWaiters(inflight *AppendOp) {
 
 func assignStoredRecordMetadata(target, source []ch.Record) {
 	for i := range source {
-		target[i].ID = source[i].ID
-		target[i].Index = source[i].Index
-		target[i].Epoch = source[i].Epoch
-		target[i].SizeBytes = source[i].SizeBytes
+		// The normal append path already shares immutable logical fields. A
+		// rebound quorum receipt may instead carry an older server timestamp and
+		// message ID, so the waiter must adopt the complete durable record.
+		target[i] = source[i]
 	}
 }
 

@@ -206,7 +206,14 @@ func (s *RepairScanner) scanMeta(ctx context.Context, snapshot control.Snapshot,
 		return nil
 	}
 	id := ch.ChannelID{ID: meta.ChannelID, Type: uint8(meta.ChannelType)}
-	if repairScannerLeaderSuspect(snapshot.Nodes, meta.Leader) {
+	if repairScannerLeaderNeedsAssessment(snapshot.Nodes, meta.Leader) {
+		leaderState := assessCurrentChannelLeader(ctx, snapshot.Nodes, meta, s.source.ProbeChannelReplica)
+		if leaderState != currentAppendAuthorityUnavailable {
+			// A leader whose health view is not placement-safe must not be fed to
+			// replica replacement. Reachability proves that its authority should
+			// stay put; an indeterminate probe requires another bounded scan.
+			return nil
+		}
 		result.ChannelsScanned++
 		active, err := s.source.ActiveChannelMigrationInHashSlot(ctx, item.HashSlot, id)
 		if err != nil {
@@ -334,7 +341,7 @@ func (s *RepairScanner) observeReplicaRepairResult(result string) {
 	}
 }
 
-func repairScannerLeaderSuspect(nodes []control.Node, leader uint64) bool {
+func repairScannerLeaderNeedsAssessment(nodes []control.Node, leader uint64) bool {
 	if leader == 0 {
 		return true
 	}

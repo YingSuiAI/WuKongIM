@@ -12,6 +12,8 @@ import (
 	metafsm "github.com/WuKongIM/WuKongIM/pkg/slot/fsm"
 )
 
+const minimumMigrationTaskScanBudget = 16
+
 // ListRunnableMigrationTasks lists active migration tasks owned by locally led physical Slots.
 func (n *Node) ListRunnableMigrationTasks(ctx context.Context, localNode uint64, limit int) ([]metadb.ChannelMigrationTask, error) {
 	if err := ctxErr(ctx); err != nil {
@@ -23,30 +25,106 @@ func (n *Node) ListRunnableMigrationTasks(ctx context.Context, localNode uint64,
 	if n.defaultSlotMetaDB == nil {
 		return nil, ErrNotStarted
 	}
-	slotIDs, err := n.LocalLeaderSlotIDs(ctx)
+	hashSlots, err := n.LocalLeaderHashSlots(ctx)
 	if err != nil {
 		return nil, err
 	}
-	snapshot, err := n.LocalControlSnapshot(ctx)
-	if err != nil {
-		return nil, err
+	n.channelMigrationScanMu.Lock()
+	defer n.channelMigrationScanMu.Unlock()
+	if len(hashSlots) == 0 {
+		n.clearChannelMigrationScanResume()
+		return nil, nil
 	}
+	n.pruneChannelMigrationScanCursors(hashSlots)
+	startIndex := n.channelMigrationScanStart(hashSlots)
+	scanBudget := limit
+	if scanBudget < minimumMigrationTaskScanBudget {
+		scanBudget = minimumMigrationTaskScanBudget
+	}
+	inspected := 0
 	out := make([]metadb.ChannelMigrationTask, 0, limit)
-	for _, slotID := range slotIDs {
-		hashSlots := hashSlotsOfPhysicalSlot(snapshot.HashSlots, slotID)
-		for _, hashSlot := range hashSlots {
-			remaining := limit - len(out)
-			if remaining <= 0 {
-				return out, nil
+	for visited := 0; visited < len(hashSlots) && inspected < scanBudget; visited++ {
+		index := (startIndex + visited) % len(hashSlots)
+		hashSlot := hashSlots[index]
+		cursor := n.channelMigrationScanCursors[hashSlot]
+		for inspected < scanBudget {
+			pageLimit := limit - len(out)
+			if remaining := scanBudget - inspected; pageLimit > remaining {
+				pageLimit = remaining
 			}
-			tasks, err := n.defaultSlotMetaDB.ForHashSlot(hashSlot).ListActiveChannelMigrationTasks(ctx, remaining)
+			tasks, next, done, scanned, err := n.defaultSlotMetaDB.ForHashSlot(uint16(hashSlot)).ScanActiveChannelMigrationTasks(ctx, cursor, pageLimit)
 			if err != nil {
 				return nil, err
 			}
-			out = append(out, tasks...)
+			inspected += scanned
+			cursor = next
+			n.setChannelMigrationTaskCursor(hashSlot, cursor)
+			for _, task := range tasks {
+				if task.IsTerminal() || task.Status == metadb.ChannelMigrationStatusBlocked {
+					continue
+				}
+				out = append(out, task)
+				if len(out) >= limit {
+					if done {
+						n.clearChannelMigrationTaskCursor(hashSlot)
+					}
+					n.setChannelMigrationScanNext(hashSlots[(index+1)%len(hashSlots)])
+					return out, nil
+				}
+			}
+			if done {
+				n.clearChannelMigrationTaskCursor(hashSlot)
+				break
+			}
+			if scanned == 0 {
+				break
+			}
 		}
+		n.setChannelMigrationScanNext(hashSlots[(index+1)%len(hashSlots)])
 	}
 	return out, nil
+}
+
+func (n *Node) channelMigrationScanStart(hashSlots []metadb.HashSlot) int {
+	if !n.channelMigrationScanSet {
+		return 0
+	}
+	index := sort.Search(len(hashSlots), func(i int) bool { return hashSlots[i] >= n.channelMigrationScanHashSlot })
+	if index == len(hashSlots) {
+		index = 0
+	}
+	return index
+}
+
+func (n *Node) setChannelMigrationScanNext(hashSlot metadb.HashSlot) {
+	n.channelMigrationScanSet = true
+	n.channelMigrationScanHashSlot = hashSlot
+}
+
+func (n *Node) setChannelMigrationTaskCursor(hashSlot metadb.HashSlot, cursor metadb.ChannelMigrationTaskCursor) {
+	if n.channelMigrationScanCursors == nil {
+		n.channelMigrationScanCursors = make(map[metadb.HashSlot]metadb.ChannelMigrationTaskCursor)
+	}
+	n.channelMigrationScanCursors[hashSlot] = cursor
+}
+
+func (n *Node) clearChannelMigrationTaskCursor(hashSlot metadb.HashSlot) {
+	delete(n.channelMigrationScanCursors, hashSlot)
+}
+
+func (n *Node) pruneChannelMigrationScanCursors(hashSlots []metadb.HashSlot) {
+	for hashSlot := range n.channelMigrationScanCursors {
+		index := sort.Search(len(hashSlots), func(i int) bool { return hashSlots[i] >= hashSlot })
+		if index == len(hashSlots) || hashSlots[index] != hashSlot {
+			delete(n.channelMigrationScanCursors, hashSlot)
+		}
+	}
+}
+
+func (n *Node) clearChannelMigrationScanResume() {
+	n.channelMigrationScanSet = false
+	n.channelMigrationScanHashSlot = 0
+	n.channelMigrationScanCursors = nil
 }
 
 // LocalLeaderSlotIDs returns physical Slot IDs currently led by this node.

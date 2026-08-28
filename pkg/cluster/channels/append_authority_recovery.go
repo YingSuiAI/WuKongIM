@@ -99,7 +99,7 @@ func (r *ForegroundAppendAuthorityRecovery) EnsureAppendAuthorityRecovery(ctx co
 		if err != nil {
 			return AppendAuthorityRecoveryPending, err
 		}
-		switch r.currentLeaderState(recoveryCtx, snapshot, meta) {
+		switch assessCurrentChannelLeader(recoveryCtx, snapshot.Nodes, runtimeMetaFromAppendMeta(meta), r.source.ProbeChannelReplica) {
 		case currentAppendAuthorityUsable:
 			return AppendAuthorityRecoveryCurrent, nil
 		case currentAppendAuthorityUnknown:
@@ -121,39 +121,74 @@ func (r *ForegroundAppendAuthorityRecovery) EnsureAppendAuthorityRecovery(ctx co
 	return AppendAuthorityRecoveryPending, err
 }
 
-func (r *ForegroundAppendAuthorityRecovery) currentLeaderState(ctx context.Context, snapshot control.Snapshot, meta ch.Meta) currentAppendAuthorityState {
-	if !appendRecoveryNodeSchedulable(snapshot.Nodes, uint64(meta.Leader)) {
+type channelReplicaProbe func(context.Context, uint64, metadb.ChannelRuntimeMeta) (ch.RuntimeProbeChannel, error)
+
+// assessCurrentChannelLeader is the single foreground/background authority
+// liveness rule. It requires durable membership plus a direct replica probe;
+// low-frequency health alone never proves an active leader dead.
+func assessCurrentChannelLeader(ctx context.Context, nodes []control.Node, meta metadb.ChannelRuntimeMeta, probeReplica channelReplicaProbe) currentAppendAuthorityState {
+	if meta.Leader == 0 || probeReplica == nil {
+		return currentAppendAuthorityUnavailable
+	}
+	node, found := currentChannelLeaderNode(nodes, meta.Leader)
+	if !found {
+		// ControlSnapshot is the complete durable membership projection. A
+		// metadata leader absent from it is no longer an active data member.
+		return currentAppendAuthorityUnavailable
+	}
+	if !control.NodeActiveDataMember(node) {
 		return currentAppendAuthorityUnavailable
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, foregroundCandidateProbeTimeout)
-	probe, err := r.source.ProbeChannelReplica(probeCtx, uint64(meta.Leader), runtimeMetaFromAppendMeta(meta))
+	probe, err := probeReplica(probeCtx, meta.Leader, meta)
 	cancel()
 	if err != nil {
+		if currentChannelLeaderHealthUnavailable(node.Health) {
+			return currentAppendAuthorityUnavailable
+		}
 		// An empty new Channel has no durable authority identity yet. A direct
-		// not-found response from its current, schedulable leader still proves
-		// that the authority node is reachable and can perform first install.
+		// not-found response from a serviceable leader still proves that the
+		// authority node is reachable and can perform first install.
 		if ch.ErrorMatches(err, ch.ErrChannelNotFound) {
 			return currentAppendAuthorityUsable
 		}
+		// A transport failure alone may be a transient local discovery miss. It
+		// becomes death evidence only after the durable health lease has expired,
+		// or a fresh report explicitly says the runtime is no longer serviceable.
+		// This keeps a healthy, schedulable leader safe while allowing a crashed
+		// process (which cannot publish a fresh "down" report) to fail over after
+		// its last lease expires.
 		return currentAppendAuthorityUnknown
 	}
-	if probe.ChannelID == meta.ID &&
-		probe.ChannelEpoch == meta.Epoch &&
+	id := ch.ChannelID{ID: meta.ChannelID, Type: uint8(meta.ChannelType)}
+	if probe.ChannelID == id &&
+		probe.ChannelEpoch == meta.ChannelEpoch &&
 		probe.LeaderEpoch == meta.LeaderEpoch &&
 		probe.Role == ch.RoleLeader &&
 		probe.Status == ch.StatusActive {
 		return currentAppendAuthorityUsable
 	}
-	return currentAppendAuthorityUnavailable
+	if currentChannelLeaderHealthUnavailable(node.Health) {
+		return currentAppendAuthorityUnavailable
+	}
+	return currentAppendAuthorityUnknown
 }
 
-func appendRecoveryNodeSchedulable(nodes []control.Node, nodeID uint64) bool {
+func currentChannelLeaderHealthUnavailable(health control.NodeHealth) bool {
+	if health.Freshness == control.NodeHealthStale {
+		return true
+	}
+	return health.Freshness == control.NodeHealthFresh &&
+		(health.Status != control.NodeAlive || !health.RuntimeReady)
+}
+
+func currentChannelLeaderNode(nodes []control.Node, nodeID uint64) (control.Node, bool) {
 	for _, node := range nodes {
 		if node.NodeID == nodeID {
-			return control.NodeSchedulableForPlacement(node)
+			return node, true
 		}
 	}
-	return false
+	return control.Node{}, false
 }
 
 func (r *ForegroundAppendAuthorityRecovery) plan(ctx context.Context, snapshot control.Snapshot, meta ch.Meta) (CreateLeaderFailoverRequest, error) {

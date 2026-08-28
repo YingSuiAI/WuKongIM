@@ -41,7 +41,11 @@ It does not own product permission, authority selection, fanout, or SENDACK poli
    and storage submissions share while copying record metadata.
    With `DurableQuorumLog`, leader activation first installs a recovered
    authority frontier and current-term barrier, then each caller append is one
-   immutable exact quorum proposal rather than a transient worker batch.
+   immutable exact quorum proposal rather than a transient worker batch. A
+   disconnected retry with newly server-allocated IDs may adopt an older
+   outcome-unknown proposal only when sender, client key, payload, and durable
+   message semantics match exactly; completion then uses the older record IDs
+   and offsets.
 2. Followers pull continuous records, apply and return ACK progress, and use a
    bounded checkpoint path; idle leaders and caught-up followers coordinate
    checkpointed stop before either runtime can be evicted.
@@ -57,6 +61,10 @@ It does not own product permission, authority selection, fanout, or SENDACK poli
   Exact manifests and closed durable/already-durable/absent/conflict/unknown
   outcomes make ambiguous commits safely retryable after cancellation or
   restart; caller cancellation cannot revoke admitted durability.
+- A pending logical retry never clears or replaces the unknown proposal. Only
+  server-allocated identities are eligible, and the old immutable proposal is
+  retried to quorum before its exact durable records are rebound to the new
+  waiter; caller-supplied IDs and any logical mismatch remain rejected.
 - The node-owned replication runtime bounds local mutation batches, per-target
   exchange, recovery probes, and follower repair without per-Channel goroutines.
   Install selects a quorum-identical hash-chain prefix, repairs bounded pages,

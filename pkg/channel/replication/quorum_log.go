@@ -261,6 +261,9 @@ func (l *quorumLog) Commit(ctx context.Context, proposal Proposal) (Receipt, err
 		return l.retryPending(ctx, state, *state.pending)
 	}
 	if state.pending != nil {
+		if sameServerAllocatedLogicalProposal(state.pending.proposal, proposal) {
+			return l.retryPendingForNewWaiter(ctx, state, proposal.CommandID, *state.pending)
+		}
 		return Receipt{}, ch.ErrBackpressured
 	}
 
@@ -337,6 +340,27 @@ func (l *quorumLog) retryPending(ctx context.Context, state *quorumChannel, reta
 		return Receipt{}, err
 	}
 	return l.finishCommittedRound(ctx, state, retained, result)
+}
+
+func (l *quorumLog) retryPendingForNewWaiter(
+	ctx context.Context,
+	state *quorumChannel,
+	requestedCommand ch.CommandID,
+	retained retainedProposal,
+) (Receipt, error) {
+	// Capture the original immutable records before finishCommit drops its
+	// payload-bearing acceleration copy. The returned binding is bounded by the
+	// proposal limits and exists only for this caller completion.
+	records := cloneRecords(retained.proposal.records)
+	receipt, err := l.retryPending(ctx, state, retained)
+	if err != nil {
+		return Receipt{}, err
+	}
+	receipt.RetryBinding = &RetryBinding{
+		RequestedCommandID: requestedCommand,
+		Records:            records,
+	}
+	return receipt, nil
 }
 
 func (l *quorumLog) finishCommittedRound(ctx context.Context, state *quorumChannel, retained retainedProposal, result durableRoundResult) (Receipt, error) {
@@ -489,6 +513,14 @@ func sameProposalContent(retained durableProposal, records []ch.Record) bool {
 	}
 	manifest, _, ok := ch.SealProposalManifest(retained.manifest, records)
 	return ok && manifest == retained.manifest
+}
+
+func sameServerAllocatedLogicalProposal(retained durableProposal, candidate Proposal) bool {
+	if !retained.serverAllocatedMessageIDs || !candidate.ServerAllocatedMessageIDs ||
+		!ch.SameServerAllocatedLogicalRecords(retained.records, candidate.Records) {
+		return false
+	}
+	return true
 }
 
 func cloneRecords(records []ch.Record) []ch.Record {

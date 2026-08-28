@@ -64,6 +64,7 @@ func (r *Reactor) tryFlushAppend(rc *runtimeChannel, now time.Time) {
 	task := decision.Tasks[0]
 	batch.fence = task.Fence
 	batch.records = task.StoreAppend.Records
+	batch.serverAllocatedMessageIDs = task.StoreAppend.ServerAllocatedMessageIDs
 	for i := range batch.records {
 		if batch.records[i].Epoch == 0 {
 			batch.records[i].Epoch = rc.state.Epoch

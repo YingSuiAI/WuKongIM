@@ -64,7 +64,7 @@ type MigrationExecutorConfig struct {
 	Observer MigrationObserver
 	// Clock returns current wall-clock time for lease checks. Nil uses time.Now.
 	Clock func() time.Time
-	// TaskLimit bounds tasks inspected per RunOnce tick. Zero uses one task.
+	// TaskLimit bounds runnable candidates returned per RunOnce tick. Zero uses one task.
 	TaskLimit int
 }
 

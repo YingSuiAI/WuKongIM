@@ -198,13 +198,24 @@ func (r *Reactor) handleQuorumCommitResult(result worker.Result) {
 		} else {
 			receipt := result.QuorumCommit.Receipt
 			recordCount := uint64(len(batch.records))
-			if receipt.Authority != batch.authority || receipt.CommandID != batch.commandID || receipt.First == 0 ||
+			commandMatches := receipt.CommandID == batch.commandID
+			if receipt.RetryBinding != nil {
+				reboundCommand := appendProposalCommandID(rc.state.Key, batch.authority, receipt.RetryBinding.Records)
+				commandMatches = batch.serverAllocatedMessageIDs &&
+					receipt.RetryBinding.RequestedCommandID == batch.commandID &&
+					receipt.CommandID == reboundCommand &&
+					ch.SameServerAllocatedLogicalRecords(batch.records, receipt.RetryBinding.Records)
+			}
+			if receipt.Authority != batch.authority || !commandMatches || receipt.First == 0 ||
 				recordCount == 0 || receipt.Last < receipt.First || receipt.Last-receipt.First+1 != recordCount || receipt.HW != receipt.Last {
 				commitErr = ch.ErrLogConflict
 			} else {
 				committed.First = receipt.First
 				committed.Last = receipt.Last
 				committed.HW = receipt.HW
+				if receipt.RetryBinding != nil {
+					committed.Records = receipt.RetryBinding.Records
+				}
 			}
 		}
 	}

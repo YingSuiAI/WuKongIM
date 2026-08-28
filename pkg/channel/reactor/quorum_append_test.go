@@ -93,6 +93,130 @@ func TestQuorumLeaderFlushesOneProposalWithoutReactorBatchWait(t *testing.T) {
 	require.Len(t, log.proposals(), 1)
 }
 
+func TestQuorumLogicalRetryCompletesWithOlderDurableIdentity(t *testing.T) {
+	log := &reboundReactorQuorumLog{durableID: 7001}
+	g, err := NewGroup(Config{
+		LocalNode: 1, ReactorCount: 1, MailboxSize: 32, Store: store.NewMemoryFactory(),
+		QuorumLog: log, AppendBatchMaxRecords: 1, AppendBatchMaxWait: time.Hour,
+	})
+	require.NoError(t, err)
+	defer g.Close()
+
+	meta := testMeta("quorum-logical-retry", 1, 1)
+	meta.RouteGeneration = 7
+	meta.Replicas = []ch.NodeID{1, 2, 3}
+	meta.ISR = []ch.NodeID{1, 2, 3}
+	meta.MinISR = 2
+	require.NoError(t, awaitSubmit(g, meta.Key, Event{Kind: EventApplyMeta, Key: meta.Key, Meta: meta}))
+
+	event := appendEvent(meta, 7002, "payload")
+	event.Append.CommitMode = ch.CommitModeQuorum
+	event.Append.ServerAllocatedMessageIDs = true
+	event.Append.Messages[0].FromUID = "sender"
+	event.Append.Messages[0].ClientMsgNo = "client-7"
+	future, err := g.Submit(context.Background(), meta.Key, event)
+	require.NoError(t, err)
+	result := awaitFutureResult(t, future)
+	require.NoError(t, result.Err)
+	require.Len(t, result.AppendBatch.Items, 1)
+	require.Equal(t, uint64(7001), result.AppendBatch.Items[0].MessageID)
+	require.Equal(t, uint64(1), result.AppendBatch.Items[0].MessageSeq)
+	require.Equal(t, int64(7001), result.AppendBatch.Items[0].Message.ServerTimestampMS)
+	require.Equal(t, uint64(7001), log.reboundRecord.ID)
+	runtime, err := g.reactors[0].lookupLoadedChannel(meta.Key)
+	require.NoError(t, err)
+	cached, ok := runtime.recentRecords.slice(1, 1, 1024)
+	require.True(t, ok)
+	require.Len(t, cached, 1)
+	require.Equal(t, uint64(7001), cached[0].ID)
+	require.Equal(t, uint64(1), cached[0].Index)
+	require.Equal(t, int64(7001), cached[0].ServerTimestampMS)
+}
+
+func TestQuorumRetryBindingRejectsCallerSuppliedMessageID(t *testing.T) {
+	log := &reboundReactorQuorumLog{durableID: 7001}
+	g, err := NewGroup(Config{
+		LocalNode: 1, ReactorCount: 1, MailboxSize: 32, Store: store.NewMemoryFactory(),
+		QuorumLog: log, AppendBatchMaxRecords: 1,
+	})
+	require.NoError(t, err)
+	defer g.Close()
+
+	meta := testMeta("quorum-caller-id-retry", 1, 1)
+	meta.RouteGeneration = 7
+	meta.Replicas = []ch.NodeID{1, 2, 3}
+	meta.ISR = []ch.NodeID{1, 2, 3}
+	meta.MinISR = 2
+	require.NoError(t, awaitSubmit(g, meta.Key, Event{Kind: EventApplyMeta, Key: meta.Key, Meta: meta}))
+	event := appendEvent(meta, 7002, "payload")
+	event.Append.CommitMode = ch.CommitModeQuorum
+	event.Append.Messages[0].FromUID = "sender"
+	event.Append.Messages[0].ClientMsgNo = "client-7"
+	future, err := g.Submit(context.Background(), meta.Key, event)
+	require.NoError(t, err)
+	_, err = future.Await(context.Background())
+	require.ErrorIs(t, err, ch.ErrLogConflict)
+}
+
+func TestQuorumRetryBindingRejectsRecordsNotBoundToDurableCommand(t *testing.T) {
+	log := &reboundReactorQuorumLog{durableID: 7001, invalidDurableCommand: true}
+	g, err := NewGroup(Config{
+		LocalNode: 1, ReactorCount: 1, MailboxSize: 32, Store: store.NewMemoryFactory(),
+		QuorumLog: log, AppendBatchMaxRecords: 1,
+	})
+	require.NoError(t, err)
+	defer g.Close()
+
+	meta := testMeta("quorum-invalid-rebound-command", 1, 1)
+	meta.RouteGeneration = 7
+	meta.Replicas = []ch.NodeID{1, 2, 3}
+	meta.ISR = []ch.NodeID{1, 2, 3}
+	meta.MinISR = 2
+	require.NoError(t, awaitSubmit(g, meta.Key, Event{Kind: EventApplyMeta, Key: meta.Key, Meta: meta}))
+	event := appendEvent(meta, 7002, "payload")
+	event.Append.CommitMode = ch.CommitModeQuorum
+	event.Append.ServerAllocatedMessageIDs = true
+	event.Append.Messages[0].FromUID = "sender"
+	event.Append.Messages[0].ClientMsgNo = "client-7"
+	future, err := g.Submit(context.Background(), meta.Key, event)
+	require.NoError(t, err)
+	_, err = future.Await(context.Background())
+	require.ErrorIs(t, err, ch.ErrLogConflict)
+}
+
+func TestQuorumRetryBindingRejectsLogicalMismatchWithoutSuccessSideEffects(t *testing.T) {
+	log := &reboundReactorQuorumLog{durableID: 7001, invalidLogicalRecords: true}
+	g, err := NewGroup(Config{
+		LocalNode: 1, ReactorCount: 1, MailboxSize: 32, Store: store.NewMemoryFactory(),
+		QuorumLog: log, AppendBatchMaxRecords: 1,
+	})
+	require.NoError(t, err)
+	defer g.Close()
+
+	meta := testMeta("quorum-invalid-rebound-logical-records", 1, 1)
+	meta.RouteGeneration = 7
+	meta.Replicas = []ch.NodeID{1, 2, 3}
+	meta.ISR = []ch.NodeID{1, 2, 3}
+	meta.MinISR = 2
+	require.NoError(t, awaitSubmit(g, meta.Key, Event{Kind: EventApplyMeta, Key: meta.Key, Meta: meta}))
+	event := appendEvent(meta, 7002, "payload")
+	event.Append.CommitMode = ch.CommitModeQuorum
+	event.Append.ServerAllocatedMessageIDs = true
+	event.Append.Messages[0].FromUID = "sender"
+	event.Append.Messages[0].ClientMsgNo = "client-7"
+	future, err := g.Submit(context.Background(), meta.Key, event)
+	require.NoError(t, err)
+	_, err = future.Await(context.Background())
+	require.ErrorIs(t, err, ch.ErrLogConflict)
+
+	runtime, err := g.reactors[0].lookupLoadedChannel(meta.Key)
+	require.NoError(t, err)
+	require.Zero(t, runtime.state.LEO)
+	require.Zero(t, runtime.state.HW)
+	_, cached := runtime.recentRecords.slice(1, 1, 1024)
+	require.False(t, cached)
+}
+
 func TestQuorumFollowerDoesNotScheduleLegacyPullAckReplication(t *testing.T) {
 	log := &reactorCaptureQuorumLog{}
 	transport := newCapturingTransport()
@@ -273,6 +397,37 @@ type releasedQuorumAuthority struct {
 	key       ch.ChannelKey
 	authority replication.AuthorityID
 }
+
+type reboundReactorQuorumLog struct {
+	durableID             uint64
+	invalidDurableCommand bool
+	invalidLogicalRecords bool
+	reboundRecord         ch.Record
+}
+
+func (l *reboundReactorQuorumLog) Install(_ context.Context, authority replication.Authority) (replication.Installed, error) {
+	return replication.Installed{Authority: authority.ID}, nil
+}
+
+func (l *reboundReactorQuorumLog) Commit(_ context.Context, proposal replication.Proposal) (replication.Receipt, error) {
+	records := append([]ch.Record(nil), proposal.Records...)
+	records[0].ID = l.durableID
+	records[0].ServerTimestampMS = int64(l.durableID)
+	if l.invalidLogicalRecords {
+		records[0].Payload = []byte("different-payload")
+	}
+	l.reboundRecord = records[0]
+	commandID := appendProposalCommandID(proposal.Key, proposal.Expected, records)
+	if l.invalidDurableCommand {
+		commandID[0] ^= 0xff
+	}
+	return replication.Receipt{
+		Authority: proposal.Expected, CommandID: commandID, First: 1, Last: uint64(len(records)), HW: uint64(len(records)),
+		RetryBinding: &replication.RetryBinding{RequestedCommandID: proposal.CommandID, Records: records},
+	}, nil
+}
+
+func (l *reboundReactorQuorumLog) Release(ch.ChannelKey, replication.AuthorityID) bool { return true }
 
 type reactorCaptureQuorumLog struct {
 	mu         sync.Mutex

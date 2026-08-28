@@ -524,9 +524,13 @@ the idempotent retry path and do not imply a dead leader. When a fresh
 authoritative Slot read still names a marked leader, foreground recovery first
 uses the shared durable-replica probe against that current leader. A matching
 healthy proof, or a direct not-found response for a reachable empty leader,
-clears the marker and reuses the same authority. Otherwise the service checks
-the channel's create-only active-task index, probes healthy ISR candidates, and
-submits the same deterministic `leader_failover` task through `MigrationStore`.
+clears the marker and reuses the same authority. A failed direct probe permits
+failover only after the durable health lease has expired or a fresh report says
+the runtime is not serviceable; a schedulable leader plus an indeterminate
+transport result remains retry-only. Once unavailability is proven, the service
+checks the channel's create-only active-task index, probes healthy ISR
+candidates, and submits the same deterministic `leader_failover` task through
+`MigrationStore`.
 The task carries the failed leader, channel epoch, leader epoch, and route-
 generation guard; retries reuse the same task ID, selected target, proof, and
 timestamps. Router retries remain bounded by the original SEND context.
@@ -555,6 +559,13 @@ a cutover proof, waits for final target catch-up, promotes the learner while
 removing the source, applies the final runtime metadata to the current leader
 and target before verifying membership, and clears the fence. Any blocked phase
 is persisted on the task before observer events are emitted.
+The executor's task source retains a bounded active-index cursor across ticks.
+It rotates across locally led hash slots and resumes after the exact task key,
+so a failed phase or a low task limit cannot pin every later migration behind
+one stable index entry. One source call inspects at most the configured task
+limit or sixteen active-index entries, whichever is larger. Durable blocked
+tasks advance that scan cursor but do not consume the returned runnable-task
+budget, keeping later failover work reachable without an unbounded table walk.
 `MigrationObserver` and `RepairObserver` are low-cardinality hooks for app-level
 metrics. Migration observations include active task count, active write-fence
 count, phase duration, blocked reason, and write-fence duration. Repair-scan

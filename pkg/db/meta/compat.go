@@ -2029,6 +2029,14 @@ func (s *ShardStore) ListActiveChannelMigrationTasks(ctx context.Context, limit 
 	return s.shard.ListActiveChannelMigrationTasks(ctx, limit)
 }
 
+// ScanActiveChannelMigrationTasks delegates a bounded active-index cursor scan.
+func (s *ShardStore) ScanActiveChannelMigrationTasks(ctx context.Context, after ChannelMigrationTaskCursor, limit int) ([]ChannelMigrationTask, ChannelMigrationTaskCursor, bool, int, error) {
+	if err := s.validate(); err != nil {
+		return nil, ChannelMigrationTaskCursor{}, false, 0, err
+	}
+	return s.shard.ScanActiveChannelMigrationTasks(ctx, after, limit)
+}
+
 func (s *ShardStore) ListChannelMigrationTasks(ctx context.Context) ([]ChannelMigrationTask, error) {
 	if err := s.validate(); err != nil {
 		return nil, err

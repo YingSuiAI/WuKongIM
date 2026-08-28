@@ -81,8 +81,9 @@ type appendBatch struct {
 	records   []ch.Record
 	trace     appendTraceBatch
 	// commandID and authority fence the exact proposal submitted to DurableQuorumLog.
-	commandID ch.CommandID
-	authority replication.AuthorityID
+	commandID                 ch.CommandID
+	authority                 replication.AuthorityID
+	serverAllocatedMessageIDs bool
 }
 
 func newAppendQueue(cfg appendQueueConfig) appendQueue {

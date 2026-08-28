@@ -324,6 +324,13 @@ type ChannelMigrationTask struct {
 	Progress                 ChannelMigrationProgress
 }
 
+// ChannelMigrationTaskCursor identifies the last active-index entry inspected
+// by a bounded migration executor scan.
+type ChannelMigrationTaskCursor struct {
+	ChannelID   string
+	ChannelType int64
+}
+
 // IsActive reports whether the task still owns the active channel slot.
 func (t ChannelMigrationTask) IsActive() bool {
 	return !t.IsTerminal()
@@ -441,6 +448,71 @@ func (s *Shard) ListActiveChannelMigrationTasks(ctx context.Context, limit int) 
 		return nil, err
 	}
 	return tasks, nil
+}
+
+// ScanActiveChannelMigrationTasks scans at most limit active-index entries
+// after cursor. Scanned counts index entries rather than returned active tasks
+// so stale indexes cannot turn one executor tick into an unbounded walk.
+func (s *Shard) ScanActiveChannelMigrationTasks(ctx context.Context, after ChannelMigrationTaskCursor, limit int) ([]ChannelMigrationTask, ChannelMigrationTaskCursor, bool, int, error) {
+	if err := s.check(ctx); err != nil {
+		return nil, ChannelMigrationTaskCursor{}, false, 0, err
+	}
+	if err := validateChannelMigrationTaskCursor(after); err != nil {
+		return nil, ChannelMigrationTaskCursor{}, false, 0, err
+	}
+	if err := validatePageLimit(limit); err != nil {
+		return nil, ChannelMigrationTaskCursor{}, false, 0, err
+	}
+	prefix := encodeChannelMigrationActiveIndexPrefix(s.hashSlot)
+	span := keycodec.NewPrefixSpan(prefix)
+	iter, err := s.db.engine.NewIter(engine.Span{Start: span.Start, End: span.End}, engine.IterOptions{})
+	if err != nil {
+		return nil, ChannelMigrationTaskCursor{}, false, 0, err
+	}
+	defer iter.Close()
+
+	ok := iter.First()
+	if after != (ChannelMigrationTaskCursor{}) {
+		afterKey := encodeChannelMigrationActiveIndexKey(s.hashSlot, after.ChannelID, after.ChannelType)
+		ok = iter.SeekGE(afterKey)
+		if ok && bytes.Equal(iter.Key(), afterKey) {
+			ok = iter.Next()
+		}
+	}
+	tasks := make([]ChannelMigrationTask, 0, limit)
+	next := after
+	scanned := 0
+	for ok && scanned < limit {
+		if err := contextErr(ctx); err != nil {
+			return nil, ChannelMigrationTaskCursor{}, false, scanned, err
+		}
+		channelID, channelType, decoded := decodeChannelMigrationActiveIndexKey(prefix, iter.Key())
+		if !decoded {
+			return nil, ChannelMigrationTaskCursor{}, false, scanned, dberrors.ErrCorruptValue
+		}
+		next = ChannelMigrationTaskCursor{ChannelID: channelID, ChannelType: channelType}
+		scanned++
+		value, err := iter.Value()
+		if err != nil {
+			return nil, ChannelMigrationTaskCursor{}, false, scanned, err
+		}
+		taskID := string(value)
+		if err := validateKeyString(taskID); err != nil {
+			return nil, ChannelMigrationTaskCursor{}, false, scanned, dberrors.ErrCorruptValue
+		}
+		task, exists, err := s.GetChannelMigrationTask(ctx, channelID, channelType, taskID)
+		if err != nil {
+			return nil, ChannelMigrationTaskCursor{}, false, scanned, err
+		}
+		if exists && task.IsActive() {
+			tasks = append(tasks, task)
+		}
+		ok = iter.Next()
+	}
+	if err := iter.Error(); err != nil {
+		return nil, ChannelMigrationTaskCursor{}, false, scanned, err
+	}
+	return tasks, next, !ok, scanned, nil
 }
 
 // ListChannelMigrationTasks returns all migration tasks in primary-key order.
@@ -734,6 +806,16 @@ func validateChannelMigrationIdentity(channelID string, taskID string) error {
 		return err
 	}
 	return validateKeyString(taskID)
+}
+
+func validateChannelMigrationTaskCursor(cursor ChannelMigrationTaskCursor) error {
+	if cursor == (ChannelMigrationTaskCursor{}) {
+		return nil
+	}
+	if cursor.ChannelID == "" {
+		return dberrors.ErrInvalidArgument
+	}
+	return validateKeyString(cursor.ChannelID)
 }
 
 func validateChannelMigrationTaskGuard(guard ChannelMigrationTaskGuard) error {

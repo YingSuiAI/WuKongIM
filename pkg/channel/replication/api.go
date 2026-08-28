@@ -48,6 +48,18 @@ type Receipt struct {
 	First     uint64
 	Last      uint64
 	HW        uint64
+	// RetryBinding is present only when a server-allocated logical retry adopted
+	// an older pending proposal. CommandID and Records remain the immutable
+	// durable identity; RequestedCommandID identifies the newly submitted waiter.
+	RetryBinding *RetryBinding
+}
+
+// RetryBinding lets the reactor complete a new waiter from the exact record
+// identities already owned by an outcome-unknown proposal. It is never used
+// for caller-supplied message IDs or for a different logical send.
+type RetryBinding struct {
+	RequestedCommandID ch.CommandID
+	Records            []ch.Record
 }
 
 // Installed is the ready frontier after quorum recovery. A non-empty frontier

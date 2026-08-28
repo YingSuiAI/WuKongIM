@@ -84,11 +84,12 @@ func TestForegroundAppendAuthorityRecoveryReusesExactCreateCommandAfterUncertain
 	id := ch.ChannelID{ID: "same-task", Type: 2}
 	meta := ch.Meta{Key: ch.ChannelKeyForID(id), ID: id, Epoch: 11, LeaderEpoch: 20, RouteGeneration: 30, Leader: 1, Replicas: []ch.NodeID{1, 2, 3}, ISR: []ch.NodeID{1, 2, 3}, MinISR: 2, Status: ch.StatusActive}
 	source := &foregroundRecoverySourceFake{
-		snapshot: control.Snapshot{Nodes: failoverHealthyNodes(2, 3)},
+		snapshot: control.Snapshot{Nodes: appendRecoveryNodesWithDownLeader(1, 1, 2, 3)},
 		probes: map[uint64]ch.RuntimeProbeChannel{
 			2: failoverProbe(id, 2, 11, 20, 10, 10).Probe,
 			3: failoverProbe(id, 3, 11, 20, 9, 9).Probe,
 		},
+		probeErrs: map[uint64]error{1: errors.New("leader unavailable")},
 	}
 	store := &foregroundRecoveryStoreFake{createErrs: []error{errors.New("uncertain proposal"), nil}}
 	recovery := &ForegroundAppendAuthorityRecovery{source: source, store: store, now: func() time.Time { return time.UnixMilli(1234) }}
@@ -103,7 +104,7 @@ func TestForegroundAppendAuthorityRecoveryReusesExactCreateCommandAfterUncertain
 	require.Equal(t, int64(1234), store.requests[0].CreatedAtMS)
 	require.Equal(t, ch.NodeID(2), store.requests[0].DesiredLeader)
 	require.Equal(t, 1, source.snapshotCalls)
-	require.Equal(t, []uint64{2, 3}, source.probeCalls)
+	require.Equal(t, []uint64{1, 2, 3}, source.probeCalls)
 }
 
 func TestForegroundAppendAuthorityRecoveryJoinsActiveChannelTask(t *testing.T) {
@@ -123,11 +124,12 @@ func TestForegroundAppendAuthorityRecoveryUsesDurableReplicaWhenFollowerRuntimeI
 	id := ch.ChannelID{ID: "unloaded-follower", Type: 2}
 	meta := ch.Meta{Key: ch.ChannelKeyForID(id), ID: id, Epoch: 11, LeaderEpoch: 20, RouteGeneration: 30, Leader: 1, Replicas: []ch.NodeID{1, 2, 3}, ISR: []ch.NodeID{1, 2, 3}, MinISR: 2, Status: ch.StatusActive}
 	source := &foregroundRecoverySourceFake{
-		snapshot: control.Snapshot{Nodes: failoverHealthyNodes(2, 3)},
+		snapshot: control.Snapshot{Nodes: appendRecoveryNodesWithDownLeader(1, 1, 2, 3)},
 		probes: map[uint64]ch.RuntimeProbeChannel{
 			2: failoverProbe(id, 2, 11, 20, 10, 10).Probe,
 			3: failoverProbe(id, 3, 11, 20, 10, 10).Probe,
 		},
+		probeErrs: map[uint64]error{1: errors.New("leader unavailable")},
 	}
 	store := &foregroundRecoveryStoreFake{}
 	recovery := &ForegroundAppendAuthorityRecovery{source: source, store: store, now: time.Now}
@@ -135,7 +137,7 @@ func TestForegroundAppendAuthorityRecoveryUsesDurableReplicaWhenFollowerRuntimeI
 	_, err := recovery.EnsureAppendAuthorityRecovery(context.Background(), meta)
 	require.NoError(t, err)
 	require.Zero(t, source.runtimeProbeCalls, "failover must not require a loaded follower reactor")
-	require.Equal(t, []uint64{2, 3}, source.probeCalls)
+	require.Equal(t, []uint64{1, 2, 3}, source.probeCalls)
 	require.Len(t, store.requests, 1)
 }
 
@@ -196,9 +198,179 @@ func TestForegroundAppendAuthorityRecoveryDoesNotMigrateOnIndeterminateCurrentLe
 	require.Empty(t, store.requests, "indeterminate leader probe must not create durable failover")
 }
 
+func TestForegroundAppendAuthorityRecoveryMigratesAfterLeaderHealthLeaseExpiresAndProbeFails(t *testing.T) {
+	id := ch.ChannelID{ID: "stale-health-current-leader", Type: 1}
+	meta := ch.Meta{Key: ch.ChannelKeyForID(id), ID: id, Epoch: 1, LeaderEpoch: 1, RouteGeneration: 1, Leader: 4, Replicas: []ch.NodeID{1, 3, 4}, ISR: []ch.NodeID{1, 3, 4}, MinISR: 2, Status: ch.StatusActive}
+	nodes := failoverHealthyNodes(1, 3, 4)
+	for index := range nodes {
+		if nodes[index].NodeID == 4 {
+			nodes[index].Health.Freshness = control.NodeHealthStale
+		}
+	}
+	source := &foregroundRecoverySourceFake{
+		snapshot: control.Snapshot{Nodes: nodes},
+		probes: map[uint64]ch.RuntimeProbeChannel{
+			1: failoverProbe(id, 1, 1, 1, 10, 10).Probe,
+			3: failoverProbe(id, 3, 1, 1, 10, 10).Probe,
+		},
+		probeErrs: map[uint64]error{4: errors.New("temporary probe timeout")},
+	}
+	store := &foregroundRecoveryStoreFake{}
+	recovery := &ForegroundAppendAuthorityRecovery{source: source, store: store, now: time.Now}
+
+	disposition, err := recovery.EnsureAppendAuthorityRecovery(context.Background(), meta)
+
+	require.NoError(t, err)
+	require.Equal(t, AppendAuthorityRecoveryPending, disposition)
+	require.Len(t, store.requests, 1)
+}
+
+func TestForegroundAppendAuthorityRecoveryMigratesAfterFreshDownAndFailedProbe(t *testing.T) {
+	id := ch.ChannelID{ID: "fresh-down-current-leader", Type: 1}
+	meta := ch.Meta{Key: ch.ChannelKeyForID(id), ID: id, Epoch: 1, LeaderEpoch: 1, RouteGeneration: 1, Leader: 4, Replicas: []ch.NodeID{1, 3, 4}, ISR: []ch.NodeID{1, 3, 4}, MinISR: 2, Status: ch.StatusActive}
+	nodes := failoverHealthyNodes(1, 3, 4)
+	for index := range nodes {
+		if nodes[index].NodeID == 4 {
+			nodes[index].Health.Status = control.NodeDown
+			nodes[index].Status = control.NodeDown
+			nodes[index].Health.RuntimeReady = false
+		}
+	}
+	source := &foregroundRecoverySourceFake{
+		snapshot: control.Snapshot{Nodes: nodes},
+		probes: map[uint64]ch.RuntimeProbeChannel{
+			1: failoverProbe(id, 1, 1, 1, 10, 10).Probe,
+			3: failoverProbe(id, 3, 1, 1, 10, 10).Probe,
+		},
+		probeErrs: map[uint64]error{4: errors.New("connection refused")},
+	}
+	store := &foregroundRecoveryStoreFake{}
+	recovery := &ForegroundAppendAuthorityRecovery{source: source, store: store, now: time.Now}
+
+	disposition, err := recovery.EnsureAppendAuthorityRecovery(context.Background(), meta)
+
+	require.NoError(t, err)
+	require.Equal(t, AppendAuthorityRecoveryPending, disposition)
+	require.Len(t, store.requests, 1)
+	require.Equal(t, ch.NodeID(1), store.requests[0].DesiredLeader)
+}
+
+func TestForegroundAppendAuthorityRecoveryMigratesAfterFreshNotReadyStopReportAndFailedProbe(t *testing.T) {
+	id := ch.ChannelID{ID: "fresh-not-ready-current-leader", Type: 1}
+	meta := ch.Meta{Key: ch.ChannelKeyForID(id), ID: id, Epoch: 1, LeaderEpoch: 1, RouteGeneration: 1, Leader: 4, Replicas: []ch.NodeID{1, 3, 4}, ISR: []ch.NodeID{1, 3, 4}, MinISR: 2, Status: ch.StatusActive}
+	nodes := failoverHealthyNodes(1, 3, 4)
+	for index := range nodes {
+		if nodes[index].NodeID == 4 {
+			nodes[index].Health.RuntimeReady = false
+		}
+	}
+	source := &foregroundRecoverySourceFake{
+		snapshot: control.Snapshot{Nodes: nodes},
+		probes: map[uint64]ch.RuntimeProbeChannel{
+			1: failoverProbe(id, 1, 1, 1, 10, 10).Probe,
+			3: failoverProbe(id, 3, 1, 1, 10, 10).Probe,
+		},
+		probeErrs: map[uint64]error{4: errors.New("connection refused")},
+	}
+	store := &foregroundRecoveryStoreFake{}
+	recovery := &ForegroundAppendAuthorityRecovery{source: source, store: store, now: time.Now}
+
+	disposition, err := recovery.EnsureAppendAuthorityRecovery(context.Background(), meta)
+
+	require.NoError(t, err)
+	require.Equal(t, AppendAuthorityRecoveryPending, disposition)
+	require.Len(t, store.requests, 1)
+}
+
+func TestForegroundAppendAuthorityRecoveryMigratesWhenLeaderIsAbsentFromDurableMembership(t *testing.T) {
+	id := ch.ChannelID{ID: "removed-current-leader", Type: 1}
+	meta := ch.Meta{Key: ch.ChannelKeyForID(id), ID: id, Epoch: 1, LeaderEpoch: 1, RouteGeneration: 1, Leader: 4, Replicas: []ch.NodeID{1, 3, 4}, ISR: []ch.NodeID{1, 3, 4}, MinISR: 2, Status: ch.StatusActive}
+	source := &foregroundRecoverySourceFake{
+		snapshot: control.Snapshot{Nodes: failoverHealthyNodes(1, 3)},
+		probes: map[uint64]ch.RuntimeProbeChannel{
+			1: failoverProbe(id, 1, 1, 1, 10, 10).Probe,
+			3: failoverProbe(id, 3, 1, 1, 10, 10).Probe,
+		},
+	}
+	store := &foregroundRecoveryStoreFake{}
+	recovery := &ForegroundAppendAuthorityRecovery{source: source, store: store, now: time.Now}
+
+	disposition, err := recovery.EnsureAppendAuthorityRecovery(context.Background(), meta)
+
+	require.NoError(t, err)
+	require.Equal(t, AppendAuthorityRecoveryPending, disposition)
+	require.Len(t, store.requests, 1)
+	require.Equal(t, []uint64{1, 3}, source.probeCalls, "absent leader must not be probed as a live member")
+}
+
+func TestForegroundAppendAuthorityRecoveryMigratesWhenUnhealthyLeaderProbeShowsDemotedRuntime(t *testing.T) {
+	id := ch.ChannelID{ID: "demoted-current-leader", Type: 1}
+	meta := ch.Meta{Key: ch.ChannelKeyForID(id), ID: id, Epoch: 1, LeaderEpoch: 1, RouteGeneration: 1, Leader: 4, Replicas: []ch.NodeID{1, 3, 4}, ISR: []ch.NodeID{1, 3, 4}, MinISR: 2, Status: ch.StatusActive}
+	nodes := failoverHealthyNodes(1, 3, 4)
+	for index := range nodes {
+		if nodes[index].NodeID == 4 {
+			nodes[index].Health.Freshness = control.NodeHealthStale
+		}
+	}
+	source := &foregroundRecoverySourceFake{
+		snapshot: control.Snapshot{Nodes: nodes},
+		probes: map[uint64]ch.RuntimeProbeChannel{
+			1: failoverProbe(id, 1, 1, 1, 10, 10).Probe,
+			3: failoverProbe(id, 3, 1, 1, 10, 10).Probe,
+			4: failoverProbe(id, 4, 1, 1, 10, 10).Probe,
+		},
+	}
+	store := &foregroundRecoveryStoreFake{}
+	recovery := &ForegroundAppendAuthorityRecovery{source: source, store: store, now: time.Now}
+
+	disposition, err := recovery.EnsureAppendAuthorityRecovery(context.Background(), meta)
+
+	require.NoError(t, err)
+	require.Equal(t, AppendAuthorityRecoveryPending, disposition)
+	require.Len(t, store.requests, 1)
+}
+
+func TestForegroundAppendAuthorityRecoveryDoesNotTreatNotFoundAsUsableAfterNotReadyStopReport(t *testing.T) {
+	id := ch.ChannelID{ID: "not-found-after-stop", Type: 1}
+	meta := ch.Meta{Key: ch.ChannelKeyForID(id), ID: id, Epoch: 1, LeaderEpoch: 1, RouteGeneration: 1, Leader: 4, Replicas: []ch.NodeID{1, 3, 4}, ISR: []ch.NodeID{1, 3, 4}, MinISR: 2, Status: ch.StatusActive}
+	nodes := failoverHealthyNodes(1, 3, 4)
+	for index := range nodes {
+		if nodes[index].NodeID == 4 {
+			nodes[index].Health.RuntimeReady = false
+		}
+	}
+	source := &foregroundRecoverySourceFake{
+		snapshot: control.Snapshot{Nodes: nodes},
+		probes: map[uint64]ch.RuntimeProbeChannel{
+			1: failoverProbe(id, 1, 1, 1, 10, 10).Probe,
+			3: failoverProbe(id, 3, 1, 1, 10, 10).Probe,
+		},
+	}
+	store := &foregroundRecoveryStoreFake{}
+	recovery := &ForegroundAppendAuthorityRecovery{source: source, store: store, now: time.Now}
+
+	disposition, err := recovery.EnsureAppendAuthorityRecovery(context.Background(), meta)
+
+	require.NoError(t, err)
+	require.Equal(t, AppendAuthorityRecoveryPending, disposition)
+	require.Len(t, store.requests, 1)
+}
+
 type recordingAppendAuthorityRecovery struct {
 	metas       []ch.Meta
 	disposition AppendAuthorityRecoveryDisposition
+}
+
+func appendRecoveryNodesWithDownLeader(leader uint64, ids ...uint64) []control.Node {
+	nodes := failoverHealthyNodes(ids...)
+	for index := range nodes {
+		if nodes[index].NodeID == leader {
+			nodes[index].Status = control.NodeDown
+			nodes[index].Health.Status = control.NodeDown
+			nodes[index].Health.RuntimeReady = false
+		}
+	}
+	return nodes
 }
 
 func (r *recordingAppendAuthorityRecovery) EnsureAppendAuthorityRecovery(_ context.Context, meta ch.Meta) (AppendAuthorityRecoveryDisposition, error) {
