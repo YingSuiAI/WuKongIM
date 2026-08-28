@@ -221,13 +221,19 @@ type Node struct {
 	CapacityWeight uint32
 }
 
-// NodeSchedulableForPlacement reports whether a node can receive new data placement.
-// A schedulable node must be data-role, effectively active, fresh alive, and runtime-ready.
-func NodeSchedulableForPlacement(node Node) bool {
+// NodeActiveDataMember reports whether a node remains an active durable member
+// of the data plane, independently of its current runtime health.
+func NodeActiveDataMember(node Node) bool {
 	if !hasRole(node.Roles, RoleData) {
 		return false
 	}
-	if effectiveJoinState(node.JoinState) != NodeJoinStateActive {
+	return effectiveJoinState(node.JoinState) == NodeJoinStateActive
+}
+
+// NodeSchedulableForPlacement reports whether a node can lead or acknowledge
+// new data placement. A schedulable node must also be a durable active member.
+func NodeSchedulableForPlacement(node Node) bool {
+	if !NodeActiveDataMember(node) {
 		return false
 	}
 	return node.Health.Freshness == NodeHealthFresh &&

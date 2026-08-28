@@ -42,6 +42,7 @@ type channelService interface {
 	Append(context.Context, channelruntime.AppendRequest) (channelruntime.AppendResult, error)
 	AppendBatch(context.Context, channelruntime.AppendBatchRequest) (channelruntime.AppendBatchResult, error)
 	ResolveAppendAuthority(context.Context, channelruntime.ChannelID) (channelruntime.Meta, error)
+	InvalidateAppendAuthority(channelruntime.ChannelID, channelruntime.NodeID, uint64, uint64, uint64)
 	ReadChannelLastVisible(context.Context, channelruntime.ChannelID, uint64) (channelruntime.Message, bool, error)
 	RetentionView(context.Context, channelruntime.ChannelID) (channelruntime.RetentionView, error)
 	ApplyRetentionBoundary(context.Context, channelruntime.RetentionApplyRequest) (channelruntime.RetentionApplyResult, error)
@@ -96,7 +97,7 @@ type Node struct {
 	// invoked synchronously by Start, applySnapshot, or the control watch loop.
 	preferredLeaderReconciler taskExecutor
 	channels                  channelService
-	// channelDataNodes tracks health-schedulable data nodes for default Channel placement.
+	// channelDataNodes tracks active and health-schedulable data nodes for default Channel placement.
 	channelDataNodes dataNodeView
 	// channelDataPlaneLease gates local Channel leader appends on fresh control visibility.
 	channelDataPlaneLease *channelDataPlaneLeaseGuard
@@ -825,13 +826,7 @@ func (n *Node) InvalidateChannelAppendAuthority(id channelruntime.ChannelID, lea
 	if n == nil || n.channels == nil {
 		return
 	}
-	invalidator, ok := n.channels.(interface {
-		InvalidateAppendAuthority(channelruntime.ChannelID, channelruntime.NodeID, uint64, uint64, uint64)
-	})
-	if !ok {
-		return
-	}
-	invalidator.InvalidateAppendAuthority(id, channelruntime.NodeID(leader), epoch, leaderEpoch, routeGeneration)
+	n.channels.InvalidateAppendAuthority(id, channelruntime.NodeID(leader), epoch, leaderEpoch, routeGeneration)
 }
 
 // ReadChannelCommitted reads locally committed channel messages from the Node-created Channel store.

@@ -68,6 +68,49 @@ func TestRuntimeCarriesConfiguredReplicaHedgeDelayToDurabilityDispatcher(t *test
 	}
 }
 
+func TestRuntimeProbeReplicaReadsDurableFrontierWithoutInstallingRuntimeAuthority(t *testing.T) {
+	request := testReplicateRequest(t, "1:durable-probe", "durable-probe", 1, []byte("payload"))
+	store, err := NewStoreAdapter(StoreAdapterConfig{
+		Factory: channelstore.NewMemoryFactory(), MaxBatchItems: MaxExchangeBatchItems, MaxBatchBytes: MaxExchangeBatchBytes,
+	})
+	if err != nil {
+		t.Fatalf("NewStoreAdapter() error = %v", err)
+	}
+	mutation := Mutation{
+		ChannelKey: request.ChannelKey, ChannelID: request.ChannelID, Manifest: request.Manifest,
+		Records: request.Records, Committed: request.Manifest.LastOffset, Class: MutationClassFollowerQuorum,
+	}
+	syncCertifiedTestMutations(t, store, mutation)
+	runtime, err := NewRuntime(RuntimeConfig{
+		LocalNode: 2, Store: store, Link: &recordingPeerLink{}, Goroutines: goruntimeregistry.New(),
+	})
+	if err != nil {
+		t.Fatalf("NewRuntime() error = %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := runtime.Close(ctx); err != nil {
+			t.Errorf("Runtime.Close() error = %v", err)
+		}
+	})
+
+	got, err := runtime.ProbeReplica(context.Background(), request.ChannelKey, request.ChannelID)
+	if err != nil {
+		t.Fatalf("ProbeReplica() error = %v", err)
+	}
+	want := ReplicaState{
+		LEO: request.Manifest.LastOffset, Committed: request.Manifest.LastOffset,
+		Manifest: request.Manifest,
+	}
+	if got.LEO != want.LEO || got.Committed != want.Committed || got.Manifest != want.Manifest {
+		t.Fatalf("ProbeReplica() = %+v, want %+v", got, want)
+	}
+	if len(runtime.log.channels) != 0 {
+		t.Fatalf("runtime authorities = %d, durable probe must not install authority", len(runtime.log.channels))
+	}
+}
+
 func TestRuntimeLocalDurabilityObservesEndToEndStage(t *testing.T) {
 	request := testReplicateRequest(t, "1:local-observe", "local-observe", 1, []byte("payload"))
 	store := &recordingReplicaStore{results: []MutationResult{{Outcome: ch.AppendOutcomeDurable, LastOffset: request.Manifest.LastOffset}}}
@@ -323,6 +366,62 @@ func TestRuntimeRepairsFollowerGapFromLeaderDurableStore(t *testing.T) {
 	waitForRuntimeReplicaLEO(t, stores[2], authority, 2)
 }
 
+func TestRuntimeCatchUpReplicaInstallsCertifiedPrefixBeforeMembershipPromotion(t *testing.T) {
+	router := &runtimeTestRouter{servers: make(map[ch.NodeID]*ExchangeServer), rejectReplicate: make(map[ch.NodeID]int)}
+	runtimes := make(map[ch.NodeID]*Runtime, 4)
+	stores := make(map[ch.NodeID]ReplicaStore, 4)
+	for _, node := range []ch.NodeID{1, 2, 3, 4} {
+		store, err := NewStoreAdapter(StoreAdapterConfig{
+			Factory: channelstore.NewMemoryFactory(), MaxBatchItems: 64, MaxBatchBytes: 4 << 20,
+		})
+		if err != nil {
+			t.Fatalf("NewStoreAdapter(node=%d) error = %v", node, err)
+		}
+		runtime, err := NewRuntime(RuntimeConfig{
+			LocalNode: node, Store: store, Link: runtimeTestLink{from: node, router: router}, Goroutines: goruntimeregistry.New(),
+		})
+		if err != nil {
+			t.Fatalf("NewRuntime(node=%d) error = %v", node, err)
+		}
+		router.register(node, runtime.ExchangeServer())
+		runtimes[node], stores[node] = runtime, store
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		for _, node := range []ch.NodeID{1, 2, 3, 4} {
+			if err := runtimes[node].Close(ctx); err != nil {
+				t.Errorf("Runtime.Close(node=%d) error = %v", node, err)
+			}
+		}
+	})
+	authority := Authority{
+		Key: "1:replacement-catch-up", ChannelID: ch.ChannelID{ID: "replacement-catch-up", Type: 1},
+		ID:     AuthorityID{ChannelEpoch: 3, LeaderTerm: 5, FenceVersion: 7},
+		Leader: 1, Voters: []ch.NodeID{1, 2, 3}, WriteQuorum: 2,
+	}
+	if _, err := runtimes[1].Log().Install(context.Background(), authority); err != nil {
+		t.Fatalf("Install() error = %v", err)
+	}
+	receipt, err := runtimes[1].Log().Commit(context.Background(), Proposal{
+		Key: authority.Key, Expected: authority.ID, CommandID: ch.CommandID{31: 91},
+		Records: []ch.Record{{ID: 91, Epoch: authority.ID.ChannelEpoch, FromUID: "sender", ClientMsgNo: "replace-91", Payload: []byte("payload"), SizeBytes: 7, ServerTimestampMS: 91}},
+	})
+	if err != nil {
+		t.Fatalf("Commit() error = %v", err)
+	}
+	if err := runtimes[1].CatchUpReplica(context.Background(), authority, 4, receipt.HW); err != nil {
+		t.Fatalf("CatchUpReplica() error = %v", err)
+	}
+	loaded, err := stores[4].Load(context.Background(), LoadBatch{Items: []LoadRequest{{
+		ChannelKey: authority.Key, ChannelID: authority.ChannelID, ProbeIndexes: []uint64{receipt.HW},
+	}}})
+	if err != nil || len(loaded.Items) != 1 || loaded.Items[0].Err != nil || loaded.Items[0].State.LEO < receipt.HW ||
+		loaded.Items[0].State.Committed < receipt.HW || len(loaded.Items[0].Entries) != 1 || !loaded.Items[0].Entries[0].Present {
+		t.Fatalf("replacement durable state = %+v, error %v; want certified prefix through %d", loaded, err, receipt.HW)
+	}
+}
+
 func TestRuntimeRetainsEveryFollowerRepairWhenExecutionQueueIsSaturated(t *testing.T) {
 	const channelCount = 66
 
@@ -409,7 +508,10 @@ func TestRuntimeRetainsEveryFollowerRepairWhenExecutionQueueIsSaturated(t *testi
 	for i := 1; i < channelCount; i++ {
 		commit(i)
 	}
-	deadline := time.Now().Add(2 * time.Second)
+	// A business ACK now performs a data-quorum round followed by a commit-
+	// certificate round. Keep this saturation assertion bounded, but leave
+	// enough time for all deferred completions to enter the blocked owner.
+	deadline := time.Now().Add(5 * time.Second)
 	for runtimes[1].repairs.pendingCount() < channelCount {
 		if time.Now().After(deadline) {
 			t.Fatalf("retained repairs = %d, want %d", runtimes[1].repairs.pendingCount(), channelCount)

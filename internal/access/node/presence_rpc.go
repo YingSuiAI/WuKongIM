@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	backupcontract "github.com/WuKongIM/WuKongIM/internal/contracts/backup"
 	"github.com/WuKongIM/WuKongIM/internal/contracts/onlinedelivery"
@@ -602,11 +603,13 @@ type PresenceRPCNode interface {
 type Client struct {
 	// node is the raw cluster RPC transport used by this adapter.
 	node PresenceRPCNode
+	// channelAppendAttemptTimeout bounds one remote Channel append transport attempt.
+	channelAppendAttemptTimeout time.Duration
 }
 
 // NewClient creates a presence authority RPC client.
 func NewClient(node PresenceRPCNode) *Client {
-	return &Client{node: node}
+	return &Client{node: node, channelAppendAttemptTimeout: defaultChannelAppendRPCAttemptTimeout}
 }
 
 // RegisterRoute registers one owner route on the target authority node.

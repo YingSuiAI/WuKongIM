@@ -224,7 +224,7 @@ Start(ctx)
 
 `Start` requires cluster semantics even for one node. A single-node cluster uses a Controller-backed single-voter control runtime instead of a bypass path. Multi-voter default startup uses `pkg/transport` one-way service messages for Controller Raft traffic and RPC responses only for state-sync requests. Outbound Controller Raft traffic uses fixed sharded workers and bounded per-worker queues, preserving per-peer order while dropping admission when a shard is full; Raft retransmission is relied on instead of accumulating per-batch goroutines. Slot and Controller Raft receive services use one ordered handler worker even when generic service concurrency is configured higher, preserving each stable peer connection's Append-before-Heartbeat protocol order before messages enter the Raft step queue. Sends use a bounded timeout, emit low-cardinality `controller_raft_queue`, `controller_raft_admission`, and `controller_raft_task` transport observations, and stop with the owning Node. The Controller Raft receive handler also bounds local `Step` enqueue time and may drop messages when the local Step queue is saturated.
 
-`Node.Start` only establishes local-node readiness: the node has a valid local control snapshot, installed routes, reconciled local Slot runtime state, and started local Channel runtime resources. Package tests use `WaitClusterReady` for converged local control snapshots, and tests that specifically require distributed Controller write readiness should add the separate Controller proposal probe gate. Slot and Channel append tests should add their own Slot leader or Channel metadata gates when those paths are part of the assertion. `ProbeWriteReady` is the foreground app gate: it verifies all hash slots have leaders, refreshes health-only control snapshots when Channel runtime placement candidates are stale, verifies Channel runtime has enough health-schedulable data nodes to create new channel placement, runs a bounded representative Slot metadata write probe, and refreshes the node-local Channel runtime data-plane lease after the probe succeeds.
+`Node.Start` only establishes local-node readiness: the node has a valid local control snapshot, installed routes, reconciled local Slot runtime state, and started local Channel runtime resources. Package tests use `WaitClusterReady` for converged local control snapshots, and tests that specifically require distributed Controller write readiness should add the separate Controller proposal probe gate. Slot and Channel append tests should add their own Slot leader or Channel metadata gates when those paths are part of the assertion. `ProbeWriteReady` is the foreground app gate: it verifies all hash slots have leaders, refreshes health-only control snapshots when Channel runtime placement candidates are stale, verifies Channel runtime has at least the configured replica count of active data members and at least quorum `MinISR` health-schedulable members for new placement, runs a bounded representative Slot metadata write probe, and refreshes the node-local Channel runtime data-plane lease after the probe succeeds.
 
 Before the bounded write probes, the Node-created default Slot runtime captures
 one control/route revision and validates every logical Slot Raft Group runtime involved in
@@ -505,6 +505,8 @@ canonical compatibility port used by `pkg/slot/proxy`; it must not introduce a
 second routing table or a cluster-bypass path.
 Automatic dead-leader recovery uses `channels.RepairScanner` as a bounded
 RunOnce scheduler primitive over Slot-leader-owned runtime metadata pages. It
+retains a rotating Slot/page cursor across scheduler ticks so a one-page tick
+budget cannot permanently starve later metadata pages or later local Slots. It
 detects stale or unschedulable Channel runtime leaders from the control snapshot,
 probes surviving ISR replicas, checks duplicate active migration tasks in the
 same hash-slot shard that produced the scanned runtime metadata row, asks
@@ -514,6 +516,16 @@ re-routing scanner work through a stale foreground Slot leader after failover.
 A failover task sets `WriteFenceReasonFailover` and uses the target replica's
 committed HW as the cutover proof; it does not drain the unavailable source
 leader.
+Foreground append routing does not wait for this bounded scanner to revisit a
+hot channel. When an exact cached authority version fails and a fresh
+authoritative Slot read still names the same leader, the Channel service keeps
+that version non-routable, checks the channel's create-only active-task index,
+probes only healthy ISR replicas, and submits the same deterministic
+`leader_failover` task through `MigrationStore`. The task carries the failed
+leader, channel epoch, leader epoch, and route-generation guard; retries reuse
+the same task ID, selected target, proof, and timestamps. Router retries remain
+bounded by the original SEND context and can resume only after a newer
+authoritative metadata version is observed.
 After leader recovery is ruled out for a channel, the same scanner asks
 `ReplicaRepairPlanner` whether an unhealthy non-leader replica can be replaced.
 Follower repair only creates a `replica_replace` task when the remaining
@@ -831,19 +843,24 @@ leader-forwarding control facade as other Controller writes. Cluster fan-out,
 target readiness checks, and safety fences are owned by
 `internal/usecase/management`, not cluster.
 
-`channels.Service` keeps a combined runtime interface because the public Channel runtime `Cluster` surface and replication `transport.Server` surface are separate. `StaticMetaSource` is available for tests and smoke runs. `SlotMetaSource` adapts authoritative `pkg/db/meta` `ChannelRuntimeMeta` records into Channel runtime metadata for production wiring, including `RouteGeneration` for complete append-cache versioning and the durable write-fence token/version/reason/deadline used to block new leader appends. The generation remains cache metadata and is not added to Channel replication RPC codecs or machine decisions. `ResolveChannelMeta` remains read-only; `EnsureChannelMeta` is the append-only path that may create the initial ChannelRuntimeMeta through the Slot-owned create-only metadata port before any Channel runtime append is attempted. Existing rows never propose creation. Missing rows submit command 59 exactly once, accept both created and concurrent-loser results, then reread the physical Slot leader's authoritative row. Ordinary runtime-meta upsert remains separate for migration and repair. `SlotMetaSource` emits low-cardinality metadata resolve sub-stages for Slot meta read, initial placement/build, missing-meta write/propose, aggregate create/write, and final reread so cold activation tail latency can be attributed before pprof. In the default runtime, `meta_create_propose` wraps the Slot metadata creator call; `meta_create_propose_local` and `meta_create_propose_forward` split origin-side routing, `meta_create_slot_propose_submit` times local `Runtime.Propose`, and `meta_create_slot_propose_wait` times the subsequent Multi-Raft future wait. The default proposer also bridges the append stage observer into `pkg/slot/multiraft`, allowing the same Channel runtime stage histogram to report `meta_create_slot_control_wait`, `meta_create_slot_raft_commit_wait`, `meta_create_slot_fsm_apply`, `meta_create_slot_fsm_commit`, and `meta_create_slot_mark_applied`.
+`channels.Service` keeps a combined runtime interface because the public Channel runtime `Cluster` surface and replication `transport.Server` surface are separate. `StaticMetaSource` is available for tests and smoke runs. `SlotMetaSource` adapts authoritative `pkg/db/meta` `ChannelRuntimeMeta` records into Channel runtime metadata for production wiring, including `RouteGeneration` for complete append-cache versioning and the durable write-fence token/version/reason/deadline used to block new leader appends. The generation remains cache metadata and is not added to Channel replication RPC codecs or machine decisions. `ResolveChannelMeta` remains read-only; `EnsureChannelMeta` is the append-only path that may create the initial ChannelRuntimeMeta through the Slot-owned create-only metadata port before any Channel runtime append is attempted. Existing rows never propose creation. Missing rows submit command 59, accept both created and concurrent-loser results, then reread the physical Slot leader's authoritative row. During a Slot leader change, `EnsureChannelMeta` uses one caller-bounded election window: every retry first rereads the authoritative create-only key and only an authoritatively missing row may resubmit the same ChannelID/ChannelType identity. This recovery is confined to initial runtime metadata creation and never retries arbitrary Slot proposals. Ordinary runtime-meta upsert remains separate for migration and repair. `SlotMetaSource` emits low-cardinality metadata resolve sub-stages for Slot meta read, initial placement/build, missing-meta write/propose, aggregate create/write, and final reread so cold activation tail latency can be attributed before pprof. In the default runtime, `meta_create_propose` wraps the Slot metadata creator call; `meta_create_propose_local` and `meta_create_propose_forward` split origin-side routing, `meta_create_slot_propose_submit` times local `Runtime.Propose`, and `meta_create_slot_propose_wait` times the subsequent Multi-Raft future wait. The default proposer also bridges the append stage observer into `pkg/slot/multiraft`, allowing the same Channel runtime stage histogram to report `meta_create_slot_control_wait`, `meta_create_slot_raft_commit_wait`, `meta_create_slot_fsm_apply`, `meta_create_slot_fsm_commit`, and `meta_create_slot_mark_applied`.
 
 Initial Channel runtime placement is data-plane placement, not Slot metadata
 placement. Slot routing identifies the authoritative metadata Slot and its
 leader/peers; the default Channel runtime placement resolver chooses replicas from
-health-schedulable data-role nodes using deterministic rendezvous ranking and
-uses the route preferred leader only when that node is selected as a Channel runtime
-replica. New Slot and Channel placement uses
-`control.NodeSchedulableForPlacement`: a node must be data-role, effectively
-`active`, fresh `alive`, and runtime-ready. Joining, leaving, removed, suspect,
-down, stale-health, missing-health, and runtime-not-ready nodes fail closed for
-new placement candidates. Existing `ChannelRuntimeMeta` rows remain
-authoritative for established channels.
+durable active data-role members using deterministic rendezvous ranking. It
+selects health-schedulable members first and may use active but currently
+unschedulable members only to fill the configured replica count when the
+health-schedulable set still satisfies quorum `MinISR`. Initial ISR contains
+only the selected health-schedulable replicas, and the Channel leader is always
+chosen from that ISR; the route preferred leader is used only when it is in the
+selected ISR. `control.NodeActiveDataMember` excludes joining, leaving,
+removed, and non-data nodes from all new placement, while
+`control.NodeSchedulableForPlacement` additionally requires fresh `alive`
+health and runtime readiness. New placement fails closed when active membership
+cannot fill the replica count or health-schedulable membership cannot satisfy
+`MinISR`. Existing `ChannelRuntimeMeta` rows remain authoritative for
+established channels.
 
 Channel runtime PullHint RPCs carry only a slim metadata reference and wakeup fields.
 An unloaded follower treats the hint only as a trigger and resolves through

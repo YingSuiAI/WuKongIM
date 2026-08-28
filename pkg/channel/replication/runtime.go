@@ -80,6 +80,7 @@ type RuntimeConfig struct {
 type Runtime struct {
 	ctx    context.Context
 	cancel context.CancelFunc
+	store  ReplicaStore
 
 	log    *quorumLog
 	server *ExchangeServer
@@ -180,7 +181,7 @@ func NewRuntime(cfg RuntimeConfig) (*Runtime, error) {
 		return nil, ch.ErrInvalidConfig
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	runtime := &Runtime{ctx: ctx, cancel: cancel, closeTimeout: cfg.CloseTimeout}
+	runtime := &Runtime{ctx: ctx, cancel: cancel, store: cfg.Store, closeTimeout: cfg.CloseTimeout}
 
 	peerPool, err := workqueue.NewBoundedPool(workqueue.BoundedPoolConfig{
 		Name: "channel_quorum_peer", Goroutines: cfg.Goroutines, Task: goruntimeregistry.TaskChannelQuorumOwner,
@@ -366,6 +367,60 @@ func (r *Runtime) ExchangeServer() *ExchangeServer {
 		return nil
 	}
 	return r.server
+}
+
+// ProbeReplica reads the exact durable frontier of one local replica without
+// installing Channel runtime state or changing write authority.
+func (r *Runtime) ProbeReplica(ctx context.Context, key ch.ChannelKey, id ch.ChannelID) (ReplicaState, error) {
+	if r == nil || r.store == nil || ctx == nil || key == "" || id.ID == "" {
+		return ReplicaState{}, ch.ErrInvalidConfig
+	}
+	if err := ctx.Err(); err != nil {
+		return ReplicaState{}, err
+	}
+	if r.closed.Load() {
+		return ReplicaState{}, ch.ErrNotReady
+	}
+	result, err := r.store.Load(ctx, LoadBatch{Items: []LoadRequest{{ChannelKey: key, ChannelID: id}}})
+	if err != nil {
+		return ReplicaState{}, err
+	}
+	if len(result.Items) != 1 {
+		return ReplicaState{}, ch.ErrNotReady
+	}
+	if result.Items[0].Err != nil {
+		return ReplicaState{}, result.Items[0].Err
+	}
+	return result.Items[0].State, nil
+}
+
+// CatchUpReplica installs the leader's exact durable prefix on a replacement
+// target before that target joins the write quorum. It deliberately reuses the
+// same proposal-aligned repair path as ordinary follower gap repair; membership
+// promotion remains a separate Slot-owned operation.
+func (r *Runtime) CatchUpReplica(ctx context.Context, authority Authority, target ch.NodeID, through uint64) error {
+	if r == nil || ctx == nil || r.repairs == nil || r.log == nil || !validAuthority(authority) || authority.Leader != r.log.cfg.Local ||
+		target == 0 || target == authority.Leader || through == 0 {
+		return ch.ErrInvalidConfig
+	}
+	loaded, err := loadRecoveryReplicaState(ctx, r.store, authority.Key, authority.ChannelID, nil)
+	if err != nil {
+		return err
+	}
+	if loaded.State.Committed < through || loaded.State.LEO < through || !frontierUsesLeadership(loaded.State, authority.ID) {
+		return ch.ErrNotReady
+	}
+	repair := followerRepair{
+		channelKey: authority.Key, channelID: authority.ChannelID, leader: authority.Leader,
+		follower: target, needFrom: 1, manifest: loaded.State.Manifest,
+	}
+	if !r.repairs.repairFromFrontier(ctx, repair, loaded) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return ch.ErrNotReady
+	}
+	return nil
 }
 
 // Close permanently closes admission and joins all accepted work.
@@ -797,32 +852,25 @@ func (o *runtimeRepairOwner) repairFromFrontier(ctx context.Context, repair foll
 			return false
 		}
 		for _, proposal := range pages[0].Proposals {
+			committed := minUint64(state.Committed, proposal.Manifest.LastOffset)
 			request := ReplicateRequest{
 				ChannelKey: repair.channelKey, ChannelID: repair.channelID,
 				Leader: repair.leader, Follower: repair.follower,
 				Manifest: proposal.Manifest, Records: proposal.Records,
-				Committed: minUint64(state.Committed, proposal.Manifest.LastOffset),
+				Committed: committed,
 			}
-			resultCh := make(chan ReplicateResult, 1)
-			errCh := make(chan error, 1)
-			if err := o.peers.submit(ctx, repair.follower, request, func(result ReplicateResult, err error) {
-				if err != nil {
-					errCh <- err
-					return
-				}
-				resultCh <- result
-			}); err != nil {
-				return false
-			}
-			select {
-			case <-ctx.Done():
-				return false
-			case <-errCh:
-				return false
-			case result := <-resultCh:
-				if !result.Status.Durable() {
+			// A committed marker is a certificate, so an empty/gapped follower
+			// must first persist the immutable proposal and only then accept the
+			// exact replay that promotes Committed to LastOffset.
+			if committed == proposal.Manifest.LastOffset && committed > proposal.Manifest.BaseOffset {
+				request.Committed = proposal.Manifest.BaseOffset
+				if !o.replicateRepairProposal(ctx, repair.follower, request) {
 					return false
 				}
+				request.Committed = committed
+			}
+			if !o.replicateRepairProposal(ctx, repair.follower, request) {
+				return false
 			}
 			_, entries, ok := ch.SealProposalManifest(proposal.Manifest, proposal.Records)
 			if !ok || len(entries) == 0 {
@@ -833,6 +881,27 @@ func (o *runtimeRepairOwner) repairFromFrontier(ctx context.Context, repair foll
 		}
 	}
 	return true
+}
+
+func (o *runtimeRepairOwner) replicateRepairProposal(ctx context.Context, follower ch.NodeID, request ReplicateRequest) bool {
+	completed := make(chan struct {
+		result ReplicateResult
+		err    error
+	}, 1)
+	if err := o.peers.submit(ctx, follower, request, func(result ReplicateResult, err error) {
+		completed <- struct {
+			result ReplicateResult
+			err    error
+		}{result: result, err: err}
+	}); err != nil {
+		return false
+	}
+	select {
+	case <-ctx.Done():
+		return false
+	case completion := <-completed:
+		return completion.err == nil && completion.result.Status.Durable()
+	}
 }
 
 func minUint64(left, right uint64) uint64 {

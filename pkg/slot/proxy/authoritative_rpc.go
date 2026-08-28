@@ -32,8 +32,7 @@ func (s *Store) shouldServeSlotLocally(slotID multiraft.SlotID) bool {
 	if s == nil || s.cluster == nil {
 		return false
 	}
-	leaderID, err := s.cluster.LeaderOf(slotID)
-	return err == nil && s.cluster.IsLocal(leaderID)
+	return s.cluster.IsLocalSlotLeader(slotID)
 }
 
 func callAuthoritativeRPC[T authoritativeRPCResponse](
@@ -132,6 +131,9 @@ func callAuthoritativeRPCWithStatuses[T authoritativeRPCResponse](
 }
 
 func (s *Store) handleAuthoritativeRPC(slotID multiraft.SlotID, encode rpcStatusEncoder) ([]byte, bool, error) {
+	if s.cluster.IsLocalSlotLeader(slotID) {
+		return nil, false, nil
+	}
 	leaderID, err := s.cluster.LeaderOf(slotID)
 	switch {
 	case isSlotNotFound(err):
@@ -144,6 +146,10 @@ func (s *Store) handleAuthoritativeRPC(slotID multiraft.SlotID, encode rpcStatus
 		body, encodeErr := encode(rpcStatusNotLeader, uint64(leaderID))
 		return body, true, encodeErr
 	default:
-		return nil, false, nil
+		// The foreground router still names this node, but the local Raft
+		// runtime does not. Do not serve stale local state or point the caller
+		// back to this same non-leader node.
+		body, encodeErr := encode(rpcStatusNoLeader, 0)
+		return body, true, encodeErr
 	}
 }

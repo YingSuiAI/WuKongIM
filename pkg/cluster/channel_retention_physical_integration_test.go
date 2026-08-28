@@ -225,6 +225,9 @@ func (s *recordingRetentionChannelService) ResolveAppendAuthority(context.Contex
 	return channelruntime.Meta{}, nil
 }
 
+func (s *recordingRetentionChannelService) InvalidateAppendAuthority(channelruntime.ChannelID, channelruntime.NodeID, uint64, uint64, uint64) {
+}
+
 func (s *recordingRetentionChannelService) ReadChannelLastVisible(context.Context, channelruntime.ChannelID, uint64) (channelruntime.Message, bool, error) {
 	return channelruntime.Message{}, false, nil
 }

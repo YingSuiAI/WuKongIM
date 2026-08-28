@@ -124,6 +124,8 @@ type ChannelPlacement struct {
 	Leader ch.NodeID
 	// Replicas are the initial Channel replicas.
 	Replicas []ch.NodeID
+	// ISR contains the schedulable replicas that can acknowledge initial writes.
+	ISR []ch.NodeID
 	// MinISR is the initial write quorum size.
 	MinISR int
 }
@@ -146,10 +148,17 @@ type PlacementRouter interface {
 	RouteKey(string) (routing.Route, error)
 }
 
-// DataNodeProvider returns active data-node candidates and the exact control
-// revision from which they were derived for initial Channel placement.
+// PlacementDataNodeSet separates durable active membership from the nodes that
+// are currently healthy enough to lead and acknowledge a new Channel runtime.
+type PlacementDataNodeSet struct {
+	Active      []uint64
+	Schedulable []uint64
+}
+
+// DataNodeProvider returns active and schedulable data nodes from the exact
+// control revision used for initial Channel placement.
 type DataNodeProvider interface {
-	PlacementDataNodes(context.Context, uint64) ([]uint64, error)
+	PlacementDataNodes(context.Context, uint64) (PlacementDataNodeSet, error)
 }
 
 // SlotMetaSourceOptions configures first-append metadata creation.

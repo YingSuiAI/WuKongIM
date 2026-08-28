@@ -2,6 +2,7 @@ package replication
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"sync"
 	"time"
@@ -117,9 +118,6 @@ func (l *quorumLog) Install(ctx context.Context, authority Authority) (Installed
 			if !sameAuthority(authority, state.authority) {
 				return Installed{}, ch.ErrLogConflict
 			}
-			if authority.WriteFence.Set() {
-				return Installed{}, ch.ErrWriteFenced
-			}
 			if state.ready {
 				return Installed{Authority: state.authority.ID, LEO: state.frontier.LEO, HW: state.hw}, nil
 			}
@@ -134,16 +132,12 @@ func (l *quorumLog) Install(ctx context.Context, authority Authority) (Installed
 	if authorityAdvanced && l.cfg.RepairAuthorities != nil {
 		l.cfg.RepairAuthorities.InstallAuthority(authority)
 	}
-	if authority.WriteFence.Set() {
-		return Installed{}, ch.ErrWriteFenced
-	}
-
 	selection, err := recoverQuorumPrefix(ctx, recoveryProbeRequest{
 		ChannelKey: authority.Key, ChannelID: authority.ChannelID, Leader: authority.Leader,
 		Voters: authority.Voters, Quorum: authority.WriteQuorum, Timeout: l.cfg.RecoveryTimeout,
 	}, l.cfg.Recovery)
 	if err != nil {
-		return Installed{}, err
+		return Installed{}, fmt.Errorf("recover quorum prefix: %w", err)
 	}
 	recovered, err := repairQuorumPrefix(ctx, recoveryRepairRequest{
 		ChannelKey: authority.Key, ChannelID: authority.ChannelID, Leader: authority.Leader, Local: l.cfg.Local,
@@ -151,7 +145,7 @@ func (l *quorumLog) Install(ctx context.Context, authority Authority) (Installed
 		Timeout: l.cfg.RecoveryTimeout, MaxPageBytes: l.cfg.RecoveryPageBytes,
 	}, l.cfg.Recovery, l.cfg.Store)
 	if err != nil {
-		return Installed{}, err
+		return Installed{}, fmt.Errorf("repair quorum prefix: %w", err)
 	}
 	installedFrontier := recovered
 	// A quorum-proved empty log has no durable effect that needs a standalone
@@ -159,10 +153,14 @@ func (l *quorumLog) Install(ctx context.Context, authority Authority) (Installed
 	// authority and makes that proof durable in the same quorum round. A
 	// non-empty frontier still needs the barrier before it can accept a proposal
 	// under a different authority.
-	if recovered != (ReplicaState{}) && !frontierUsesAuthority(recovered, authority.ID) {
+	// Route/fence generations may advance while the same elected leader is
+	// fenced and later reopened. That admission-only transition needs no log
+	// barrier; the next business proposal persists its exact generation before
+	// ACK. A changed Channel epoch or leader term still requires a quorum barrier.
+	if recovered != (ReplicaState{}) && !frontierUsesLeadership(recovered, authority.ID) {
 		barrier, barrierErr := writeCurrentTermBarrier(ctx, authority, recovered, l.cfg.Durability)
 		if barrierErr != nil {
-			return Installed{}, barrierErr
+			return Installed{}, fmt.Errorf("write current-term barrier: %w", barrierErr)
 		}
 		installedFrontier = barrier.State
 	}
@@ -282,7 +280,7 @@ func (l *quorumLog) Commit(ctx context.Context, proposal Proposal) (Receipt, err
 		}
 		return Receipt{}, err
 	}
-	return l.finishCommit(state, pending, result)
+	return l.finishCommittedRound(ctx, state, pending, result)
 }
 
 func (l *quorumLog) reconcileCommandConflict(ctx context.Context, state *quorumChannel, proposal Proposal) (Receipt, error) {
@@ -338,11 +336,31 @@ func (l *quorumLog) retryPending(ctx context.Context, state *quorumChannel, reta
 	if err != nil {
 		return Receipt{}, err
 	}
+	return l.finishCommittedRound(ctx, state, retained, result)
+}
+
+func (l *quorumLog) finishCommittedRound(ctx context.Context, state *quorumChannel, retained retainedProposal, result durableRoundResult) (Receipt, error) {
+	if !durableRoundSucceeded(result, state.authority.WriteQuorum) {
+		return Receipt{}, errDurableQuorumUnavailable
+	}
+
+	// The first round proves the immutable records durable on a write quorum,
+	// but each mutation carries only the previously committed frontier. Persist
+	// the newly established commit fact through the same idempotent proposal on
+	// a second local+follower quorum before acknowledging the business append.
+	committed := retained.proposal
+	committed.committed = committed.last
+	var err error
+	result, err = runDurableRound(ctx, l.cfg.Local, state.authority.Voters, state.authority.WriteQuorum, committed, l.cfg.Durability)
+	if err != nil {
+		return Receipt{}, err
+	}
+	retained.proposal = committed
 	return l.finishCommit(state, retained, result)
 }
 
 func (l *quorumLog) finishCommit(state *quorumChannel, retained retainedProposal, result durableRoundResult) (Receipt, error) {
-	if !result.localDurable || result.durableVotes < state.authority.WriteQuorum || !result.outcome.Durable() {
+	if !durableRoundSucceeded(result, state.authority.WriteQuorum) {
 		return Receipt{}, errDurableQuorumUnavailable
 	}
 	proposal := retained.proposal
@@ -367,6 +385,10 @@ func (l *quorumLog) finishCommit(state *quorumChannel, retained retainedProposal
 	retained.proposal.records = nil
 	l.remember(state, retained)
 	return receipt, nil
+}
+
+func durableRoundSucceeded(result durableRoundResult, writeQuorum int) bool {
+	return result.localDurable && result.durableVotes >= writeQuorum && result.outcome.Durable()
 }
 
 func (l *quorumLog) remember(state *quorumChannel, retained retainedProposal) {
@@ -503,7 +525,7 @@ func compareAuthorityID(left, right AuthorityID) int {
 	return 0
 }
 
-func frontierUsesAuthority(frontier ReplicaState, authority AuthorityID) bool {
+func frontierUsesLeadership(frontier ReplicaState, authority AuthorityID) bool {
 	return frontier.LEO > 0 && frontier.Manifest.ChannelEpoch == authority.ChannelEpoch &&
-		frontier.Manifest.LeaderTerm == authority.LeaderTerm && frontier.Manifest.FenceVersion == authority.FenceVersion
+		frontier.Manifest.LeaderTerm == authority.LeaderTerm
 }

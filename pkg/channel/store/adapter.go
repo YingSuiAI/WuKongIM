@@ -258,6 +258,9 @@ type AppendLeaderRequest struct {
 	// Committed is the monotonic committed frontier persisted atomically with
 	// an exact append. It must not exceed Proposal.LastOffset.
 	Committed uint64
+	// RequireExistingProposal permits advancing Committed only when this exact
+	// immutable proposal was durable before the current store operation.
+	RequireExistingProposal bool
 	// ServerAllocatedMessageIDs proves globally unique allocator-issued IDs for
 	// storage's fresh exact-append validation path.
 	ServerAllocatedMessageIDs bool

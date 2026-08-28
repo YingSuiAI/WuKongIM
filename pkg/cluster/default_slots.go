@@ -33,6 +33,16 @@ const (
 	slotRaftBatchMagic            = "WKSRB1"
 )
 
+// slotLeaderChangeRetryTimeout covers the full randomized Raft election
+// window plus one local route-publication interval. Caller deadlines may make
+// an individual proposal wait less than this cluster-level maximum.
+func slotLeaderChangeRetryTimeout(tickInterval time.Duration, electionTick int) time.Duration {
+	if tickInterval <= 0 || electionTick <= 0 {
+		return 0
+	}
+	return time.Duration(electionTick*2)*tickInterval + defaultSlotLeaderPollInterval
+}
+
 // ensureDefaultSlots creates the Slot runtime used by the default proposer.
 func (n *Node) ensureDefaultSlots() error {
 	if n == nil || n.slots != nil {

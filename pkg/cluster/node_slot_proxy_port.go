@@ -87,6 +87,16 @@ func (n *Node) HashSlotTableVersion() uint64 {
 	return n.controlSnapshot.HashSlots.Revision
 }
 
+// IsLocalSlotLeader reports leadership from the local Multi-Raft runtime.
+// Unlike LeaderOf, it does not depend on the asynchronously refreshed
+// foreground routing table.
+func (n *Node) IsLocalSlotLeader(slotID multiraft.SlotID) bool {
+	if n == nil || n.defaultSlotProposer == nil {
+		return false
+	}
+	return n.defaultSlotProposer.IsLocalLeader(uint32(slotID))
+}
+
 // LeaderOf returns the best-known Slot leader from the foreground router.
 func (n *Node) LeaderOf(slotID multiraft.SlotID) (multiraft.NodeID, error) {
 	if err := n.ensureForeground(); err != nil {

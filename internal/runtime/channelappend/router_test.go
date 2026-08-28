@@ -670,6 +670,34 @@ func TestRouterRetriesRouteErrorsWithinDeadline(t *testing.T) {
 	}
 }
 
+func TestRouterUnknownRemoteOutcomeForcesDurableIdempotencyLookupBeforeRetry(t *testing.T) {
+	remoteTarget := routerTarget("unknown-outcome", 2, 8)
+	localTarget := routerTarget("unknown-outcome", 2, 7)
+	resolver := &routerResolverForTest{targets: []AuthorityTarget{remoteTarget, localTarget}}
+	remote := &routerRemoteForTest{results: []SendBatchItemResult{{Err: ErrAppendOutcomeUnknown}}}
+	local := &routerLocalSubmitterForTest{
+		results: []SendBatchItemResult{{Result: SendResult{MessageID: 31, MessageSeq: 4, Reason: ReasonSuccess}}},
+	}
+	router := NewRouter(RouterOptions{LocalNodeID: 7, Resolver: resolver, Local: local, Remote: remote, RetryBackoff: time.Millisecond})
+	item := routerItem("u1", "unknown-outcome", 2)
+	item.Deadline = time.Now().Add(time.Second)
+
+	results := router.SendBatch([]SendBatchItem{item})
+
+	if len(results) != 1 || results[0].Err != nil || results[0].Result.MessageID != 31 {
+		t.Fatalf("results = %#v, want recovered success", results)
+	}
+	if remote.calls != 1 || remote.target.WriteFenced {
+		t.Fatalf("first remote target = calls:%d fenced:%v, want one ordinary attempt", remote.calls, remote.target.WriteFenced)
+	}
+	if local.calls != 1 || !local.target.WriteFenced {
+		t.Fatalf("retry local target = calls:%d fenced:%v, want durable idempotency lookup", local.calls, local.target.WriteFenced)
+	}
+	if len(resolver.invalidated) != 1 || resolver.invalidated[0] != remoteTarget {
+		t.Fatalf("invalidated = %#v, want exact ambiguous authority", resolver.invalidated)
+	}
+}
+
 func TestRouterInvalidatesFailedAuthorityAfterRetryBudgetIsExhausted(t *testing.T) {
 	target := routerTarget("terminal-stale", 2, 7)
 	resolver := &routerResolverForTest{targets: []AuthorityTarget{target}}

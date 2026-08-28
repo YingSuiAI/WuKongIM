@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"sort"
 	"testing"
@@ -66,20 +67,58 @@ func TestAuthoritativeReadsRequireConfirmedLocalLeaderForSinglePeerSlot(t *testi
 	if store.shouldServeSlotLocally(1) {
 		t.Fatal("shouldServeSlotLocally() = true without a confirmed leader")
 	}
-	cluster.leaderID = 1
+	cluster.localSlotLeader = true
 	if !store.shouldServeSlotLocally(1) {
 		t.Fatal("shouldServeSlotLocally() = false for confirmed local leader")
 	}
+	cluster.localSlotLeader = false
 	cluster.leaderID = 2
 	if store.shouldServeSlotLocally(1) {
 		t.Fatal("shouldServeSlotLocally() = true for a remote leader")
 	}
 }
 
+func TestAuthoritativeRPCPrefersLocalRaftLeadershipOverStaleRemoteHint(t *testing.T) {
+	cluster := &promotedRPCRegistrationCluster{localNodeID: 1, localSlotLeader: true, leaderID: 2}
+	store := &Store{cluster: cluster}
+
+	body, handled, err := store.handleAuthoritativeRPC(1, func(status string, leaderID uint64) ([]byte, error) {
+		return []byte(status), nil
+	})
+	if err != nil || handled || body != nil {
+		t.Fatalf("handleAuthoritativeRPC() = (%q, %v, %v), want local handling", body, handled, err)
+	}
+}
+
+func TestAuthoritativeRPCDoesNotServeStaleLocalRouterLeader(t *testing.T) {
+	cluster := &promotedRPCRegistrationCluster{localNodeID: 1, leaderID: 1}
+	store := &Store{cluster: cluster}
+
+	body, handled, err := store.handleAuthoritativeRPC(1, func(status string, leaderID uint64) ([]byte, error) {
+		return []byte(status), nil
+	})
+	if err != nil || !handled || string(body) != rpcStatusNoLeader {
+		t.Fatalf("handleAuthoritativeRPC() = (%q, %v, %v), want no_leader", body, handled, err)
+	}
+}
+
+func TestAuthoritativeRPCRetainsRemoteLeaderHint(t *testing.T) {
+	cluster := &promotedRPCRegistrationCluster{localNodeID: 1, leaderID: 2}
+	store := &Store{cluster: cluster}
+
+	body, handled, err := store.handleAuthoritativeRPC(1, func(status string, leaderID uint64) ([]byte, error) {
+		return []byte(fmt.Sprintf("%s:%d", status, leaderID)), nil
+	})
+	if err != nil || !handled || string(body) != "not_leader:2" {
+		t.Fatalf("handleAuthoritativeRPC() = (%q, %v, %v), want remote leader hint", body, handled, err)
+	}
+}
+
 type promotedRPCRegistrationCluster struct {
-	handlers    map[uint8]func(context.Context, []byte) ([]byte, error)
-	leaderID    multiraft.NodeID
-	localNodeID multiraft.NodeID
+	handlers        map[uint8]func(context.Context, []byte) ([]byte, error)
+	leaderID        multiraft.NodeID
+	localNodeID     multiraft.NodeID
+	localSlotLeader bool
 }
 
 func (c *promotedRPCRegistrationCluster) RegisterSlotProxyRPC(serviceID uint8, handler func(context.Context, []byte) ([]byte, error)) {
@@ -98,6 +137,10 @@ func (c *promotedRPCRegistrationCluster) HashSlotForKey(string) uint16 { return 
 func (c *promotedRPCRegistrationCluster) HashSlotsOf(multiraft.SlotID) []uint16 { return nil }
 
 func (c *promotedRPCRegistrationCluster) HashSlotTableVersion() uint64 { return 0 }
+
+func (c *promotedRPCRegistrationCluster) IsLocalSlotLeader(multiraft.SlotID) bool {
+	return c.localSlotLeader
+}
 
 func (c *promotedRPCRegistrationCluster) LeaderOf(multiraft.SlotID) (multiraft.NodeID, error) {
 	if c.leaderID == 0 {

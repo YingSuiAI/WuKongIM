@@ -5,6 +5,7 @@ import (
 	"sort"
 
 	ch "github.com/WuKongIM/WuKongIM/pkg/channel"
+	channelreplication "github.com/WuKongIM/WuKongIM/pkg/channel/replication"
 	channelwrapper "github.com/WuKongIM/WuKongIM/pkg/cluster/channels"
 	"github.com/WuKongIM/WuKongIM/pkg/cluster/control"
 	metadb "github.com/WuKongIM/WuKongIM/pkg/db/meta"
@@ -318,6 +319,34 @@ func (n *Node) ProbeChannel(ctx context.Context, nodeID uint64, channelID string
 	return *resp.RuntimeProbe, nil
 }
 
+// ProbeChannelReplica reads the exact durable quorum-replica frontier used by
+// dead-leader recovery. It never loads or mutates a Channel reactor runtime.
+func (n *Node) ProbeChannelReplica(ctx context.Context, nodeID uint64, meta metadb.ChannelRuntimeMeta) (ch.RuntimeProbeChannel, error) {
+	if err := ctxErr(ctx); err != nil {
+		return ch.RuntimeProbeChannel{}, err
+	}
+	meta = metadb.NormalizeChannelRuntimeMeta(meta)
+	if n == nil || nodeID == 0 || meta.ChannelID == "" || meta.ChannelType < 0 {
+		return ch.RuntimeProbeChannel{}, ErrNotStarted
+	}
+	if nodeID == n.cfg.NodeID {
+		return n.probeLocalChannelReplica(ctx, meta)
+	}
+	resp, err := n.callChannelMigrationMetaRPC(ctx, nodeID, channelMigrationMetaRPCRequest{
+		Op:          channelMigrationMetaOpReplicaProbe,
+		ChannelID:   meta.ChannelID,
+		ChannelType: meta.ChannelType,
+		RuntimeMeta: &meta,
+	})
+	if err != nil {
+		return ch.RuntimeProbeChannel{}, err
+	}
+	if resp.RuntimeProbe == nil {
+		return ch.RuntimeProbeChannel{}, ch.ErrChannelNotFound
+	}
+	return *resp.RuntimeProbe, nil
+}
+
 // DrainChannel reads one local or remote Channel drain proof.
 func (n *Node) DrainChannel(ctx context.Context, nodeID uint64, req ch.DrainChannelRequest) (ch.DrainChannelResult, error) {
 	if err := ctxErr(ctx); err != nil {
@@ -360,6 +389,54 @@ func (n *Node) ApplyChannelMeta(ctx context.Context, nodeID uint64, meta metadb.
 	return err
 }
 
+// CatchUpChannelReplica asks the authoritative Channel leader to install its
+// durable prefix on a replacement target before Slot metadata promotes it.
+func (n *Node) CatchUpChannelReplica(ctx context.Context, leaderNode, targetNode uint64, meta metadb.ChannelRuntimeMeta, through uint64) error {
+	if err := ctxErr(ctx); err != nil {
+		return err
+	}
+	if n == nil || leaderNode == 0 || targetNode == 0 || through == 0 {
+		return ErrNotStarted
+	}
+	if leaderNode == n.cfg.NodeID {
+		return n.catchUpLocalChannelReplica(ctx, targetNode, meta, through)
+	}
+	_, err := n.callChannelMigrationMetaRPC(ctx, leaderNode, channelMigrationMetaRPCRequest{
+		Op: channelMigrationMetaOpReplicaCatchUp, RuntimeMeta: &meta, TargetNode: targetNode, Through: through,
+	})
+	return err
+}
+
+func (n *Node) catchUpLocalChannelReplica(ctx context.Context, targetNode uint64, meta metadb.ChannelRuntimeMeta, through uint64) error {
+	if err := ctxErr(ctx); err != nil {
+		return err
+	}
+	if n == nil || n.defaultChannelReplication == nil {
+		return ErrNotStarted
+	}
+	meta = metadb.NormalizeChannelRuntimeMeta(meta)
+	id := ch.ChannelID{ID: meta.ChannelID, Type: uint8(meta.ChannelType)}
+	if id.ID == "" || meta.Leader != n.cfg.NodeID || targetNode == 0 || targetNode == n.cfg.NodeID ||
+		!containsNodeID(meta.Replicas, targetNode) || through == 0 {
+		return ch.ErrInvalidConfig
+	}
+	authority := channelreplication.Authority{
+		Key: ch.ChannelKeyForID(id), ChannelID: id,
+		ID:     channelreplication.AuthorityID{ChannelEpoch: meta.ChannelEpoch, LeaderTerm: meta.LeaderEpoch, FenceVersion: meta.RouteGeneration},
+		Leader: ch.NodeID(meta.Leader), Voters: channelMigrationNodeIDs(meta.ISR), WriteQuorum: int(meta.MinISR),
+		WriteFence: channelwrapper.ProjectRuntimeMeta(meta).WriteFence,
+	}
+	return n.defaultChannelReplication.CatchUpReplica(ctx, authority, ch.NodeID(targetNode), through)
+}
+
+func channelMigrationNodeIDs(nodes []uint64) []ch.NodeID {
+	result := make([]ch.NodeID, len(nodes))
+	for index, node := range nodes {
+		result[index] = ch.NodeID(node)
+	}
+	return result
+}
+
 func (n *Node) probeLocalChannelRuntime(ctx context.Context, channelID string, channelType uint8) (ch.RuntimeProbeChannel, error) {
 	id := ch.ChannelID{ID: channelID, Type: channelType}
 	result, err := n.ChannelRuntimeProbe(ctx, ch.RuntimeSelector{ChannelIDs: []ch.ChannelID{id}})
@@ -372,6 +449,37 @@ func (n *Node) probeLocalChannelRuntime(ctx context.Context, channelID string, c
 		}
 	}
 	return ch.RuntimeProbeChannel{}, ch.ErrChannelNotFound
+}
+
+func (n *Node) probeLocalChannelReplica(ctx context.Context, meta metadb.ChannelRuntimeMeta) (ch.RuntimeProbeChannel, error) {
+	if n == nil || n.defaultChannelReplication == nil {
+		return ch.RuntimeProbeChannel{}, ErrNotStarted
+	}
+	meta = metadb.NormalizeChannelRuntimeMeta(meta)
+	id := ch.ChannelID{ID: meta.ChannelID, Type: uint8(meta.ChannelType)}
+	if id.ID == "" || !containsNodeID(meta.Replicas, n.cfg.NodeID) {
+		return ch.RuntimeProbeChannel{}, ch.ErrChannelNotFound
+	}
+	state, err := n.defaultChannelReplication.ProbeReplica(ctx, ch.ChannelKeyForID(id), id)
+	if err != nil {
+		return ch.RuntimeProbeChannel{}, err
+	}
+	// An empty store carries no durable authority identity. Treat it as missing
+	// instead of projecting the caller's metadata into a synthetic proof.
+	if state.LEO == 0 {
+		return ch.RuntimeProbeChannel{}, ch.ErrChannelNotFound
+	}
+	channelEpoch := state.Manifest.ChannelEpoch
+	leaderEpoch := state.Manifest.LeaderTerm
+	role := ch.RoleFollower
+	if meta.Leader == n.cfg.NodeID {
+		role = ch.RoleLeader
+	}
+	return ch.RuntimeProbeChannel{
+		ChannelID: id, ChannelEpoch: channelEpoch, LeaderEpoch: leaderEpoch,
+		Role: role, Status: ch.Status(meta.Status), LEO: state.LEO, HW: state.Committed,
+		CheckpointHW: state.Committed, WriteFence: channelwrapper.ProjectRuntimeMeta(meta).WriteFence,
+	}, nil
 }
 
 func (n *Node) applyChannelMigrationLocalRuntimeMeta(ctx context.Context, meta metadb.ChannelRuntimeMeta) error {

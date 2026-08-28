@@ -15,7 +15,7 @@ import (
 func waitChannelDataNode(t *testing.T, node *Node, nodeID uint64) {
 	t.Helper()
 	waitUntil(t, func() bool {
-		for _, candidate := range node.channelDataNodes.DataNodes() {
+		for _, candidate := range node.channelDataNodes.SchedulableDataNodes() {
 			if candidate == nodeID {
 				return true
 			}

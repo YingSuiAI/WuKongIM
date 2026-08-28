@@ -815,6 +815,11 @@ func (c *proxyPluginBindingTestCluster) SlotIDs() []multiraft.SlotID {
 	return append([]multiraft.SlotID(nil), c.slotIDs...)
 }
 
+func (c *proxyPluginBindingTestCluster) IsLocalSlotLeader(slotID multiraft.SlotID) bool {
+	leaderID, err := c.LeaderOf(slotID)
+	return err == nil && c.IsLocal(leaderID)
+}
+
 func (c *proxyPluginBindingTestCluster) LeaderOf(slotID multiraft.SlotID) (multiraft.NodeID, error) {
 	leaderID, ok := c.leaders[slotID]
 	if !ok {

@@ -348,6 +348,7 @@ func TestSlotMetaSourceCreatesMissingRuntimeMetaFromPlacement(t *testing.T) {
 		Placement: fakePlacementResolver{placement: ChannelPlacement{
 			Leader:   3,
 			Replicas: []ch.NodeID{2, 3, 1},
+			ISR:      []ch.NodeID{2, 3},
 			MinISR:   2,
 		}},
 	}))
@@ -369,13 +370,45 @@ func TestSlotMetaSourceCreatesMissingRuntimeMetaFromPlacement(t *testing.T) {
 	if got, want := meta.Replicas, []ch.NodeID{1, 2, 3}; !equalNodeIDs(got, want) {
 		t.Fatalf("Replicas = %v, want %v", got, want)
 	}
+	if got, want := meta.ISR, []ch.NodeID{2, 3}; !equalNodeIDs(got, want) {
+		t.Fatalf("ISR = %v, want only schedulable replicas %v", got, want)
+	}
+}
+
+func TestRuntimeMetaFromPlacementRequiresExplicitWritableISR(t *testing.T) {
+	id := ch.ChannelID{ID: "explicit-isr", Type: 1}
+	tests := []struct {
+		name      string
+		placement ChannelPlacement
+	}{
+		{
+			name:      "missing ISR",
+			placement: ChannelPlacement{Leader: 1, Replicas: []ch.NodeID{1, 2, 3}, MinISR: 2},
+		},
+		{
+			name:      "leader outside ISR",
+			placement: ChannelPlacement{Leader: 3, Replicas: []ch.NodeID{1, 2, 3}, ISR: []ch.NodeID{1, 2}, MinISR: 2},
+		},
+		{
+			name:      "ISR below MinISR",
+			placement: ChannelPlacement{Leader: 1, Replicas: []ch.NodeID{1, 2, 3}, ISR: []ch.NodeID{1}, MinISR: 2},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := RuntimeMetaFromPlacement(id, tt.placement)
+			if !errors.Is(err, ch.ErrInvalidConfig) {
+				t.Fatalf("RuntimeMetaFromPlacement() error = %v, want ErrInvalidConfig", err)
+			}
+		})
+	}
 }
 
 func TestSlotPlacementResolverUsesDataNodesInsteadOfSlotPeers(t *testing.T) {
 	id := ch.ChannelID{ID: "route-placement", Type: 1}
 	resolver := NewSlotPlacementResolver(
 		fakePlacementRouter{route: routing.Route{Leader: 2, Peers: []uint64{1, 2, 3}}},
-		fakeDataNodeProvider{nodes: []uint64{4, 5, 6}},
+		fakeDataNodeProvider{active: []uint64{4, 5, 6}, schedulable: []uint64{4, 5, 6}},
 		3,
 	)
 
@@ -400,7 +433,7 @@ func TestSlotPlacementResolverRejectsDataNodesFromDifferentControlRevision(t *te
 	id := ch.ChannelID{ID: "mixed-control-snapshot", Type: 1}
 	resolver := NewSlotPlacementResolver(
 		fakePlacementRouter{route: routing.Route{Revision: 12, Leader: 2, Peers: []uint64{1, 2, 3}}},
-		fakeDataNodeProvider{revision: 11, nodes: []uint64{1, 2, 3}},
+		fakeDataNodeProvider{revision: 11, active: []uint64{1, 2, 3}, schedulable: []uint64{1, 2, 3}},
 		3,
 	)
 
@@ -414,7 +447,7 @@ func TestSlotPlacementResolverPrefersRoutePreferredLeaderOnlyWhenSelected(t *tes
 	id := ch.ChannelID{ID: "route-placement-preferred", Type: 1}
 	resolver := NewSlotPlacementResolver(
 		fakePlacementRouter{route: routing.Route{Leader: 3, PreferredLeader: 4, Peers: []uint64{1, 2, 3}}},
-		fakeDataNodeProvider{nodes: []uint64{4, 5, 6}},
+		fakeDataNodeProvider{active: []uint64{4, 5, 6}, schedulable: []uint64{4, 5, 6}},
 		3,
 	)
 
@@ -428,7 +461,7 @@ func TestSlotPlacementResolverPrefersRoutePreferredLeaderOnlyWhenSelected(t *tes
 
 	withoutPreferred := NewSlotPlacementResolver(
 		fakePlacementRouter{route: routing.Route{Leader: 3, PreferredLeader: 9, Peers: []uint64{1, 2, 3}}},
-		fakeDataNodeProvider{nodes: []uint64{4, 5, 6}},
+		fakeDataNodeProvider{active: []uint64{4, 5, 6}, schedulable: []uint64{4, 5, 6}},
 		3,
 	)
 	next, err := withoutPreferred.ResolveChannelPlacement(context.Background(), id)
@@ -446,7 +479,7 @@ func TestSlotPlacementResolverPrefersRoutePreferredLeaderOnlyWhenSelected(t *tes
 func TestSlotPlacementResolverHashesFullChannelIdentity(t *testing.T) {
 	resolver := NewSlotPlacementResolver(
 		fakePlacementRouter{route: routing.Route{Leader: 1, Peers: []uint64{1, 2, 3}}},
-		fakeDataNodeProvider{nodes: []uint64{1, 2, 3, 4, 5, 6, 7, 8}},
+		fakeDataNodeProvider{active: []uint64{1, 2, 3, 4, 5, 6, 7, 8}, schedulable: []uint64{1, 2, 3, 4, 5, 6, 7, 8}},
 		3,
 	)
 
@@ -471,8 +504,8 @@ func TestSlotPlacementResolverRejectsInvalidDataNodeCandidates(t *testing.T) {
 		replicaCount int
 	}{
 		{name: "nil provider", dataNodes: nil, replicaCount: 1},
-		{name: "zero replicas", dataNodes: fakeDataNodeProvider{nodes: []uint64{1, 2}}, replicaCount: 0},
-		{name: "insufficient unique nodes", dataNodes: fakeDataNodeProvider{nodes: []uint64{1, 1, 2}}, replicaCount: 3},
+		{name: "zero replicas", dataNodes: fakeDataNodeProvider{active: []uint64{1, 2}, schedulable: []uint64{1, 2}}, replicaCount: 0},
+		{name: "insufficient unique nodes", dataNodes: fakeDataNodeProvider{active: []uint64{1, 1, 2}, schedulable: []uint64{1, 2}}, replicaCount: 3},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -493,7 +526,7 @@ func TestSlotPlacementResolverDeduplicatesDataNodeCandidates(t *testing.T) {
 	id := ch.ChannelID{ID: "dedupe-placement", Type: 1}
 	resolver := NewSlotPlacementResolver(
 		fakePlacementRouter{route: routing.Route{Leader: 1, Peers: []uint64{1, 2, 3}}},
-		fakeDataNodeProvider{nodes: []uint64{7, 5, 7, 6, 5}},
+		fakeDataNodeProvider{active: []uint64{7, 5, 7, 6, 5}, schedulable: []uint64{7, 5, 6}},
 		3,
 	)
 
@@ -513,6 +546,48 @@ func TestSlotPlacementResolverDeduplicatesDataNodeCandidates(t *testing.T) {
 			t.Fatalf("Replicas = %v, want no duplicates", placement.Replicas)
 		}
 		seen[replica] = true
+	}
+}
+
+func TestSlotPlacementResolverCreatesQuorumPlacementWithOneUnavailableActiveNode(t *testing.T) {
+	id := ch.ChannelID{ID: "degraded-new-channel", Type: 1}
+	resolver := NewSlotPlacementResolver(
+		fakePlacementRouter{route: routing.Route{PreferredLeader: 3}},
+		fakeDataNodeProvider{active: []uint64{1, 2, 3}, schedulable: []uint64{1, 2}},
+		3,
+	)
+
+	placement, err := resolver.ResolveChannelPlacement(context.Background(), id)
+	if err != nil {
+		t.Fatalf("ResolveChannelPlacement() error = %v", err)
+	}
+	if placement.MinISR != 2 || len(placement.Replicas) != 3 {
+		t.Fatalf("placement = %#v, want three replicas with MinISR 2", placement)
+	}
+	if got := placement.ISR; len(got) != 2 || !nodeIDIn(got, 1) || !nodeIDIn(got, 2) {
+		t.Fatalf("ISR = %v, want only schedulable nodes 1,2 (leader=%d)", got, placement.Leader)
+	}
+	if placement.Leader == 3 {
+		t.Fatalf("Leader = %d, unavailable preferred node must not lead", placement.Leader)
+	}
+	if placement.Leader != 1 && placement.Leader != 2 {
+		t.Fatalf("Leader = %d, want a schedulable leader", placement.Leader)
+	}
+	if !nodeIDIn(placement.Replicas, 3) {
+		t.Fatalf("Replicas = %v, want unavailable active node retained as trailing replica", placement.Replicas)
+	}
+}
+
+func TestSlotPlacementResolverRejectsWhenSchedulableNodesBelowMinISR(t *testing.T) {
+	resolver := NewSlotPlacementResolver(
+		fakePlacementRouter{route: routing.Route{}},
+		fakeDataNodeProvider{active: []uint64{1, 2, 3}, schedulable: []uint64{1}},
+		3,
+	)
+
+	_, err := resolver.ResolveChannelPlacement(context.Background(), ch.ChannelID{ID: "no-quorum", Type: 1})
+	if !errors.Is(err, ch.ErrInvalidConfig) {
+		t.Fatalf("ResolveChannelPlacement() error = %v, want ErrInvalidConfig", err)
 	}
 }
 
@@ -4159,6 +4234,7 @@ func (r fakePlacementResolver) ResolveChannelPlacementBatch(_ context.Context, i
 	for i := range placements {
 		placements[i] = r.placement
 		placements[i].Replicas = append([]ch.NodeID(nil), r.placement.Replicas...)
+		placements[i].ISR = append([]ch.NodeID(nil), r.placement.ISR...)
 	}
 	return placements, nil
 }
@@ -4176,19 +4252,19 @@ func (r fakePlacementRouter) RouteKey(string) (routing.Route, error) {
 }
 
 type fakeDataNodeProvider struct {
-	revision uint64
-	nodes    []uint64
+	revision    uint64
+	active      []uint64
+	schedulable []uint64
 }
 
-func (p fakeDataNodeProvider) DataNodes() []uint64 {
-	return append([]uint64(nil), p.nodes...)
-}
-
-func (p fakeDataNodeProvider) PlacementDataNodes(_ context.Context, expectedRevision uint64) ([]uint64, error) {
+func (p fakeDataNodeProvider) PlacementDataNodes(_ context.Context, expectedRevision uint64) (PlacementDataNodeSet, error) {
 	if p.revision != expectedRevision {
-		return nil, ch.ErrStaleMeta
+		return PlacementDataNodeSet{}, ch.ErrStaleMeta
 	}
-	return append([]uint64(nil), p.nodes...), nil
+	return PlacementDataNodeSet{
+		Active:      append([]uint64(nil), p.active...),
+		Schedulable: append([]uint64(nil), p.schedulable...),
+	}, nil
 }
 
 type recordingShardCaller struct {

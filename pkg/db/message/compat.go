@@ -201,6 +201,9 @@ type AppendBatchItem struct {
 	Records []channel.Record
 	// Committed is the monotonic HW persisted atomically with an exact append.
 	Committed uint64
+	// RequireExistingProposal permits advancing Committed only when this exact
+	// immutable proposal was durable before the current store operation.
+	RequireExistingProposal bool
 	// Class controls commit selection only; every class remains synchronous.
 	Class AppendBatchClass
 	// ServerAllocatedMessageIDs proves globally unique allocator-issued IDs. A
@@ -977,21 +980,25 @@ func storeAppendBatchOwner(ctx context.Context, owner *Engine, items []AppendBat
 			var prepared preparedCommitRows
 			var prepareErr error
 			if item.ExactBaseOffset {
-				switch {
-				case item.ExpectedBaseOffset > virtualLEO:
-					prepareErr = &exactAppendGapError{needFrom: virtualLEO + 1}
-				case virtualLEO > physicalLEO && item.ExpectedBaseOffset >= physicalLEO && item.ExpectedBaseOffset < virtualLEO:
-					prepared, prepareErr = item.Store.prepareStagedExactReplayLocked(
-						ctx, item, virtualLEO, stagedCommands, stagedLast, stagedEntries,
-					)
-				case item.ExpectedBaseOffset > physicalLEO:
-					prepared, prepareErr = item.Store.prepareAdjacentExactAppendLocked(
-						ctx, item, previousStaged, mode, &seen, stagedCommands, stagedLast, stagedEntries,
-					)
-				default:
-					prepared, prepareErr = item.Store.prepareExactAppendRecordsLocked(
-						ctx, item.ExpectedBaseOffset, item.Records, item.Proposal, item.Committed, mode, &seen,
-					)
+				if item.RequireExistingProposal && item.ExpectedBaseOffset >= physicalLEO {
+					prepareErr = channel.ErrCorruptState
+				} else {
+					switch {
+					case item.ExpectedBaseOffset > virtualLEO:
+						prepareErr = &exactAppendGapError{needFrom: virtualLEO + 1}
+					case virtualLEO > physicalLEO && item.ExpectedBaseOffset >= physicalLEO && item.ExpectedBaseOffset < virtualLEO:
+						prepared, prepareErr = item.Store.prepareStagedExactReplayLocked(
+							ctx, item, virtualLEO, stagedCommands, stagedLast, stagedEntries,
+						)
+					case item.ExpectedBaseOffset > physicalLEO:
+						prepared, prepareErr = item.Store.prepareAdjacentExactAppendLocked(
+							ctx, item, previousStaged, mode, &seen, stagedCommands, stagedLast, stagedEntries,
+						)
+					default:
+						prepared, prepareErr = item.Store.prepareExactAppendRecordsLocked(
+							ctx, item.ExpectedBaseOffset, item.Records, item.Proposal, item.Committed, mode, &seen, item.RequireExistingProposal,
+						)
+					}
 				}
 			} else {
 				if item.Committed != 0 {
@@ -2134,7 +2141,7 @@ func (s *ChannelStore) prepareAppendRecordsLocked(ctx context.Context, records [
 	return prepared, nil
 }
 
-func (s *ChannelStore) prepareExactAppendRecordsLocked(ctx context.Context, expectedBaseOffset uint64, records []channel.Record, manifest DurableProposalManifest, committed uint64, mode AppendMode, seen *appendValidationSeen) (preparedCommitRows, error) {
+func (s *ChannelStore) prepareExactAppendRecordsLocked(ctx context.Context, expectedBaseOffset uint64, records []channel.Record, manifest DurableProposalManifest, committed uint64, mode AppendMode, seen *appendValidationSeen, requireExistingProposal bool) (preparedCommitRows, error) {
 	if err := validateDurableProposalManifest(manifest, expectedBaseOffset, len(records)); err != nil {
 		return preparedCommitRows{}, err
 	}
@@ -2157,7 +2164,7 @@ func (s *ChannelStore) prepareExactAppendRecordsLocked(ctx context.Context, expe
 		return preparedCommitRows{}, &exactAppendGapError{needFrom: base + 1}
 	}
 	proposal := durableProposalRecord{manifest: manifest}
-	sequencedFresh := mode == AppendServerAllocatedMessageID && expectedBaseOffset == base
+	sequencedFresh := mode == AppendServerAllocatedMessageID && expectedBaseOffset == base && !requireExistingProposal
 	if err := s.validateDurableProposalPredecessor(manifest, sequencedFresh); err != nil {
 		return preparedCommitRows{}, toChannelError(err)
 	}
@@ -2183,6 +2190,9 @@ func (s *ChannelStore) prepareExactAppendRecordsLocked(ctx context.Context, expe
 			if !commandPresent || !lastPresent || !sameDurableProposal(byCommand, proposal) || !sameDurableProposal(byLast, proposal) {
 				return preparedCommitRows{}, channel.ErrCorruptState
 			}
+		}
+		if requireExistingProposal && (!commandPresent || !lastPresent) {
+			return preparedCommitRows{}, channel.ErrCorruptState
 		}
 		if err := s.validateDurableEntrySet(entries, commandPresent); err != nil {
 			return preparedCommitRows{}, toChannelError(err)

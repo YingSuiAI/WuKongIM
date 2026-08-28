@@ -155,6 +155,8 @@ var (
 	ErrStaleRoute = contract.ErrStaleRoute
 	// ErrRouteNotReady reports that cluster routing is not ready for foreground writes.
 	ErrRouteNotReady = contract.ErrRouteNotReady
+	// ErrAppendOutcomeUnknown requires durable idempotency recovery before retry.
+	ErrAppendOutcomeUnknown = contract.ErrAppendOutcomeUnknown
 	// ErrNotLeader reports that the append target is no longer the leader.
 	ErrNotLeader = contract.ErrNotLeader
 	// ErrChannelNotFound reports that the target channel is not available.

@@ -66,6 +66,9 @@ func TestConfigDefaultSlotRaftTimingUsesResilientCloudProfile(t *testing.T) {
 	if heartbeatInterval := cfg.Slots.TickInterval * time.Duration(cfg.Slots.HeartbeatTick); heartbeatInterval != 100*time.Millisecond {
 		t.Fatalf("Slot Raft heartbeat interval = %s, want 100ms", heartbeatInterval)
 	}
+	if retryTimeout := slotLeaderChangeRetryTimeout(cfg.Slots.TickInterval, cfg.Slots.ElectionTick); retryTimeout != 4010*time.Millisecond {
+		t.Fatalf("Slot leader-change retry timeout = %s, want 4.01s maximum election window plus route publication", retryTimeout)
+	}
 }
 
 func TestConfigAppliesHealthReportDefaults(t *testing.T) {

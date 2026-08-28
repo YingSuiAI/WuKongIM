@@ -281,7 +281,7 @@ func TestNodeAppliesActiveDataNodesForChannelPlacement(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = node.Stop(context.Background()) })
 
-	got := node.channelDataNodes.DataNodes()
+	got := node.channelDataNodes.SchedulableDataNodes()
 	want := []uint64{1, 2, 3}
 	if !equalUint64s(got, want) {
 		t.Fatalf("DataNodes() = %v, want %v", got, want)
@@ -300,14 +300,14 @@ func TestNodeAppliesActiveDataNodesForChannelPlacement(t *testing.T) {
 		t.Fatalf("Publish() error = %v", err)
 	}
 	waitUntil(t, func() bool {
-		got = node.channelDataNodes.DataNodes()
+		got = node.channelDataNodes.SchedulableDataNodes()
 		return equalUint64s(got, []uint64{1, 2, 3, 4})
 	})
 	placementCtx, placementCancel := context.WithTimeout(context.Background(), time.Second)
 	placementNodes, err := node.channelDataNodes.PlacementDataNodes(placementCtx, next.Revision)
 	placementCancel()
-	if err != nil || !equalUint64s(placementNodes, []uint64{1, 2, 3, 4}) {
-		t.Fatalf("placement data-node snapshot nodes=%v error=%v, want revision=%d nodes=1,2,3,4", placementNodes, err, next.Revision)
+	if err != nil || !equalUint64s(placementNodes.Active, []uint64{1, 2, 3, 4, 8}) || !equalUint64s(placementNodes.Schedulable, []uint64{1, 2, 3, 4}) {
+		t.Fatalf("placement data-node snapshot nodes=%#v error=%v, want revision=%d active=1,2,3,4,8 schedulable=1,2,3,4", placementNodes, err, next.Revision)
 	}
 
 	revisionOnly := next.Clone()
@@ -319,13 +319,13 @@ func TestNodeAppliesActiveDataNodesForChannelPlacement(t *testing.T) {
 	placementCtx, placementCancel = context.WithTimeout(context.Background(), time.Second)
 	placementNodes, err = node.channelDataNodes.PlacementDataNodes(placementCtx, revisionOnly.Revision)
 	placementCancel()
-	if err != nil || !equalUint64s(placementNodes, []uint64{1, 2, 3, 4}) {
-		t.Fatalf("revision-only placement data-node snapshot nodes=%v error=%v, want nodes=1,2,3,4", placementNodes, err)
+	if err != nil || !equalUint64s(placementNodes.Active, []uint64{1, 2, 3, 4, 8}) || !equalUint64s(placementNodes.Schedulable, []uint64{1, 2, 3, 4}) {
+		t.Fatalf("revision-only placement data-node snapshot nodes=%#v error=%v, want unchanged active and schedulable nodes", placementNodes, err)
 	}
 }
 
-func TestActiveDataNodeIDsExcludeLeavingAndRemovedNodes(t *testing.T) {
-	got := activeDataNodeIDs([]control.Node{
+func TestPlacementDataNodeIDsSeparateActiveFromSchedulable(t *testing.T) {
+	active, schedulable := placementDataNodeIDs([]control.Node{
 		healthNode(1, control.NodeJoinStateActive, control.NodeAlive, control.NodeHealthFresh, true),
 		healthNode(2, control.NodeJoinStateJoining, control.NodeAlive, control.NodeHealthFresh, true),
 		healthNode(3, control.NodeJoinStateLeaving, control.NodeAlive, control.NodeHealthFresh, true),
@@ -333,14 +333,13 @@ func TestActiveDataNodeIDsExcludeLeavingAndRemovedNodes(t *testing.T) {
 		healthNode(5, control.NodeJoinStateActive, control.NodeSuspect, control.NodeHealthFresh, true),
 		{NodeID: 6, Roles: []control.Role{control.RoleController}, Status: control.NodeAlive, Health: control.NodeHealth{Status: control.NodeAlive, Freshness: control.NodeHealthFresh, RuntimeReady: true}, JoinState: control.NodeJoinStateActive},
 	})
-	want := []uint64{1}
-	if !equalUint64s(got, want) {
-		t.Fatalf("activeDataNodeIDs() = %v, want %v", got, want)
+	if !equalUint64s(active, []uint64{1, 5}) || !equalUint64s(schedulable, []uint64{1}) {
+		t.Fatalf("placementDataNodeIDs() active=%v schedulable=%v, want active=1,5 schedulable=1", active, schedulable)
 	}
 }
 
-func TestActiveDataNodeIDsRequireFreshAliveHealth(t *testing.T) {
-	got := activeDataNodeIDs([]control.Node{
+func TestPlacementDataNodeIDsKeepUnhealthyActiveMembers(t *testing.T) {
+	active, schedulable := placementDataNodeIDs([]control.Node{
 		healthNode(6, control.NodeJoinStateActive, control.NodeSuspect, control.NodeHealthFresh, true),
 		healthNode(3, control.NodeJoinStateActive, control.NodeAlive, control.NodeHealthStale, true),
 		healthNode(8, control.NodeJoinStateActive, control.NodeAlive, control.NodeHealthFresh, false),
@@ -351,9 +350,8 @@ func TestActiveDataNodeIDsRequireFreshAliveHealth(t *testing.T) {
 		healthNode(2, control.NodeJoinStateRemoved, control.NodeAlive, control.NodeHealthFresh, true),
 		healthNode(9, control.NodeJoinStateActive, control.NodeDown, control.NodeHealthFresh, true),
 	})
-	want := []uint64{1}
-	if !equalUint64s(got, want) {
-		t.Fatalf("activeDataNodeIDs() = %v, want %v", got, want)
+	if !equalUint64s(active, []uint64{1, 3, 6, 7, 8, 9}) || !equalUint64s(schedulable, []uint64{1}) {
+		t.Fatalf("placementDataNodeIDs() active=%v schedulable=%v, want active=1,3,6,7,8,9 schedulable=1", active, schedulable)
 	}
 }
 

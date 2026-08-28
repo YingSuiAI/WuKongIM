@@ -3,6 +3,7 @@ package replication
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	ch "github.com/WuKongIM/WuKongIM/pkg/channel"
@@ -44,8 +45,12 @@ func repairQuorumPrefix(ctx context.Context, request recoveryRepairRequest, disp
 	if err != nil {
 		return ReplicaState{}, err
 	}
-	if _, ok := configured[request.Local]; !ok || !validRecoveryRepairSelection(request.Selection, configured, request.Quorum) {
-		return ReplicaState{}, ch.ErrInvalidConfig
+	if _, ok := configured[request.Local]; !ok {
+		return ReplicaState{}, fmt.Errorf("local node %d is outside recovery voters: %w", request.Local, ch.ErrInvalidConfig)
+	}
+	if !validRecoveryRepairSelection(request.Selection, configured, request.Quorum) {
+		return ReplicaState{}, fmt.Errorf("invalid recovery selection index=%d certified=%d supporters=%d quorum=%d: %w",
+			request.Selection.Index, request.Selection.CertifiedCommitted, len(request.Selection.Supporters), request.Quorum, ch.ErrInvalidConfig)
 	}
 	operationContext, cancel := context.WithTimeout(ctx, request.Timeout)
 	defer cancel()
@@ -173,7 +178,11 @@ func validRecoveryRepairSelection(selection recoverySelection, configured map[ch
 		return selection.Identity == (ch.EntryIdentity{}) && selection.CertifiedCommitted == 0 &&
 			selection.CertifiedIdentity == (ch.EntryIdentity{}) && len(selection.Supporters) == 0
 	}
-	if !validEntryIdentity(selection.Identity) || selection.Identity.Index != selection.Index || len(selection.Supporters) < quorum {
+	minimumSupporters := quorum
+	if selection.CertifiedCommitted == selection.Index && selection.CertifiedCommitted > 0 {
+		minimumSupporters = 1
+	}
+	if !validEntryIdentity(selection.Identity) || selection.Identity.Index != selection.Index || len(selection.Supporters) < minimumSupporters {
 		return false
 	}
 	if selection.CertifiedCommitted == 0 {
@@ -184,16 +193,20 @@ func validRecoveryRepairSelection(selection recoverySelection, configured map[ch
 		return false
 	}
 	seen := make(map[ch.NodeID]struct{}, len(selection.Supporters))
+	certifiedSupporters := 0
 	for _, supporter := range selection.Supporters {
 		if _, ok := configured[supporter.Voter]; !ok || !validReplicaState(supporter.State) || supporter.State.LEO < selection.Index {
 			return false
+		}
+		if supporter.State.Committed >= selection.CertifiedCommitted {
+			certifiedSupporters++
 		}
 		if _, duplicate := seen[supporter.Voter]; duplicate {
 			return false
 		}
 		seen[supporter.Voter] = struct{}{}
 	}
-	return true
+	return selection.CertifiedCommitted == 0 || certifiedSupporters >= minimumSupporters
 }
 
 func loadRecoveryReplicaState(ctx context.Context, store ReplicaStore, key ch.ChannelKey, id ch.ChannelID, indexes []uint64) (LoadResult, error) {

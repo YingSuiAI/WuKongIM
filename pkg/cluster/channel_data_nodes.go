@@ -6,22 +6,26 @@ import (
 	"sync"
 
 	ch "github.com/WuKongIM/WuKongIM/pkg/channel"
+	"github.com/WuKongIM/WuKongIM/pkg/cluster/channels"
 )
 
-// dataNodeView stores the latest schedulable data-node IDs from control snapshots.
+// dataNodeView stores active membership and schedulable data-node IDs from one
+// exact control snapshot.
 type dataNodeView struct {
-	mu       sync.RWMutex
-	revision uint64
-	nodes    []uint64
-	changed  chan struct{}
+	mu          sync.RWMutex
+	revision    uint64
+	active      []uint64
+	schedulable []uint64
+	changed     chan struct{}
 }
 
-// UpdateAtRevision atomically replaces the placement candidates and the exact
-// control revision from which they were derived.
-func (v *dataNodeView) UpdateAtRevision(revision uint64, nodes []uint64) {
+// UpdateAtRevision atomically replaces active and schedulable placement nodes
+// and the exact control revision from which they were derived.
+func (v *dataNodeView) UpdateAtRevision(revision uint64, active, schedulable []uint64) {
 	v.mu.Lock()
 	v.revision = revision
-	v.nodes = append([]uint64(nil), nodes...)
+	v.active = append([]uint64(nil), active...)
+	v.schedulable = append([]uint64(nil), schedulable...)
 	previous := v.changed
 	v.changed = make(chan struct{})
 	if previous != nil {
@@ -30,17 +34,17 @@ func (v *dataNodeView) UpdateAtRevision(revision uint64, nodes []uint64) {
 	v.mu.Unlock()
 }
 
-// DataNodes returns a defensive copy of the latest data-node set.
-func (v *dataNodeView) DataNodes() []uint64 {
+// SchedulableDataNodes returns a defensive copy of the latest healthy data-node set.
+func (v *dataNodeView) SchedulableDataNodes() []uint64 {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
-	return append([]uint64(nil), v.nodes...)
+	return append([]uint64(nil), v.schedulable...)
 }
 
 // PlacementDataNodes waits for and returns the exact control revision used by
 // an already-routed create batch. A newer candidate generation proves the
 // supplied route stale and must be rerouted by the caller.
-func (v *dataNodeView) PlacementDataNodes(ctx context.Context, expectedRevision uint64) ([]uint64, error) {
+func (v *dataNodeView) PlacementDataNodes(ctx context.Context, expectedRevision uint64) (channels.PlacementDataNodeSet, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -48,13 +52,16 @@ func (v *dataNodeView) PlacementDataNodes(ctx context.Context, expectedRevision 
 		v.mu.Lock()
 		switch {
 		case v.revision == expectedRevision:
-			nodes := append([]uint64(nil), v.nodes...)
+			nodes := channels.PlacementDataNodeSet{
+				Active:      append([]uint64(nil), v.active...),
+				Schedulable: append([]uint64(nil), v.schedulable...),
+			}
 			v.mu.Unlock()
 			return nodes, nil
 		case v.revision > expectedRevision:
 			actual := v.revision
 			v.mu.Unlock()
-			return nil, fmt.Errorf("%w: channel placement route revision=%d candidates=%d", ch.ErrStaleMeta, expectedRevision, actual)
+			return channels.PlacementDataNodeSet{}, fmt.Errorf("%w: channel placement route revision=%d candidates=%d", ch.ErrStaleMeta, expectedRevision, actual)
 		}
 		if v.changed == nil {
 			v.changed = make(chan struct{})
@@ -63,7 +70,7 @@ func (v *dataNodeView) PlacementDataNodes(ctx context.Context, expectedRevision 
 		v.mu.Unlock()
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return channels.PlacementDataNodeSet{}, ctx.Err()
 		case <-changed:
 		}
 	}

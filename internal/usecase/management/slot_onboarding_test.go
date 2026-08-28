@@ -35,6 +35,93 @@ func TestPlanNodeOnboardingSelectsBoundedSlotMoves(t *testing.T) {
 	}
 }
 
+func TestPlanNodeOnboardingStopsBatchAtTargetCapacityLimit(t *testing.T) {
+	snap := nodeOnboardingSnapshotWithSlotCount(5)
+	app := New(Options{Cluster: fakeNodeSnapshotReader{snapshot: snap}})
+
+	plan, err := app.PlanNodeOnboarding(context.Background(), NodeOnboardingPlanRequest{TargetNodeID: 4, MaxSlotMoves: 5})
+	if err != nil {
+		t.Fatalf("PlanNodeOnboarding() error = %v", err)
+	}
+
+	// Fifteen replicas shared by four equal-weight active data members give
+	// node 4 a ceiling of four replicas. The plan must not fill the fifth slot.
+	if len(plan.Candidates) != 4 {
+		t.Fatalf("candidates = %#v, want four moves at equal-weight ceiling", plan.Candidates)
+	}
+}
+
+func TestPlanNodeOnboardingReturnsNoCandidateAtProjectedCapacityLimit(t *testing.T) {
+	snap := nodeOnboardingSnapshotWithSlotCount(5)
+	for i := 0; i < 4; i++ {
+		snap.Slots[i].DesiredPeers[0] = 4
+	}
+	snap.Tasks = []control.ReconcileTask{{
+		TaskID:     "move-slot-5-to-target",
+		SlotID:     5,
+		Kind:       control.TaskKindSlotReplicaMove,
+		SourceNode: 1,
+		TargetNode: 4,
+		Status:     control.TaskStatusRunning,
+	}}
+	// Keep three committed replicas and project the fourth through the active
+	// task, proving in-flight work counts toward the same ceiling.
+	snap.Slots[3].DesiredPeers[0] = 1
+	app := New(Options{Cluster: fakeNodeSnapshotReader{snapshot: snap}})
+
+	plan, err := app.PlanNodeOnboarding(context.Background(), NodeOnboardingPlanRequest{TargetNodeID: 4, MaxSlotMoves: 5})
+	if err != nil {
+		t.Fatalf("PlanNodeOnboarding() error = %v", err)
+	}
+
+	if len(plan.Candidates) != 0 {
+		t.Fatalf("candidates = %#v, want none at projected capacity ceiling", plan.Candidates)
+	}
+}
+
+func TestPlanNodeOnboardingUsesActiveMemberCapacityWeights(t *testing.T) {
+	snap := nodeOnboardingSnapshotWithSlotCount(5)
+	for i := 0; i < 4; i++ {
+		snap.Slots[i].DesiredPeers[0] = 4
+	}
+	snap.Nodes[3].CapacityWeight = 2
+	app := New(Options{Cluster: fakeNodeSnapshotReader{snapshot: snap}})
+
+	plan, err := app.PlanNodeOnboarding(context.Background(), NodeOnboardingPlanRequest{TargetNodeID: 4, MaxSlotMoves: 5})
+	if err != nil {
+		t.Fatalf("PlanNodeOnboarding() error = %v", err)
+	}
+
+	// Weight 2 out of total weight 5 gives node 4 a ceiling of six out of
+	// fifteen replicas, so its four current replicas still allow one candidate.
+	if len(plan.Candidates) != 1 || plan.Candidates[0].SlotID != 5 {
+		t.Fatalf("candidates = %#v, want weighted slot 5 move", plan.Candidates)
+	}
+}
+
+func TestPlanNodeOnboardingIncludesUnhealthyActiveMemberWeight(t *testing.T) {
+	snap := nodeOnboardingSnapshotWithSlotCount(5)
+	snap.Nodes[2].CapacityWeight = 7
+	snap.Nodes[2].Health = control.NodeHealth{
+		Freshness:    control.NodeHealthStale,
+		Status:       control.NodeSuspect,
+		RuntimeReady: false,
+	}
+	app := New(Options{Cluster: fakeNodeSnapshotReader{snapshot: snap}})
+
+	plan, err := app.PlanNodeOnboarding(context.Background(), NodeOnboardingPlanRequest{TargetNodeID: 4, MaxSlotMoves: 5})
+	if err != nil {
+		t.Fatalf("PlanNodeOnboarding() error = %v", err)
+	}
+
+	// Capacity shares follow durable active membership, not transient health.
+	// Node 3 therefore remains in total weight 10 and caps node 4 at two of the
+	// fifteen replicas even while node 3 is not placement-schedulable.
+	if len(plan.Candidates) != 2 {
+		t.Fatalf("candidates = %#v, want two moves with unhealthy active member weight", plan.Candidates)
+	}
+}
+
 func TestPlanNodeOnboardingRejectsNonActiveTarget(t *testing.T) {
 	snap := nodeOnboardingSnapshot()
 	snap.Nodes[3].JoinState = control.NodeJoinStateJoining
@@ -105,7 +192,7 @@ func TestStartNodeOnboardingCreatesBoundedMoveTask(t *testing.T) {
 
 func TestStartNodeOnboardingReplansBetweenRealControlWrites(t *testing.T) {
 	rt := startNodeOnboardingControlRuntime(t)
-	activateNodeOnboardingTarget(t, rt, 4)
+	activateNodeOnboardingTarget(t, rt, 4, 3)
 	app := New(Options{
 		Cluster:         controlRuntimeSnapshotReader{runtime: rt},
 		SlotReplicaMove: rt,
@@ -240,6 +327,20 @@ func nodeOnboardingSnapshot() control.Snapshot {
 	}
 }
 
+func nodeOnboardingSnapshotWithSlotCount(count int) control.Snapshot {
+	snap := nodeOnboardingSnapshot()
+	snap.Slots = make([]control.SlotAssignment, 0, count)
+	for slotID := 1; slotID <= count; slotID++ {
+		snap.Slots = append(snap.Slots, control.SlotAssignment{
+			SlotID:          uint32(slotID),
+			DesiredPeers:    []uint64{1, 2, 3},
+			ConfigEpoch:     uint64(slotID + 6),
+			PreferredLeader: uint64((slotID-1)%3 + 1),
+		})
+	}
+	return snap
+}
+
 func nodeOnboardingActiveNode(nodeID uint64) control.Node {
 	return control.Node{
 		NodeID:    nodeID,
@@ -296,14 +397,14 @@ func startNodeOnboardingControlRuntime(t *testing.T) *control.Runtime {
 	return rt
 }
 
-func activateNodeOnboardingTarget(t *testing.T, rt *control.Runtime, nodeID uint64) {
+func activateNodeOnboardingTarget(t *testing.T, rt *control.Runtime, nodeID uint64, capacityWeight uint32) {
 	t.Helper()
 
 	if _, err := rt.JoinNode(context.Background(), control.JoinNodeRequest{
 		NodeID:         nodeID,
 		Addr:           "127.0.0.1:10004",
 		Roles:          []control.Role{control.RoleData},
-		CapacityWeight: 1,
+		CapacityWeight: capacityWeight,
 	}); err != nil {
 		t.Fatalf("JoinNode() error = %v", err)
 	}

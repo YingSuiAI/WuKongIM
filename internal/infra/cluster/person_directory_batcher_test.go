@@ -22,6 +22,9 @@ func TestPersonDirectoryBatcherUsesBoundedCollectionWindowAndBatch(t *testing.T)
 	if cap(batcher.active) != 8 {
 		t.Fatalf("active batch capacity = %d, want 8", cap(batcher.active))
 	}
+	if batcher.attemptTimeout != 5*time.Second || batcher.timeout != 10*time.Second {
+		t.Fatalf("attempt/total timeout = %v/%v, want 5s/10s", batcher.attemptTimeout, batcher.timeout)
+	}
 }
 
 func TestPersonDirectoryBatcherStopCancelsAndJoinsOwnedBatch(t *testing.T) {
@@ -257,6 +260,106 @@ func TestPersonDirectoryBatcherReturnsAdmissionFailure(t *testing.T) {
 	}
 }
 
+func TestPersonDirectoryBatcherRereadsAppliedTaskAfterAmbiguousLeaderChange(t *testing.T) {
+	node := &ambiguousAppliedPersonDirectoryBatchNode{}
+	batcher := newPersonDirectoryBatcher(node, nil)
+	batcher.collectWait = time.Millisecond
+	batcher.targetItems = 1
+	mutation := testPersonDirectoryMutation(0)
+
+	err := batcher.ensure(context.Background(), mutation)
+
+	if err != nil {
+		t.Fatalf("ensure() error = %v", err)
+	}
+	if node.admissionCalls != 1 || node.readCalls != 1 {
+		t.Fatalf("admission/read calls = %d/%d, want one ambiguous submit then one authoritative recovery read", node.admissionCalls, node.readCalls)
+	}
+	if node.task != mutation.task {
+		t.Fatalf("admitted task = %#v, want unchanged identity %#v", node.task, mutation.task)
+	}
+}
+
+func TestPersonDirectoryBatcherRetainsRecoveryBudgetAfterAttemptTimeout(t *testing.T) {
+	node := &attemptTimeoutAppliedPersonDirectoryBatchNode{}
+	batcher := newPersonDirectoryBatcher(node, nil)
+	batcher.collectWait = time.Millisecond
+	batcher.targetItems = 1
+	batcher.attemptTimeout = 20 * time.Millisecond
+	batcher.timeout = 200 * time.Millisecond
+
+	err := batcher.ensure(context.Background(), testPersonDirectoryMutation(0))
+
+	if err != nil {
+		t.Fatalf("ensure() error = %v", err)
+	}
+	if node.admissionCalls != 1 || node.readCalls != 1 {
+		t.Fatalf("admission/read calls = %d/%d, want one expired attempt then one recovery read", node.admissionCalls, node.readCalls)
+	}
+}
+
+func TestPersonDirectoryBatcherDoesNotRetryNonLeaderFailure(t *testing.T) {
+	admissionErr := errors.New("admission payload rejected")
+	node := &nonRetryablePersonDirectoryBatchNode{admissionErr: admissionErr}
+	batcher := newPersonDirectoryBatcher(node, nil)
+	batcher.collectWait = time.Millisecond
+	batcher.targetItems = 1
+
+	err := batcher.ensure(context.Background(), testPersonDirectoryMutation(0))
+
+	if !errors.Is(err, admissionErr) {
+		t.Fatalf("ensure() error = %v, want non-retryable admission error", err)
+	}
+	if node.admissionCalls != 1 || node.readCalls != 0 {
+		t.Fatalf("admission/read calls = %d/%d, want no recovery for non-leader failure", node.admissionCalls, node.readCalls)
+	}
+}
+
+func TestPersonDirectoryBatcherRejectsRecoveredDifferentGeneration(t *testing.T) {
+	node := &generationMismatchPersonDirectoryBatchNode{}
+	batcher := newPersonDirectoryBatcher(node, nil)
+	batcher.collectWait = time.Millisecond
+	batcher.targetItems = 1
+	mutation := testPersonDirectoryMutation(0)
+	mutation.task.Generation = 7
+
+	err := batcher.ensure(context.Background(), mutation)
+
+	if !errors.Is(err, metadb.ErrStaleMeta) {
+		t.Fatalf("ensure() error = %v, want typed generation conflict", err)
+	}
+	if node.admissionCalls != 1 || node.readCalls != 1 {
+		t.Fatalf("admission/read calls = %d/%d, want conflict without resubmission", node.admissionCalls, node.readCalls)
+	}
+}
+
+func TestPersonDirectoryBatcherRetriesMissingTaskUntilLeaderElection(t *testing.T) {
+	node := &missingUntilElectionPersonDirectoryBatchNode{failuresBeforeElection: 3}
+	batcher := newPersonDirectoryBatcher(node, nil)
+	batcher.collectWait = time.Millisecond
+	batcher.targetItems = 1
+	mutation := testPersonDirectoryMutation(0)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	err := batcher.ensure(ctx, mutation)
+
+	if err != nil {
+		t.Fatalf("ensure() error = %v", err)
+	}
+	if got := len(node.tasks); got != node.failuresBeforeElection+1 {
+		t.Fatalf("admission calls = %d, want %d attempts spanning election", got, node.failuresBeforeElection+1)
+	}
+	if node.readCalls != node.failuresBeforeElection {
+		t.Fatalf("authoritative reads = %d, want one before every resubmit", node.readCalls)
+	}
+	for i, task := range node.tasks {
+		if task != mutation.task {
+			t.Fatalf("admission task %d = %#v, want unchanged identity %#v", i, task, mutation.task)
+		}
+	}
+}
+
 func TestPersonDirectoryBatcherPreservesAlignedPartialAdmissionResults(t *testing.T) {
 	admissionErr := errors.New("second source slot unavailable")
 	node := &partialPersonDirectoryBatchNode{admissionErr: admissionErr}
@@ -399,6 +502,98 @@ type blockingPersonDirectoryBatchNode struct {
 
 type partialPersonDirectoryBatchNode struct {
 	admissionErr error
+}
+
+type ambiguousAppliedPersonDirectoryBatchNode struct {
+	admissionCalls int
+	readCalls      int
+	task           metadb.PersonDirectoryTask
+}
+
+type attemptTimeoutAppliedPersonDirectoryBatchNode struct {
+	admissionCalls int
+	readCalls      int
+}
+
+type nonRetryablePersonDirectoryBatchNode struct {
+	admissionErr   error
+	admissionCalls int
+	readCalls      int
+}
+
+type generationMismatchPersonDirectoryBatchNode struct {
+	admissionCalls int
+	readCalls      int
+}
+
+type missingUntilElectionPersonDirectoryBatchNode struct {
+	failuresBeforeElection int
+	readCalls              int
+	tasks                  []metadb.PersonDirectoryTask
+}
+
+func (n *missingUntilElectionPersonDirectoryBatchNode) AdmitPersonDirectoryTaskWaves(_ context.Context, tasks []metadb.PersonDirectoryTask, emit func(int, error)) {
+	n.tasks = append(n.tasks, tasks[0])
+	if len(n.tasks) <= n.failuresBeforeElection {
+		emit(0, context.DeadlineExceeded)
+		return
+	}
+	emit(0, nil)
+}
+
+func (n *missingUntilElectionPersonDirectoryBatchNode) GetChannelMetadataAuthoritative(_ context.Context, _ string, _ int64) (metadb.Channel, error) {
+	n.readCalls++
+	return metadb.Channel{}, metadb.ErrNotFound
+}
+
+func (n *ambiguousAppliedPersonDirectoryBatchNode) AdmitPersonDirectoryTaskWaves(_ context.Context, tasks []metadb.PersonDirectoryTask, emit func(int, error)) {
+	n.admissionCalls++
+	n.task = tasks[0]
+	emit(0, context.DeadlineExceeded)
+}
+
+func (n *ambiguousAppliedPersonDirectoryBatchNode) GetChannelMetadataAuthoritative(_ context.Context, channelID string, channelType int64) (metadb.Channel, error) {
+	n.readCalls++
+	return metadb.Channel{ChannelID: channelID, ChannelType: channelType, DirectoryProjectionState: metadb.DirectoryProjectionPending}, nil
+}
+
+func (n *attemptTimeoutAppliedPersonDirectoryBatchNode) AdmitPersonDirectoryTaskWaves(ctx context.Context, _ []metadb.PersonDirectoryTask, emit func(int, error)) {
+	n.admissionCalls++
+	<-ctx.Done()
+	emit(0, ctx.Err())
+}
+
+func (n *attemptTimeoutAppliedPersonDirectoryBatchNode) GetChannelMetadataAuthoritative(ctx context.Context, channelID string, channelType int64) (metadb.Channel, error) {
+	n.readCalls++
+	if err := ctx.Err(); err != nil {
+		return metadb.Channel{}, err
+	}
+	return metadb.Channel{ChannelID: channelID, ChannelType: channelType, DirectoryProjectionState: metadb.DirectoryProjectionPending}, nil
+}
+
+func (n *nonRetryablePersonDirectoryBatchNode) AdmitPersonDirectoryTaskWaves(_ context.Context, _ []metadb.PersonDirectoryTask, emit func(int, error)) {
+	n.admissionCalls++
+	emit(0, n.admissionErr)
+}
+
+func (n *nonRetryablePersonDirectoryBatchNode) GetChannelMetadataAuthoritative(_ context.Context, _ string, _ int64) (metadb.Channel, error) {
+	n.readCalls++
+	return metadb.Channel{}, metadb.ErrNotFound
+}
+
+func (n *generationMismatchPersonDirectoryBatchNode) AdmitPersonDirectoryTaskWaves(_ context.Context, _ []metadb.PersonDirectoryTask, emit func(int, error)) {
+	n.admissionCalls++
+	emit(0, context.DeadlineExceeded)
+}
+
+func (n *generationMismatchPersonDirectoryBatchNode) GetChannelMetadataAuthoritative(_ context.Context, channelID string, channelType int64) (metadb.Channel, error) {
+	n.readCalls++
+	return metadb.Channel{
+		ChannelID:                     channelID,
+		ChannelType:                   channelType,
+		DirectoryProjectionState:      metadb.DirectoryProjectionPending,
+		DirectoryProjectionGeneration: 8,
+	}, nil
 }
 
 type stagedPersonDirectoryBatchNode struct {

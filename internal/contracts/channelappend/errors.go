@@ -23,6 +23,10 @@ var (
 	ErrStaleRoute = errors.New("internal/message: stale route")
 	// ErrRouteNotReady reports that cluster routing is not ready for foreground writes.
 	ErrRouteNotReady = errors.New("internal/message: route not ready")
+	// ErrAppendOutcomeUnknown reports that a remote append may have reached the
+	// authority even though its response was lost. A retry must perform the
+	// durable sender/client/payload idempotency lookup before appending again.
+	ErrAppendOutcomeUnknown = errors.New("internal/message: append outcome unknown")
 	// ErrChannelNotFound reports that the target channel is not available.
 	ErrChannelNotFound = errors.New("internal/message: channel not found")
 	// ErrBackpressured reports bounded runtime pressure.

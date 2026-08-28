@@ -398,6 +398,9 @@ func (s *MemoryChannelStore) appendLeaderExactLocked(req AppendLeaderRequest) (A
 	}
 	byCommand, commandPresent := s.proposalsByCommand[req.Proposal.CommandID]
 	byLast, lastPresent := s.proposalsByLast[req.Proposal.LastOffset]
+	if req.RequireExistingProposal && (!commandPresent || !lastPresent) {
+		return appendLeaderErrorResult(ch.ErrLogConflict), ch.ErrLogConflict
+	}
 	if commandPresent || lastPresent {
 		if !commandPresent || !lastPresent || byCommand != proposal || byLast != proposal || leo < req.Proposal.LastOffset {
 			return appendLeaderErrorResult(ch.ErrLogConflict), ch.ErrLogConflict

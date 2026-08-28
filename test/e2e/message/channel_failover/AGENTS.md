@@ -8,8 +8,9 @@ This file is for agents working inside
 This scenario proves a static three-Controller-voter `cmd/wukongim` cluster can
 keep Channel quorum-acknowledged messages after one Channel leader node stops,
 automatically fail over affected channels through durable migration tasks, and
-fail closed for new Channel placement while the configured replica count
-cannot be satisfied. Its follower-repair path adds one data-only spare, proves
+create new three-replica Channel metadata with the two surviving healthy nodes
+as its ISR while the stopped active member remains a non-ISR replica. Its
+follower-repair path adds one data-only spare, proves
 the repaired spare enters the public Channel replicas and ISR while preserving
 `min_isr=2`, restores the replaced source as a Controller voter, and then proves
 the repaired spare can carry Channel quorum after another original replica

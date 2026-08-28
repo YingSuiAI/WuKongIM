@@ -193,6 +193,10 @@ func (r *Router) SendBatchEach(items []SendBatchItem, emit func(int, SendBatchIt
 	}
 	pending := make([]int, 0, len(items))
 	attempts := make([]int, len(items))
+	// outcomeUnknown marks items whose prior remote attempt may already have
+	// committed. Their next authority submit must perform the durable
+	// sender/client/payload lookup before it can append again.
+	outcomeUnknown := make([]bool, len(items))
 	routeChannels := make([]ChannelID, len(items))
 	for i, item := range items {
 		prepared, routeChannel, result, done := prepareRouterItem(item, time.Now())
@@ -207,6 +211,14 @@ func (r *Router) SendBatchEach(items []SendBatchItem, emit func(int, SendBatchIt
 
 	for len(pending) > 0 {
 		groups, nextPending := r.resolvePending(items, routeChannels, results, pending, attempts)
+		for groupIndex := range groups {
+			for _, index := range groups[groupIndex].indexes {
+				if outcomeUnknown[index] {
+					groups[groupIndex].target.WriteFenced = true
+					break
+				}
+			}
+		}
 		deferred := make([]bool, len(items))
 		for _, group := range groups {
 			for _, index := range group.indexes {
@@ -226,6 +238,7 @@ func (r *Router) SendBatchEach(items []SendBatchItem, emit func(int, SendBatchIt
 			invalidate := false
 			for i, result := range normalizeRouterGroupResults(len(group.indexes), groupResults) {
 				index := group.indexes[i]
+				outcomeUnknown[index] = outcomeUnknown[index] || errors.Is(result.Err, ErrAppendOutcomeUnknown)
 				invalidate = invalidate || shouldInvalidateRouterAuthority(result.Err)
 				if shouldRetryRouterError(result.Err) && canRetryRouterItem(items[index], attempts[index], r.maxRouteAttempts, time.Now()) {
 					nextPending = append(nextPending, index)
@@ -256,6 +269,7 @@ func (r *Router) sendSingle(item SendBatchItem) SendBatchItemResult {
 		return result
 	}
 	attempts := 0
+	outcomeUnknown := false
 	for {
 		attempts++
 		if err := routerItemError(prepared, time.Now()); err != nil {
@@ -276,7 +290,11 @@ func (r *Router) sendSingle(item SendBatchItem) SendBatchItemResult {
 		if err != nil {
 			return SendBatchItemResult{Err: err}
 		}
+		if outcomeUnknown {
+			target.WriteFenced = true
+		}
 		result = r.submitSingleTarget(target, prepared)
+		outcomeUnknown = outcomeUnknown || errors.Is(result.Err, ErrAppendOutcomeUnknown)
 		if shouldInvalidateRouterAuthority(result.Err) {
 			r.invalidateAppendAuthority(routeChannel, target)
 		}
@@ -761,6 +779,7 @@ func shouldRetryRouterError(err error) bool {
 		errors.Is(err, ErrNotChannelAuthority) ||
 		errors.Is(err, ErrNotLeader) ||
 		errors.Is(err, ErrRouteNotReady) ||
+		errors.Is(err, ErrAppendOutcomeUnknown) ||
 		errors.Is(err, context.Canceled)
 }
 
@@ -768,7 +787,8 @@ func shouldInvalidateRouterAuthority(err error) bool {
 	return errors.Is(err, ErrStaleRoute) ||
 		errors.Is(err, ErrNotChannelAuthority) ||
 		errors.Is(err, ErrNotLeader) ||
-		errors.Is(err, ErrRouteNotReady)
+		errors.Is(err, ErrRouteNotReady) ||
+		errors.Is(err, ErrAppendOutcomeUnknown)
 }
 
 func (r *Router) invalidateAppendAuthority(id ChannelID, target AuthorityTarget) {

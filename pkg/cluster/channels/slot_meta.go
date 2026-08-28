@@ -7,8 +7,11 @@ import (
 	"time"
 
 	ch "github.com/WuKongIM/WuKongIM/pkg/channel"
+	clusternet "github.com/WuKongIM/WuKongIM/pkg/cluster/net"
+	"github.com/WuKongIM/WuKongIM/pkg/cluster/propose"
 	"github.com/WuKongIM/WuKongIM/pkg/cluster/routing"
 	metadb "github.com/WuKongIM/WuKongIM/pkg/db/meta"
+	"github.com/WuKongIM/WuKongIM/pkg/transport"
 )
 
 const (
@@ -17,6 +20,12 @@ const (
 	channelMetaStageCreatePropose = "meta_create_propose"
 	channelMetaStageCreateWrite   = "meta_create_write"
 	channelMetaStageFinalRead     = "meta_final_read"
+
+	// One caller-owned retry window spans the configured Slot election timeout.
+	// Each iteration rereads the create-only key before another identical
+	// ChannelID/ChannelType admission is submitted.
+	channelMetaLeaderChangeRetryTimeout = 4 * time.Second
+	channelMetaLeaderChangeRetryBackoff = 25 * time.Millisecond
 )
 
 // SlotMetaSource resolves Channel metadata from Slot authoritative runtime metadata.
@@ -128,32 +137,94 @@ func (s *SlotMetaSource) ResolveChannelMetas(ctx context.Context, ids []ch.Chann
 
 // EnsureChannelMeta returns metadata for append admission, creating it when absent.
 func (s *SlotMetaSource) EnsureChannelMeta(ctx context.Context, id ch.ChannelID) (ch.Meta, error) {
-	if err := ctxErr(ctx); err != nil {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
 		return ch.Meta{}, err
 	}
-	started := time.Now()
-	meta, err := s.readRuntimeMeta(ctx, id)
-	s.observeMetaStage(channelMetaStageSlotRead, metaStageResult(err), time.Since(started))
-	if err == nil {
-		return projectRuntimeMeta(meta), nil
+	retryCtx, cancel := context.WithTimeout(ctx, channelMetaLeaderChangeRetryTimeout)
+	defer cancel()
+
+	var lastRetryErr error
+	for {
+		started := time.Now()
+		meta, err := s.readRuntimeMeta(retryCtx, id)
+		s.observeMetaStage(channelMetaStageSlotRead, metaStageResult(err), time.Since(started))
+		if err == nil {
+			return projectRuntimeMeta(meta), nil
+		}
+		if !errors.Is(err, metadb.ErrNotFound) {
+			if !retryableChannelMetaLeaderChange(err) {
+				return ch.Meta{}, err
+			}
+			lastRetryErr = err
+		} else {
+			if s.batchErr != nil {
+				return ch.Meta{}, s.batchErr
+			}
+			if s.batcher == nil {
+				return ch.Meta{}, fmt.Errorf("%w: missing runtime metadata batch router/store", ch.ErrInvalidConfig)
+			}
+			started = time.Now()
+			outcome := s.batcher.ensure(retryCtx, id)
+			meta, err = outcome.meta, outcome.err
+			s.observeMetaStage(channelMetaStageCreateWrite, metaStageResult(err), time.Since(started))
+			if err == nil {
+				return projectRuntimeMeta(meta), nil
+			}
+			if !retryableChannelMetaLeaderChange(err) {
+				return ch.Meta{}, err
+			}
+			lastRetryErr = err
+		}
+
+		if err := waitChannelMetaLeaderChangeRetry(retryCtx, channelMetaLeaderChangeRetryBackoff); err != nil {
+			if callerErr := ctx.Err(); callerErr != nil {
+				return ch.Meta{}, callerErr
+			}
+			return ch.Meta{}, lastRetryErr
+		}
 	}
-	if !errors.Is(err, metadb.ErrNotFound) {
-		return ch.Meta{}, err
+}
+
+func retryableChannelMetaLeaderChange(err error) bool {
+	return errors.Is(err, errMetaCreateReroute) ||
+		errors.Is(err, errMetaCreateRetryMissing) ||
+		errors.Is(err, metadb.ErrStaleMeta) ||
+		ch.ErrorMatches(err, ch.ErrStaleMeta) ||
+		ch.ErrorMatches(err, ch.ErrNotLeader) ||
+		errors.Is(err, propose.ErrNotLeader) ||
+		errors.Is(err, routing.ErrRouteNotReady) ||
+		errors.Is(err, routing.ErrNoSlotLeader) ||
+		errors.Is(err, clusternet.ErrNodeNotFound) ||
+		errors.Is(err, clusternet.ErrServiceNotFound) ||
+		errors.Is(err, transport.ErrStopped) ||
+		errors.Is(err, transport.ErrTimeout) ||
+		errors.Is(err, transport.ErrNodeNotFound) ||
+		errors.Is(err, transport.ErrQueueFull) ||
+		errors.Is(err, transport.ErrDialFailed) ||
+		errors.Is(err, transport.ErrBusy) ||
+		errors.Is(err, context.DeadlineExceeded)
+}
+
+func waitChannelMetaLeaderChangeRetry(ctx context.Context, backoff time.Duration) error {
+	if backoff <= 0 {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			return nil
+		}
 	}
-	if s.batchErr != nil {
-		return ch.Meta{}, s.batchErr
+	timer := time.NewTimer(backoff)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
-	if s.batcher == nil {
-		return ch.Meta{}, fmt.Errorf("%w: missing runtime metadata batch router/store", ch.ErrInvalidConfig)
-	}
-	started = time.Now()
-	outcome := s.batcher.ensure(ctx, id)
-	meta, err = outcome.meta, outcome.err
-	s.observeMetaStage(channelMetaStageCreateWrite, metaStageResult(err), time.Since(started))
-	if err != nil {
-		return ch.Meta{}, err
-	}
-	return projectRuntimeMeta(meta), nil
 }
 
 func (s *SlotMetaSource) buildRuntimeMetaBatch(ctx context.Context, plans []runtimeMetaCreatePlanItem) ([]RuntimeMetaCreateItem, error) {
@@ -175,7 +246,10 @@ func (s *SlotMetaSource) buildRuntimeMetaBatch(ctx context.Context, plans []runt
 	} else {
 		for i := range placements {
 			placements[i] = ChannelPlacement{
-				Leader: firstNodeID(s.opts.DefaultReplicas), Replicas: append([]ch.NodeID(nil), s.opts.DefaultReplicas...), MinISR: s.opts.DefaultMinISR,
+				Leader:   firstNodeID(s.opts.DefaultReplicas),
+				Replicas: append([]ch.NodeID(nil), s.opts.DefaultReplicas...),
+				ISR:      append([]ch.NodeID(nil), s.opts.DefaultReplicas...),
+				MinISR:   s.opts.DefaultMinISR,
 			}
 		}
 	}
@@ -212,16 +286,32 @@ func RuntimeMetaFromPlacement(id ch.ChannelID, placement ChannelPlacement) (meta
 	if len(replicas) == 0 {
 		return metadb.ChannelRuntimeMeta{}, fmt.Errorf("%w: empty initial channel replicas", ch.ErrInvalidConfig)
 	}
+	isr := projectUint64NodeIDs(placement.ISR)
+	if len(isr) == 0 {
+		return metadb.ChannelRuntimeMeta{}, fmt.Errorf("%w: empty initial channel ISR", ch.ErrInvalidConfig)
+	}
+	replicaSet := make(map[uint64]struct{}, len(replicas))
+	for _, replica := range replicas {
+		replicaSet[replica] = struct{}{}
+	}
+	for _, member := range isr {
+		if _, ok := replicaSet[member]; !ok {
+			return metadb.ChannelRuntimeMeta{}, fmt.Errorf("%w: initial ISR member %d is not a replica", ch.ErrInvalidConfig, member)
+		}
+	}
 	leader := uint64(placement.Leader)
 	if leader == 0 {
-		leader = replicas[0]
+		leader = isr[0]
+	}
+	if !uint64NodeIn(isr, leader) {
+		return metadb.ChannelRuntimeMeta{}, fmt.Errorf("%w: initial leader %d is not in ISR", ch.ErrInvalidConfig, leader)
 	}
 	minISR := placement.MinISR
 	if minISR <= 0 {
 		minISR = 1
 	}
-	if minISR > len(replicas) {
-		return metadb.ChannelRuntimeMeta{}, fmt.Errorf("%w: initial min ISR exceeds replicas", ch.ErrInvalidConfig)
+	if minISR > len(isr) {
+		return metadb.ChannelRuntimeMeta{}, fmt.Errorf("%w: initial min ISR exceeds ISR", ch.ErrInvalidConfig)
 	}
 	return metadb.NormalizeChannelRuntimeMeta(metadb.ChannelRuntimeMeta{
 		ChannelID:    id.ID,
@@ -230,7 +320,7 @@ func RuntimeMetaFromPlacement(id ch.ChannelID, placement ChannelPlacement) (meta
 		LeaderEpoch:  1,
 		Leader:       leader,
 		Replicas:     replicas,
-		ISR:          append([]uint64(nil), replicas...),
+		ISR:          isr,
 		MinISR:       int64(minISR),
 		Status:       uint8(ch.StatusActive),
 	}), nil

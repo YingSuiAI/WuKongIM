@@ -242,12 +242,14 @@ func (a *storeAdapter) Sync(ctx context.Context, mutations []Mutation) []Mutatio
 		items := make([]channelstore.AppendLeaderBatchItem, len(mutations))
 		for index, mutation := range mutations {
 			class := channelStoreAppendClass(mutation.Class)
+			requireCertificate := mutation.Committed == mutation.Manifest.LastOffset && mutation.Committed > mutation.Manifest.BaseOffset
 			items[index] = channelstore.AppendLeaderBatchItem{
 				ChannelKey: mutation.ChannelKey,
 				ChannelID:  mutation.ChannelID,
 				Request: channelstore.AppendLeaderRequest{
 					Records: mutation.Records, Class: class, Committed: mutation.Committed, ExactBaseOffset: true,
-					ExpectedBaseOffset: mutation.Manifest.BaseOffset, Proposal: mutation.Manifest,
+					RequireExistingProposal: requireCertificate,
+					ExpectedBaseOffset:      mutation.Manifest.BaseOffset, Proposal: mutation.Manifest,
 					ServerAllocatedMessageIDs: mutation.ServerAllocatedMessageIDs,
 				},
 			}
@@ -270,9 +272,11 @@ func (a *storeAdapter) Sync(ctx context.Context, mutations []Mutation) []Mutatio
 			continue
 		}
 		class := channelStoreAppendClass(mutation.Class)
+		requireCertificate := mutation.Committed == mutation.Manifest.LastOffset && mutation.Committed > mutation.Manifest.BaseOffset
 		appendResult, appendErr := store.AppendLeader(ctx, channelstore.AppendLeaderRequest{
 			Records: mutation.Records, Class: class, Committed: mutation.Committed, ExactBaseOffset: true,
-			ExpectedBaseOffset: mutation.Manifest.BaseOffset, Proposal: mutation.Manifest,
+			RequireExistingProposal: requireCertificate,
+			ExpectedBaseOffset:      mutation.Manifest.BaseOffset, Proposal: mutation.Manifest,
 			ServerAllocatedMessageIDs: mutation.ServerAllocatedMessageIDs,
 		})
 		closeErr := store.Close()

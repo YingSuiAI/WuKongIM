@@ -149,8 +149,8 @@ func TestQuorumLogInstallDefersEmptyAuthorityBarrierIntoFirstProposal(t *testing
 	for _, voter := range authority.Voters {
 		loaded, loadErr := harness.stores[voter].Load(context.Background(), LoadBatch{Items: []LoadRequest{{ChannelKey: authority.Key, ChannelID: authority.ChannelID}}})
 		if loadErr != nil || len(loaded.Items) != 1 || loaded.Items[0].Err != nil || loaded.Items[0].State.LEO != 1 ||
-			loaded.Items[0].State.Committed != 0 || loaded.Items[0].State.Manifest.CommandID != proposal.CommandID {
-			t.Fatalf("voter %d state = %+v, error %v; want first proposal at 1 with no prior barrier", voter, loaded, loadErr)
+			loaded.Items[0].State.Committed != receipt.HW || loaded.Items[0].State.Manifest.CommandID != proposal.CommandID {
+			t.Fatalf("voter %d state = %+v, error %v; want acknowledged proposal and commit frontier at %d", voter, loaded, loadErr, receipt.HW)
 		}
 	}
 
@@ -302,14 +302,6 @@ func TestQuorumLogHigherFencedAuthorityPermanentlyClosesOldAdmission(t *testing.
 	if _, err := log.Install(context.Background(), authority); err != nil {
 		t.Fatalf("Install() error = %v", err)
 	}
-	fenced := authority
-	fenced.ID.LeaderTerm++
-	fenced.ID.FenceVersion++
-	fenced.WriteFence = ch.WriteFence{Token: "transfer", Version: fenced.ID.FenceVersion, Reason: ch.WriteFenceReasonLeaderTransfer}
-	if _, err := log.Install(context.Background(), fenced); !errors.Is(err, ch.ErrWriteFenced) {
-		t.Fatalf("Install(fenced authority) error = %v, want %v", err, ch.ErrWriteFenced)
-	}
-	before := harness.syncCalls
 	proposal := Proposal{
 		Key: authority.Key, Expected: authority.ID, CommandID: ch.CommandID{31: 23},
 		Records: []ch.Record{{
@@ -317,11 +309,47 @@ func TestQuorumLogHigherFencedAuthorityPermanentlyClosesOldAdmission(t *testing.
 			SizeBytes: len("payload"), ServerTimestampMS: 111,
 		}},
 	}
-	if _, err := log.Commit(context.Background(), proposal); !errors.Is(err, ch.ErrNotReady) && !errors.Is(err, ch.ErrStaleMeta) {
-		t.Fatalf("Commit(old authority after fence) error = %v, want fail-closed admission", err)
+	receipt, err := log.Commit(context.Background(), proposal)
+	if err != nil {
+		t.Fatalf("Commit(seed) error = %v", err)
+	}
+	fenced := authority
+	fenced.ID.LeaderTerm++
+	fenced.ID.FenceVersion++
+	fenced.WriteFence = ch.WriteFence{Token: "transfer", Version: fenced.ID.FenceVersion, Reason: ch.WriteFenceReasonLeaderTransfer}
+	installed, err := log.Install(context.Background(), fenced)
+	if err != nil {
+		t.Fatalf("Install(fenced authority) error = %v", err)
+	}
+	if installed.Authority != fenced.ID || installed.LEO != receipt.Last+1 || installed.HW != receipt.Last+1 {
+		t.Fatalf("Install(fenced authority) = %+v, want recovered seed plus current-authority barrier", installed)
+	}
+	before := harness.syncCalls
+	if _, err := log.Commit(context.Background(), proposal); !errors.Is(err, ch.ErrStaleMeta) {
+		t.Fatalf("Commit(old authority after fence) error = %v, want stale authority", err)
 	}
 	if harness.syncCalls != before {
 		t.Fatalf("old authority issued %d writes after higher fence", harness.syncCalls-before)
+	}
+	proposal.Expected = fenced.ID
+	if _, err := log.Commit(context.Background(), proposal); !errors.Is(err, ch.ErrWriteFenced) {
+		t.Fatalf("Commit(fenced authority) error = %v, want write fenced", err)
+	}
+	unfenced := fenced
+	unfenced.ID.FenceVersion++
+	unfenced.WriteFence = ch.WriteFence{}
+	cleared, err := log.Install(context.Background(), unfenced)
+	if err != nil {
+		t.Fatalf("Install(cleared fence) error = %v", err)
+	}
+	if cleared.Authority != unfenced.ID || cleared.LEO != installed.LEO || cleared.HW != installed.HW {
+		t.Fatalf("Install(cleared fence) = %+v, want recovered same-leadership frontier %+v", cleared, installed)
+	}
+	proposal.Expected = unfenced.ID
+	proposal.CommandID[31]++
+	proposal.Records[0].ID++
+	if _, err := log.Commit(context.Background(), proposal); err != nil {
+		t.Fatalf("Commit(cleared authority) error = %v", err)
 	}
 }
 

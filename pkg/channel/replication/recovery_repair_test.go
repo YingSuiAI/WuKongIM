@@ -27,10 +27,7 @@ func TestRepairQuorumPrefixFetchesFromProvedDonorAndAtomicallyReplacesDivergence
 	if err != nil {
 		t.Fatalf("NewStoreAdapter() error = %v", err)
 	}
-	if results := store.Sync(context.Background(), []Mutation{first, divergent}); len(results) != 2 ||
-		!results[0].Outcome.Durable() || !results[1].Outcome.Durable() {
-		t.Fatalf("Sync(local divergence) = %+v", results)
-	}
+	syncCertifiedTestMutations(t, store, first, divergent)
 	donorState := ReplicaState{
 		LEO: 3, Committed: 1, Manifest: donorThird.Manifest, TailIdentity: donorThirdTail,
 	}
@@ -75,6 +72,31 @@ func TestRepairQuorumPrefixFetchesFromProvedDonorAndAtomicallyReplacesDivergence
 	}
 	if !reflect.DeepEqual(loaded.Items[0].Entries, wantEntries) {
 		t.Fatalf("repaired identities = %+v, want %+v", loaded.Items[0].Entries, wantEntries)
+	}
+}
+
+func TestRecoveryRepairSelectionAllowsIdentitySupporterWithoutCommitCertificate(t *testing.T) {
+	key := ch.ChannelKey("1:mixed-certificate-supporters")
+	id := ch.ChannelID{ID: "mixed-certificate-supporters", Type: 1}
+	_, firstTail := recoveryMutationAfter(t, key, id, 1, 0, ch.EntryIdentity{})
+	second, secondTail := recoveryMutationAfter(t, key, id, 2, 1, firstTail)
+	committed := ReplicaState{LEO: 2, Committed: 2, Manifest: second.Manifest, TailIdentity: secondTail}
+	identityOnly := committed
+	identityOnly.Committed = 1
+	selection := recoverySelection{
+		Index: 2, Identity: secondTail, CertifiedCommitted: 2, CertifiedIdentity: secondTail,
+		Supporters: []recoverySupporter{
+			{Voter: 1, State: committed},
+			{Voter: 2, State: committed},
+			{Voter: 3, State: identityOnly},
+		},
+	}
+	configured, err := validateRecoveryTopology([]ch.NodeID{1, 2, 3}, 2)
+	if err != nil {
+		t.Fatalf("validateRecoveryTopology() error = %v", err)
+	}
+	if !validRecoveryRepairSelection(selection, configured, 2) {
+		t.Fatal("validRecoveryRepairSelection() rejected quorum certificates plus one identity-only supporter")
 	}
 }
 

@@ -405,7 +405,11 @@ func TestDefaultChannelRuntimeMetaStoreAuthoritativeRereadFollowsCurrentLeader(t
 		t.Fatalf("UpsertChannelRuntimeMeta() error = %v", err)
 	}
 
-	node := &Node{cfg: Config{NodeID: 2}, router: router}
+	node := &Node{
+		cfg:                 Config{NodeID: 2},
+		router:              router,
+		defaultSlotProposer: defaultSlotProposer{runtime: &recordingSlotRuntime{}},
+	}
 	node.started.Store(true)
 	node.defaultSlotProxy = slotproxy.NewChannelMetadataStore(node, db)
 	router.UpdateSlotLeaders([]routing.SlotStatus{{SlotID: expected.SlotID, Leader: 2, LeaderTerm: expected.LeaderTerm + 1}})

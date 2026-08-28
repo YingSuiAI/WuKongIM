@@ -23,9 +23,9 @@ import (
 
 const (
 	// fastRecoveryHealthReportInterval keeps failure detection responsive in real-process tests.
-	fastRecoveryHealthReportInterval = 500 * time.Millisecond
+	fastRecoveryHealthReportInterval = 250 * time.Millisecond
 	// fastRecoveryHealthReportTTL leaves Controller report latency headroom while staying below scenario wait bounds.
-	fastRecoveryHealthReportTTL = 5 * time.Second
+	fastRecoveryHealthReportTTL = 2 * time.Second
 )
 
 func TestChannelThreeNodeLeaderFailoverAfterNodeKill(t *testing.T) {
@@ -51,6 +51,13 @@ func TestChannelThreeNodeLeaderFailoverAfterNodeKill(t *testing.T) {
 	require.Greater(t, unaffectedDuringRepair.Seq, unaffected.Pre.Seq, cluster.DumpDiagnostics())
 
 	requireNodeUnschedulableEventually(t, cluster, survivor, killedNode)
+	metaCtx, metaCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	metaBeforeFailover, metaErr := channelRuntimeMeta(metaCtx, survivor, affected.ChannelID, affected.ChannelType)
+	metaCancel()
+	migrationCtx, migrationCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	activeMigrations, migrationErr := activeChannelMigrations(migrationCtx, survivor, affected.ChannelID, affected.ChannelType)
+	migrationCancel()
+	t.Logf("affected channel before post-stop send: channel=%s/%d stopped=%d meta=%+v metaErr=%v activeMigrations=%+v migrationErr=%v", affected.ChannelID, affected.ChannelType, killedNode, metaBeforeFailover, metaErr, activeMigrations, migrationErr)
 	afterFailover := sendGroupMessageWithin(t, survivor, affected.ChannelID, affected.ChannelType, "after-failover", 30*time.Second)
 	require.Greater(t, afterFailover.Seq, affected.Pre.Seq, cluster.DumpDiagnostics())
 
@@ -68,7 +75,7 @@ func TestChannelThreeNodeLeaderFailoverAfterNodeKill(t *testing.T) {
 	requireMessageOnceEventually(t, cluster, survivor, affected.ChannelID, affected.ChannelType, afterRestart)
 }
 
-func TestChannelNewPlacementFailsClosedWhenReplicaCountUnavailable(t *testing.T) {
+func TestChannelNewPlacementUsesSurvivingQuorumWhenOneReplicaUnavailable(t *testing.T) {
 	s := suite.New(t)
 	cluster := s.StartThreeNodeCluster(fastRecoveryOptions()...)
 
@@ -78,15 +85,36 @@ func TestChannelNewPlacementFailsClosedWhenReplicaCountUnavailable(t *testing.T)
 
 	const stoppedNode = uint64(3)
 	survivor := cluster.MustNode(1)
-	channelID := fmt.Sprintf("e2e-channel-placement-unavailable-%d", time.Now().UnixNano())
+	slots := cluster.ManagerClient(t, survivor.Spec.ID).MustSlots(t)
+	var targetSlot suite.SlotDTO
+	for _, slot := range slots {
+		preferred := slot.Assignment.PreferredLeaderID
+		if preferred == 0 {
+			preferred = slot.Runtime.PreferredLeaderID
+		}
+		if preferred == stoppedNode {
+			targetSlot = slot
+			break
+		}
+	}
+	require.NotZero(t, targetSlot.SlotID, cluster.DumpDiagnostics())
+	channelID, ok := channelIDForPhysicalSlot(slots, targetSlot, fmt.Sprintf("e2e-channel-placement-degraded-%d", time.Now().UnixNano()))
+	require.True(t, ok, cluster.DumpDiagnostics())
 	createGroupChannel(t, survivor, channelID, frame.ChannelTypeGroup)
 
 	require.NoError(t, cluster.MustNode(stoppedNode).Stop(), cluster.DumpDiagnostics())
+	degraded, err := postGroupMessageEventually(context.Background(), survivor, channelID, frame.ChannelTypeGroup, "placement-degraded")
+	require.NoError(t, err, cluster.DumpDiagnostics())
+	require.NotZero(t, degraded.Seq, cluster.DumpDiagnostics())
+	requireMessageOnceEventually(t, cluster, survivor, channelID, frame.ChannelTypeGroup, degraded)
 	requireNodeUnschedulableEventually(t, cluster, survivor, stoppedNode)
 
-	_, err := postGroupMessage(context.Background(), survivor, channelID, frame.ChannelTypeGroup, "placement-unavailable")
-	require.Error(t, err, cluster.DumpDiagnostics())
-	requireRetryablePlacementError(t, err)
+	meta, err := channelRuntimeMeta(context.Background(), survivor, channelID, frame.ChannelTypeGroup)
+	require.NoError(t, err, cluster.DumpDiagnostics())
+	require.Len(t, meta.Replicas, 3, cluster.DumpDiagnostics())
+	require.Equal(t, int64(2), meta.MinISR, cluster.DumpDiagnostics())
+	require.NotEqual(t, stoppedNode, meta.Leader, cluster.DumpDiagnostics())
+	require.NotContains(t, meta.ISR, stoppedNode, cluster.DumpDiagnostics())
 
 	require.NoError(t, cluster.StartStoppedNode(stoppedNode), cluster.DumpDiagnostics())
 	ctx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
@@ -96,6 +124,8 @@ func TestChannelNewPlacementFailsClosedWhenReplicaCountUnavailable(t *testing.T)
 
 	recovered := sendGroupMessage(t, survivor, channelID, frame.ChannelTypeGroup, "placement-recovered")
 	require.NotZero(t, recovered.Seq, cluster.DumpDiagnostics())
+	require.Greater(t, recovered.Seq, degraded.Seq, cluster.DumpDiagnostics())
+	requireMessageOnceEventually(t, cluster, survivor, channelID, frame.ChannelTypeGroup, recovered)
 }
 
 func TestChannelFollowerReplicaRepairAfterNodeKill(t *testing.T) {
@@ -325,6 +355,15 @@ func sendGroupMessageWithin(t *testing.T, node *suite.StartedNode, channelID str
 		"client_msg_no": clientMsgNo,
 		"payload":       base64.StdEncoding.EncodeToString([]byte(label)),
 	})
+	if err != nil {
+		diagnosticsCtx, diagnosticsCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		meta, metaErr := channelRuntimeMeta(diagnosticsCtx, node, channelID, channelType)
+		diagnosticsCancel()
+		diagnosticsCtx, diagnosticsCancel = context.WithTimeout(context.Background(), 5*time.Second)
+		migrations, migrationErr := activeChannelMigrations(diagnosticsCtx, node, channelID, channelType)
+		diagnosticsCancel()
+		t.Logf("failed send authority diagnostics: channel=%s/%d meta=%+v metaErr=%v activeMigrations=%+v migrationErr=%v", channelID, channelType, meta, metaErr, migrations, migrationErr)
+	}
 	require.NoError(t, err, node.DumpDiagnostics())
 	require.Equal(t, uint8(frame.ReasonSuccess), resp.Reason, node.DumpDiagnostics())
 	require.NotZero(t, resp.MessageID, node.DumpDiagnostics())
@@ -332,12 +371,12 @@ func sendGroupMessageWithin(t *testing.T, node *suite.StartedNode, channelID str
 	return sentMessage{ID: uint64(resp.MessageID), Seq: resp.MessageSeq, ClientMsgNo: clientMsgNo}
 }
 
-func postGroupMessage(ctx context.Context, node *suite.StartedNode, channelID string, channelType uint8, label string) (sentMessage, error) {
-	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+func postGroupMessageEventually(ctx context.Context, node *suite.StartedNode, channelID string, channelType uint8, label string) (sentMessage, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	clientMsgNo := fmt.Sprintf("%s-%d", label, time.Now().UnixNano())
-	resp, err := suite.PostMessageSend(ctx, node.APIAddr(), map[string]any{
+	resp, err := suite.PostMessageSendEventually(ctx, node.APIAddr(), map[string]any{
 		"from_uid":      "channel-ha-sender",
 		"channel_id":    channelID,
 		"channel_type":  channelType,
@@ -1191,15 +1230,4 @@ func uint64InList(items []uint64, want uint64) bool {
 		}
 	}
 	return false
-}
-
-func requireRetryablePlacementError(t *testing.T, err error) {
-	t.Helper()
-	msg := strings.ToLower(err.Error())
-	for _, token := range []string{"not_ready", "not ready", "route", "placement", "unavailable", "503"} {
-		if strings.Contains(msg, token) {
-			return
-		}
-	}
-	t.Fatalf("send error = %v, want retryable placement/not-ready error", err)
 }

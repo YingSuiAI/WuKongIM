@@ -3,6 +3,8 @@ package channels
 import (
 	"context"
 	"fmt"
+	"sort"
+	"sync"
 	"time"
 
 	ch "github.com/WuKongIM/WuKongIM/pkg/channel"
@@ -49,7 +51,7 @@ type RepairScannerSource interface {
 	LocalLeaderSlotIDs(context.Context) ([]uint32, error)
 	ListRepairScannerRuntimeMetaPage(context.Context, uint32, metadb.ChannelRuntimeMetaCursor, int) ([]RepairScannerRuntimeMeta, metadb.ChannelRuntimeMetaCursor, bool, error)
 	ActiveChannelMigrationInHashSlot(context.Context, uint16, ch.ChannelID) (bool, error)
-	ProbeChannel(ctx context.Context, nodeID uint64, channelID string, channelType uint8) (ch.RuntimeProbeChannel, error)
+	ProbeChannelReplica(ctx context.Context, nodeID uint64, meta metadb.ChannelRuntimeMeta) (ch.RuntimeProbeChannel, error)
 	ControlSnapshot(context.Context) (control.Snapshot, error)
 }
 
@@ -84,6 +86,11 @@ type RepairScanner struct {
 	store   RepairScannerStore
 	planner FailoverPlanner
 	repair  ReplicaRepairPlanner
+
+	mu           sync.Mutex
+	resumeSet    bool
+	resumeSlotID uint32
+	resumeCursor metadb.ChannelRuntimeMetaCursor
 }
 
 // NewRepairScanner creates a bounded Channel repair scanner.
@@ -109,6 +116,8 @@ func (s *RepairScanner) RunOnce(ctx context.Context) (RepairScannerResult, error
 	if s == nil || !s.cfg.Enabled {
 		return result, nil
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.source == nil || s.store == nil {
 		return result, fmt.Errorf("%w: repair scanner is not fully configured", ch.ErrInvalidConfig)
 	}
@@ -120,8 +129,18 @@ func (s *RepairScanner) RunOnce(ctx context.Context) (RepairScannerResult, error
 	if err != nil {
 		return result, err
 	}
-	for _, slotID := range slotIDs {
-		cursor := metadb.ChannelRuntimeMetaCursor{}
+	if len(slotIDs) == 0 {
+		s.clearResume()
+		return s.observeRepairScan(result), nil
+	}
+	sort.Slice(slotIDs, func(i, j int) bool { return slotIDs[i] < slotIDs[j] })
+	startIndex, cursor := s.scanStart(slotIDs)
+	for visited := 0; visited < len(slotIDs); visited++ {
+		slotIndex := (startIndex + visited) % len(slotIDs)
+		slotID := slotIDs[slotIndex]
+		if visited > 0 {
+			cursor = metadb.ChannelRuntimeMetaCursor{}
+		}
 		for result.PagesScanned < s.cfg.MaxPagesPerTick {
 			page, next, done, err := s.source.ListRepairScannerRuntimeMetaPage(ctx, slotID, cursor, s.cfg.PageLimit)
 			if err != nil {
@@ -130,6 +149,7 @@ func (s *RepairScanner) RunOnce(ctx context.Context) (RepairScannerResult, error
 			result.PagesScanned++
 			for _, item := range page {
 				if result.TasksCreated >= s.cfg.MaxTasksPerTick {
+					s.setResume(slotID, cursor)
 					return s.observeRepairScan(result), nil
 				}
 				if err := s.scanMeta(ctx, snapshot, item, &result); err != nil {
@@ -137,15 +157,47 @@ func (s *RepairScanner) RunOnce(ctx context.Context) (RepairScannerResult, error
 				}
 			}
 			if done {
+				nextSlotIndex := (slotIndex + 1) % len(slotIDs)
+				s.setResume(slotIDs[nextSlotIndex], metadb.ChannelRuntimeMetaCursor{})
 				break
 			}
 			cursor = next
+			s.setResume(slotID, cursor)
+			if result.TasksCreated >= s.cfg.MaxTasksPerTick {
+				return s.observeRepairScan(result), nil
+			}
 		}
 		if result.PagesScanned >= s.cfg.MaxPagesPerTick || result.TasksCreated >= s.cfg.MaxTasksPerTick {
 			break
 		}
 	}
 	return s.observeRepairScan(result), nil
+}
+
+func (s *RepairScanner) scanStart(slotIDs []uint32) (int, metadb.ChannelRuntimeMetaCursor) {
+	if !s.resumeSet {
+		return 0, metadb.ChannelRuntimeMetaCursor{}
+	}
+	index := sort.Search(len(slotIDs), func(i int) bool { return slotIDs[i] >= s.resumeSlotID })
+	if index < len(slotIDs) && slotIDs[index] == s.resumeSlotID {
+		return index, s.resumeCursor
+	}
+	if index == len(slotIDs) {
+		index = 0
+	}
+	return index, metadb.ChannelRuntimeMetaCursor{}
+}
+
+func (s *RepairScanner) setResume(slotID uint32, cursor metadb.ChannelRuntimeMetaCursor) {
+	s.resumeSet = true
+	s.resumeSlotID = slotID
+	s.resumeCursor = cursor
+}
+
+func (s *RepairScanner) clearResume() {
+	s.resumeSet = false
+	s.resumeSlotID = 0
+	s.resumeCursor = metadb.ChannelRuntimeMetaCursor{}
 }
 
 func (s *RepairScanner) scanMeta(ctx context.Context, snapshot control.Snapshot, item RepairScannerRuntimeMeta, result *RepairScannerResult) error {
@@ -186,7 +238,7 @@ func (s *RepairScanner) scanLeaderFailover(ctx context.Context, snapshot control
 		if nodeID == 0 || nodeID == meta.Leader {
 			continue
 		}
-		probe, err := s.source.ProbeChannel(ctx, nodeID, id.ID, id.Type)
+		probe, err := s.source.ProbeChannelReplica(ctx, nodeID, meta)
 		if err != nil {
 			continue
 		}

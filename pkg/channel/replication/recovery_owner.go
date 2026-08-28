@@ -254,6 +254,10 @@ func recoverQuorumPrefix(ctx context.Context, request recoveryProbeRequest, disp
 	}
 	certifiedCommitted := quorumFrontier(committed, request.Quorum)
 	quorumLEO := quorumFrontier(leos, request.Quorum)
+	certificateCommitted := maxRecoveryFrontier(committed)
+	if certificateCommitted > certifiedCommitted {
+		return recoverCommittedCertificate(operationContext, request, frontierReports, certificateCommitted, dispatcher)
+	}
 	if certifiedCommitted > quorumLEO {
 		return recoverySelection{}, ch.ErrLogConflict
 	}
@@ -380,6 +384,99 @@ func recoverQuorumPrefix(ctx context.Context, request recoveryProbeRequest, disp
 		pageStart = pageEnd + 1
 		selected.Continuation = makeRecoveryContinuation(request, certifiedCommitted, quorumLEO, pageStart, selected, stable)
 	}
+}
+
+// recoverCommittedCertificate verifies the highest durable commit marker. A
+// marker is a certificate because stores admit it only as an exact replay of a
+// proposal that was durable before the marker operation. All currently
+// reachable quorum reports are kept stable while the complete certified chain
+// is read; certificates that disagree at any committed index fail closed.
+func recoverCommittedCertificate(ctx context.Context, request recoveryProbeRequest, frontier []recoveryProbeReport, committed uint64, dispatcher recoveryProbeDispatcher) (recoverySelection, error) {
+	stable := make(map[ch.NodeID]ReplicaState, len(frontier))
+	for _, report := range frontier {
+		stable[report.Voter] = report.Result.State
+	}
+	selected := recoverySelection{CertifiedCommitted: committed}
+	var previous ch.EntryIdentity
+	for pageStart := uint64(1); pageStart <= committed; {
+		pageEnd := committed
+		if pageEnd-pageStart+1 > maxRecoveryProbeIndexes {
+			pageEnd = pageStart + maxRecoveryProbeIndexes - 1
+		}
+		indexes := ascendingRecoveryIndexes(pageStart, int(pageEnd-pageStart+1))
+		pageRequest := request
+		pageRequest.Voters = stableRecoveryVoters(request.Voters, stable)
+		pageRequest.Continuation = nil
+		reports, err := collectRecoveryProbeRound(ctx, pageRequest, indexes, dispatcher)
+		if err != nil {
+			return recoverySelection{}, err
+		}
+		byVoter := make(map[ch.NodeID]recoveryProbeReport, len(reports))
+		for _, report := range reports {
+			byVoter[report.Voter] = report
+		}
+		for voter, state := range stable {
+			if report, ok := byVoter[voter]; !ok || report.Result.State != state {
+				delete(stable, voter)
+			}
+		}
+		if len(stable) < request.Quorum {
+			return recoverySelection{}, errRecoveryProbeIncomplete
+		}
+		for position, index := range indexes {
+			var identity ch.EntryIdentity
+			found := false
+			for _, voter := range request.Voters {
+				state, ok := stable[voter]
+				if !ok || state.Committed < index {
+					continue
+				}
+				entry := byVoter[voter].Result.Entries[position]
+				if !entry.Present {
+					return recoverySelection{}, ch.ErrLogConflict
+				}
+				if found && entry.Identity != identity {
+					return recoverySelection{}, ch.ErrLogConflict
+				}
+				identity, found = entry.Identity, true
+			}
+			if !found {
+				return recoverySelection{}, ch.ErrLogConflict
+			}
+			if index == 1 {
+				if identity.PreviousIndex != 0 || identity.PreviousTerm != 0 || identity.PreviousDigest != (ch.EntryDigest{}) {
+					return recoverySelection{}, ch.ErrLogConflict
+				}
+			} else if identity.PreviousIndex != previous.Index || identity.PreviousTerm != previous.LeaderTerm || identity.PreviousDigest != previous.Digest {
+				return recoverySelection{}, ch.ErrLogConflict
+			}
+			previous = identity
+		}
+		pageStart = pageEnd + 1
+	}
+	selected.Index = committed
+	selected.Identity = previous
+	selected.CertifiedIdentity = previous
+	for _, voter := range request.Voters {
+		state, ok := stable[voter]
+		if ok && state.Committed >= committed {
+			selected.Supporters = append(selected.Supporters, recoverySupporter{Voter: voter, State: state})
+		}
+	}
+	if len(selected.Supporters) == 0 {
+		return recoverySelection{}, ch.ErrLogConflict
+	}
+	return selected, nil
+}
+
+func maxRecoveryFrontier(values []uint64) uint64 {
+	var result uint64
+	for _, value := range values {
+		if value > result {
+			result = value
+		}
+	}
+	return result
 }
 
 func validRecoveryContinuationShape(request recoveryProbeRequest, configured map[ch.NodeID]struct{}) bool {

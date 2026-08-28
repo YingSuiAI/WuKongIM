@@ -45,6 +45,27 @@ func TestRepairScannerUsesBoundedPageSizeAndMaxPages(t *testing.T) {
 	require.Equal(t, []int{3, 3}, source.pageLimits)
 }
 
+func TestRepairScannerResumesAcrossPagesAndRotatesSlotsAcrossTicks(t *testing.T) {
+	source := newFakeRepairScannerSource()
+	source.localSlots = []uint32{2, 1}
+	source.slotPages[1] = [][]metadb.ChannelRuntimeMeta{{}, {}}
+	source.slotPages[2] = [][]metadb.ChannelRuntimeMeta{{}}
+	scanner := NewRepairScanner(RepairScannerConfig{Enabled: true, PageLimit: 10, MaxPagesPerTick: 1, MaxTasksPerTick: 10}, source, &fakeRepairScannerStore{})
+
+	for range 4 {
+		result, err := scanner.RunOnce(context.Background())
+		require.NoError(t, err)
+		require.Equal(t, 1, result.PagesScanned)
+	}
+
+	require.Equal(t, []fakeRepairScannerPageCall{
+		{SlotID: 1},
+		{SlotID: 1, Cursor: metadb.ChannelRuntimeMetaCursor{ChannelType: 1}},
+		{SlotID: 2},
+		{SlotID: 1},
+	}, source.pageCalls)
+}
+
 func TestRepairScannerSuppressesDuplicateActiveMigration(t *testing.T) {
 	id := ch.ChannelID{ID: "scan-active", Type: 1}
 	source := newFakeRepairScannerSource(id)
@@ -80,6 +101,22 @@ func TestRepairScannerEmitsBlockedReasonsWithoutCreatingTasks(t *testing.T) {
 	require.Equal(t, []int{1}, observer.scanPages)
 	require.Equal(t, []int{1}, observer.scanBacklog)
 	require.Equal(t, []string{"blocked"}, observer.failoverResults)
+}
+
+func TestRepairScannerUsesDurableReplicaWhenFollowerRuntimeIsUnloaded(t *testing.T) {
+	id := ch.ChannelID{ID: "scan-unloaded-follower", Type: 1}
+	source := newFakeRepairScannerSource(id)
+	source.slotPages[1] = [][]metadb.ChannelRuntimeMeta{{failoverPlannerMeta(id)}}
+	store := &fakeRepairScannerStore{}
+
+	scanner := NewRepairScanner(RepairScannerConfig{Enabled: true, PageLimit: 10, MaxPagesPerTick: 10, MaxTasksPerTick: 10}, source, store)
+	result, err := scanner.RunOnce(context.Background())
+
+	require.NoError(t, err)
+	require.Zero(t, source.runtimeProbeCalls, "failover scan must not require a loaded follower reactor")
+	require.Equal(t, 2, source.replicaProbeCalls)
+	require.Equal(t, 1, result.TasksCreated)
+	require.Len(t, store.requests, 1)
 }
 
 func TestRepairScannerRespectsMaxTasksPerTick(t *testing.T) {
@@ -173,14 +210,22 @@ type fakeRepairScannerSource struct {
 	hashSlotByID map[ch.ChannelID]uint16
 	scannedSlots []uint32
 	pageLimits   []int
+	pageCalls    []fakeRepairScannerPageCall
 
 	routedActiveCalls   []ch.ChannelID
 	hashSlotActiveCalls []fakeRepairScannerActiveCall
+	replicaProbeCalls   int
+	runtimeProbeCalls   int
 }
 
 type fakeRepairScannerActiveCall struct {
 	HashSlot  uint16
 	ChannelID ch.ChannelID
+}
+
+type fakeRepairScannerPageCall struct {
+	SlotID uint32
+	Cursor metadb.ChannelRuntimeMetaCursor
 }
 
 func newFakeRepairScannerSource(ids ...ch.ChannelID) *fakeRepairScannerSource {
@@ -207,6 +252,7 @@ func (s *fakeRepairScannerSource) ListRepairScannerRuntimeMetaPage(_ context.Con
 		s.scannedSlots = append(s.scannedSlots, slotID)
 	}
 	s.pageLimits = append(s.pageLimits, limit)
+	s.pageCalls = append(s.pageCalls, fakeRepairScannerPageCall{SlotID: slotID, Cursor: cursor})
 	pages := s.slotPages[slotID]
 	index := int(cursor.ChannelType)
 	if index >= len(pages) {
@@ -231,10 +277,16 @@ func (s *fakeRepairScannerSource) ActiveChannelMigrationInHashSlot(_ context.Con
 	return s.active[id], nil
 }
 
-func (s *fakeRepairScannerSource) ProbeChannel(_ context.Context, nodeID uint64, channelID string, channelType uint8) (ch.RuntimeProbeChannel, error) {
+func (s *fakeRepairScannerSource) ProbeChannelReplica(_ context.Context, nodeID uint64, meta metadb.ChannelRuntimeMeta) (ch.RuntimeProbeChannel, error) {
+	s.replicaProbeCalls++
 	probe := s.probes[nodeID]
-	probe.ChannelID = ch.ChannelID{ID: channelID, Type: channelType}
+	probe.ChannelID = ch.ChannelID{ID: meta.ChannelID, Type: uint8(meta.ChannelType)}
 	return probe, nil
+}
+
+func (s *fakeRepairScannerSource) ProbeChannel(context.Context, uint64, string, uint8) (ch.RuntimeProbeChannel, error) {
+	s.runtimeProbeCalls++
+	return ch.RuntimeProbeChannel{}, ch.ErrChannelNotFound
 }
 
 func (s *fakeRepairScannerSource) ControlSnapshot(context.Context) (control.Snapshot, error) {

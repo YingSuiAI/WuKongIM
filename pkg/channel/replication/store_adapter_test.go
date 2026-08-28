@@ -51,16 +51,14 @@ func TestStoreAdapterLoadsExactDurableTailAfterSync(t *testing.T) {
 	if !ok {
 		t.Fatal("SealProposalManifest() failed")
 	}
-	results := adapter.Sync(context.Background(), []replication.Mutation{{
+	mutation := replication.Mutation{
 		ChannelKey: key,
 		ChannelID:  id,
 		Manifest:   manifest,
 		Records:    records,
 		Committed:  1,
-	}})
-	if len(results) != 1 || results[0].Err != nil || results[0].Outcome != ch.AppendOutcomeDurable {
-		t.Fatalf("Sync() = %+v, want one durable result", results)
 	}
+	syncCertifiedTestMutations(t, adapter, mutation)
 
 	loaded, err := adapter.Load(context.Background(), replication.LoadBatch{Items: []replication.LoadRequest{{
 		ChannelKey: key,
@@ -147,9 +145,7 @@ func TestStoreAdapterReplacesDivergentRecoverySuffixDurably(t *testing.T) {
 		t.Fatal("DeriveProposalEntries(first) failed")
 	}
 	divergent := sealedMutationAt(t, key, id, 72, 1, firstEntries[0])
-	if results := adapter.Sync(context.Background(), []replication.Mutation{first, divergent}); len(results) != 2 || !results[0].Outcome.Durable() || !results[1].Outcome.Durable() {
-		t.Fatalf("Sync(divergent) = %+v, want two durable proposals", results)
-	}
+	syncCertifiedTestMutations(t, adapter, first, divergent)
 	loaded, loadErr := adapter.Load(context.Background(), replication.LoadBatch{Items: []replication.LoadRequest{{
 		ChannelKey: key, ChannelID: id,
 	}}})
@@ -262,10 +258,7 @@ func TestStoreAdapterReplacesSuffixAfterPhysicalPrefixRetention(t *testing.T) {
 	second := sealedMutationAt(t, key, id, 92, 1, firstEntries[0])
 	secondEntries, _ := ch.DeriveProposalEntries(second.Manifest, len(second.Records), func(index int) ch.Record { return second.Records[index] })
 	divergent := sealedMutationAt(t, key, id, 93, 2, secondEntries[0])
-	if results := adapter.Sync(context.Background(), []replication.Mutation{first, second, divergent}); len(results) != 3 ||
-		!results[0].Outcome.Durable() || !results[1].Outcome.Durable() || !results[2].Outcome.Durable() {
-		t.Fatalf("Sync() = %+v, want three durable proposals", results)
-	}
+	syncCertifiedTestMutations(t, adapter, first, second, divergent)
 	store, err := factory.ChannelStore(key, id)
 	if err != nil {
 		t.Fatalf("ChannelStore() error = %v", err)
@@ -319,10 +312,7 @@ func TestStoreAdapterRejectsReplacementBelowAdoptedRetentionBoundary(t *testing.
 	second := sealedMutationAt(t, key, id, 102, 1, firstEntries[0])
 	secondEntries, _ := ch.DeriveProposalEntries(second.Manifest, len(second.Records), func(index int) ch.Record { return second.Records[index] })
 	third := sealedMutationAt(t, key, id, 103, 2, secondEntries[0])
-	if results := adapter.Sync(context.Background(), []replication.Mutation{first, second, third}); len(results) != 3 ||
-		!results[0].Outcome.Durable() || !results[1].Outcome.Durable() || !results[2].Outcome.Durable() {
-		t.Fatalf("Sync() = %+v, want three durable proposals", results)
-	}
+	syncCertifiedTestMutations(t, adapter, first, second, third)
 	store, err := factory.ChannelStore(key, id)
 	if err != nil {
 		t.Fatalf("ChannelStore() error = %v", err)
@@ -376,10 +366,7 @@ func TestStoreAdapterFetchesCompleteRecoveryProposalsFromOneView(t *testing.T) {
 	first.Committed = 1
 	firstEntries, _ := ch.DeriveProposalEntries(first.Manifest, len(first.Records), func(index int) ch.Record { return first.Records[index] })
 	second := sealedMutationAt(t, key, id, 1112, 1, firstEntries[0])
-	if results := adapter.Sync(context.Background(), []replication.Mutation{first, second}); len(results) != 2 ||
-		!results[0].Outcome.Durable() || !results[1].Outcome.Durable() {
-		t.Fatalf("Sync() = %+v, want two durable proposals", results)
-	}
+	syncCertifiedTestMutations(t, adapter, first, second)
 	loaded, loadErr := adapter.Load(context.Background(), replication.LoadBatch{Items: []replication.LoadRequest{{
 		ChannelKey: key, ChannelID: id,
 	}}})
@@ -553,6 +540,8 @@ func TestStoreAdapterSyncsAdjacentSameChannelMutationsInOneMessageDBBatch(t *tes
 	})
 	second.Committed = 2
 
+	first.Committed = first.Manifest.BaseOffset
+	second.Committed = second.Manifest.BaseOffset
 	results := adapter.Sync(context.Background(), []replication.Mutation{first, second})
 	if len(results) != 2 {
 		t.Fatalf("Sync() result count = %d, want 2", len(results))
@@ -569,18 +558,14 @@ func TestStoreAdapterSyncsAdjacentSameChannelMutationsInOneMessageDBBatch(t *tes
 		ChannelKey: key, ChannelID: id,
 	}}})
 	if loadErr != nil || len(loaded.Items) != 1 || loaded.Items[0].Err != nil ||
-		loaded.Items[0].State.LEO != 2 || loaded.Items[0].State.Committed != 2 ||
+		loaded.Items[0].State.LEO != 2 || loaded.Items[0].State.Committed != 1 ||
 		loaded.Items[0].State.Manifest != second.Manifest {
-		t.Fatalf("Load() = %+v, error %v; want second exact proposal committed", loaded, loadErr)
+		t.Fatalf("Load() = %+v, error %v; want adjacent proposals with prior committed frontier", loaded, loadErr)
 	}
-	replayed := adapter.Sync(context.Background(), []replication.Mutation{first, second})
-	for index, result := range replayed {
-		if result.Err != nil || result.Outcome != ch.AppendOutcomeAlreadyDurable || result.LastOffset != uint64(index+1) {
-			t.Fatalf("Sync(replay)[%d] = %+v, want already durable offset %d", index, result, index+1)
-		}
-	}
-	if events := observer.snapshot(); len(events) != 1 {
-		t.Fatalf("commit events after replay = %+v, want no second physical commit", events)
+	second.Committed = second.Manifest.LastOffset
+	assertCertifiedTestSync(t, adapter, second)
+	if events := observer.snapshot(); len(events) != 2 {
+		t.Fatalf("commit events after certificate = %+v, want proposal batch plus certificate commit", events)
 	}
 }
 
@@ -630,14 +615,12 @@ func TestStoreAdapterLoadsExactDurableTailAfterMessageDBReopen(t *testing.T) {
 	if !ok {
 		t.Fatal("SealProposalManifest() failed")
 	}
-	results := adapter.Sync(context.Background(), []replication.Mutation{{
+	mutation := replication.Mutation{
 		ChannelKey: key, ChannelID: id, Manifest: manifest, Records: records, Committed: 1,
-	}})
-	if len(results) != 1 || results[0].Err != nil || results[0].Outcome != ch.AppendOutcomeDurable {
-		t.Fatalf("Sync() = %+v, want one durable result", results)
 	}
-	if events := observer.snapshot(); len(events) != 1 || events[0].Records != 1 {
-		t.Fatalf("commit events = %+v, want exact proposal and HW in one physical commit", events)
+	syncCertifiedTestMutations(t, adapter, mutation)
+	if events := observer.snapshot(); len(events) != 2 || events[0].Records != 1 {
+		t.Fatalf("commit events = %+v, want proposal plus certificate commits", events)
 	}
 	if err := factory.Close(); err != nil {
 		t.Fatalf("MessageDBFactory.Close() error = %v", err)

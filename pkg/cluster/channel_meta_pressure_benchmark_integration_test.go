@@ -713,7 +713,7 @@ func waitChannelMetaPlacementReady(tb testing.TB, nodes []*Node) {
 	for time.Now().Before(deadline) {
 		ready := true
 		for _, node := range nodes {
-			if len(node.channelDataNodes.DataNodes()) != len(nodes) {
+			if len(node.channelDataNodes.SchedulableDataNodes()) != len(nodes) {
 				ready = false
 				break
 			}

@@ -86,6 +86,14 @@ type CreateLeaderFailoverRequest struct {
 	ObservedHW uint64
 	// ObservedLeaderEpoch is the selected target's observed leader epoch.
 	ObservedLeaderEpoch uint64
+	// Expected fields fence foreground recovery to the exact failed authority.
+	// Zero values preserve scanner-created failover behavior.
+	ExpectedLeader          ch.NodeID
+	ExpectedChannelEpoch    uint64
+	ExpectedLeaderEpoch     uint64
+	ExpectedRouteGeneration uint64
+	// CreatedAtMS keeps retries of one create-only task byte-identical.
+	CreatedAtMS int64
 }
 
 // CreateReplicaReplaceRequest creates a manual replica-replacement migration task.
@@ -171,10 +179,19 @@ func (s *MigrationStore) CreateLeaderFailover(ctx context.Context, req CreateLea
 	if err := validateLeaderTransferTarget(meta, uint64(req.DesiredLeader)); err != nil {
 		return metadb.ChannelMigrationTask{}, err
 	}
+	if (req.ExpectedLeader != 0 && meta.Leader != uint64(req.ExpectedLeader)) ||
+		(req.ExpectedChannelEpoch != 0 && meta.ChannelEpoch != req.ExpectedChannelEpoch) ||
+		(req.ExpectedLeaderEpoch != 0 && meta.LeaderEpoch != req.ExpectedLeaderEpoch) ||
+		(req.ExpectedRouteGeneration != 0 && meta.RouteGeneration != req.ExpectedRouteGeneration) {
+		return metadb.ChannelMigrationTask{}, fmt.Errorf("%w: failover authority changed", ch.ErrStaleMeta)
+	}
 	if !leaderFailoverEpochCompatible(req.ObservedLeaderEpoch, meta.LeaderEpoch) {
 		return metadb.ChannelMigrationTask{}, fmt.Errorf("%w: incompatible failover leader epoch", ch.ErrInvalidConfig)
 	}
-	nowMS := s.nowMS()
+	nowMS := req.CreatedAtMS
+	if nowMS <= 0 {
+		nowMS = s.nowMS()
+	}
 	task := metadb.ChannelMigrationTask{
 		TaskID:           migrationTaskID(req.TaskID, "leader-failover", req.ChannelID, nowMS),
 		Kind:             metadb.ChannelMigrationKindLeaderFailover,

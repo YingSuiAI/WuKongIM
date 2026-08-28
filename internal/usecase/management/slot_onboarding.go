@@ -203,7 +203,11 @@ func (a *App) PlanNodeOnboarding(ctx context.Context, req NodeOnboardingPlanRequ
 	sort.Slice(assignments, func(i, j int) bool { return assignments[i].SlotID < assignments[j].SlotID })
 	projectedReplicas := nodeOnboardingReplicaCounts(assignments)
 	applyNodeOnboardingActiveTaskProjection(snapshot.Tasks, projectedReplicas)
+	targetReplicaLimit := nodeOnboardingTargetReplicaLimit(snapshot.Nodes, projectedReplicas, req.TargetNodeID)
 	for _, assignment := range assignments {
+		if projectedReplicas[req.TargetNodeID] >= targetReplicaLimit {
+			break
+		}
 		if _, ok := findActiveSlotTask(snapshot.Tasks, assignment.SlotID); ok {
 			response.Skipped = append(response.Skipped, nodeOnboardingSkip(assignment.SlotID, NodeOnboardingSkipActiveTask, "slot already has an active task"))
 			continue
@@ -418,6 +422,42 @@ func applyNodeOnboardingActiveTaskProjection(tasks []control.ReconcileTask, coun
 			counts[task.TargetNode]++
 		}
 	}
+}
+
+func nodeOnboardingTargetReplicaLimit(nodes []control.Node, projectedReplicas map[uint64]int, targetNodeID uint64) int {
+	totalReplicas := 0
+	for _, count := range projectedReplicas {
+		totalReplicas += count
+	}
+	if totalReplicas <= 0 {
+		return 0
+	}
+
+	var totalWeight uint64
+	var targetWeight uint64
+	for _, node := range nodes {
+		if !control.NodeActiveDataMember(node) {
+			continue
+		}
+		weight := uint64(node.CapacityWeight)
+		if weight == 0 {
+			weight = 1
+		}
+		totalWeight += weight
+		if node.NodeID == targetNodeID {
+			targetWeight = weight
+		}
+	}
+	if totalWeight == 0 || targetWeight == 0 {
+		return 0
+	}
+
+	weightedReplicas := uint64(totalReplicas) * targetWeight
+	limit := weightedReplicas / totalWeight
+	if weightedReplicas%totalWeight != 0 {
+		limit++
+	}
+	return int(limit)
 }
 
 func nodeOnboardingRetryableWriteError(err error) bool {

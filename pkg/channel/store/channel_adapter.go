@@ -678,6 +678,7 @@ func (a *messageDBChannelStoreAdapter) AppendLeader(ctx context.Context, req App
 		Records:                   records,
 		Class:                     messageDBAppendBatchClass(req.Class),
 		Committed:                 req.Committed,
+		RequireExistingProposal:   req.RequireExistingProposal,
 		ServerAllocatedMessageIDs: req.ServerAllocatedMessageIDs,
 		ExactBaseOffset:           req.ExactBaseOffset,
 		ExpectedBaseOffset:        req.ExpectedBaseOffset,

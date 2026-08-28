@@ -65,10 +65,11 @@ func (n *Node) ensureDefaultRuntime() (bool, error) {
 			forward = propose.NewNetworkForwardClient(n.transportClient)
 		}
 		n.proposer = propose.NewService(propose.Config{
-			LocalNode: n.cfg.NodeID,
-			Router:    n.router,
-			Slots:     n.defaultSlotProposer,
-			Forward:   forward,
+			LocalNode:                n.cfg.NodeID,
+			Router:                   n.router,
+			Slots:                    n.defaultSlotProposer,
+			Forward:                  forward,
+			LeaderChangeRetryTimeout: slotLeaderChangeRetryTimeout(n.cfg.Slots.TickInterval, n.cfg.Slots.ElectionTick),
 		})
 	}
 	createdDefaultChannels := false
@@ -115,6 +116,7 @@ func (n *Node) ensureDefaultRuntime() (bool, error) {
 			}
 			return false, err
 		}
+		migrationStore := n.defaultChannelMigrationStore()
 		service, err := channels.NewService(channels.Config{
 			LocalNode:                     channelruntime.NodeID(n.cfg.NodeID),
 			ReactorCount:                  n.cfg.Channel.ReactorCount,
@@ -137,7 +139,8 @@ func (n *Node) ensureDefaultRuntime() (bool, error) {
 			Transport:                     transport,
 			QuorumLog:                     quorumRuntime.Log(),
 			MetaSource:                    n.defaultChannelMetaSource(),
-			MigrationStore:                n.defaultChannelMigrationStore(),
+			MigrationStore:                migrationStore,
+			AppendAuthorityRecovery:       channels.NewForegroundAppendAuthorityRecovery(n, migrationStore),
 		})
 		if err != nil {
 			_ = quorumRuntime.Close(context.Background())

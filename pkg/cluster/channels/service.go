@@ -48,6 +48,12 @@ type ConversationHydrationObserver interface {
 	ObserveConversationHydrationBatch(result string, items, remoteCalls, localReads int, duration time.Duration)
 }
 
+// AppendAuthorityRecovery starts or joins durable recovery for an exact
+// authoritative metadata version whose leader could not serve an append.
+type AppendAuthorityRecovery interface {
+	EnsureAppendAuthorityRecovery(context.Context, ch.Meta) error
+}
+
 // ForwardClient forwards client append calls to the authoritative channel leader.
 type ForwardClient interface {
 	// ForwardAppend forwards one append request to node.
@@ -249,6 +255,9 @@ type Config struct {
 	Forward ForwardClient
 	// MigrationStore exposes Slot-backed migration task and fence commands.
 	MigrationStore *MigrationStore
+	// AppendAuthorityRecovery creates durable leader-failover work when a fresh
+	// authoritative resolve still names the exact failed append leader.
+	AppendAuthorityRecovery AppendAuthorityRecovery
 }
 
 // Service wraps Channel and exposes both client and replication surfaces.
@@ -265,6 +274,7 @@ type Service struct {
 	metaApplyLocks [channelMetaApplyLockCount]sync.Mutex
 	observer       any
 	migration      *MigrationStore
+	appendRecovery AppendAuthorityRecovery
 }
 
 // NewService creates a Service from cfg.
@@ -309,7 +319,7 @@ func NewService(cfg Config) (*Service, error) {
 		return nil, fmt.Errorf("channels: runtime must implement channel.Cluster and channel/transport.Server")
 	}
 	ensurer, _ := cfg.MetaSource.(ChannelMetaEnsurer)
-	return &Service{runtime: combined, localNode: cfg.LocalNode, metaSource: cfg.MetaSource, ensurer: ensurer, forward: cfg.Forward, store: cfg.Store, observer: cfg.Observer, migration: cfg.MigrationStore}, nil
+	return &Service{runtime: combined, localNode: cfg.LocalNode, metaSource: cfg.MetaSource, ensurer: ensurer, forward: cfg.Forward, store: cfg.Store, observer: cfg.Observer, migration: cfg.MigrationStore, appendRecovery: cfg.AppendAuthorityRecovery}, nil
 }
 
 // Runtime returns the Channel public cluster surface.
@@ -373,6 +383,21 @@ func (s *Service) ResolveAppendAuthority(ctx context.Context, id ch.ChannelID) (
 	}
 	if !ok || !cacheableAppendMeta(id, meta) {
 		return ch.Meta{}, unavailableAppendMetaError(meta)
+	}
+	if s.appendRecovery != nil && s.metaCache.failedAuthorityMatches(id, meta) {
+		// Keep the known-failed version out of the hot cache so every bounded
+		// Router retry can observe a newly committed migration result.
+		s.metaCache.invalidateAuthority(id, meta.Leader, meta.Epoch, meta.LeaderEpoch, meta.RouteGeneration)
+		if err := s.appendRecovery.EnsureAppendAuthorityRecovery(ctx, meta); err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ch.Meta{}, ctxErr
+			}
+			return ch.Meta{}, fmt.Errorf("%w: append authority recovery: %v", ch.ErrNotReady, err)
+		}
+		// The current metadata still names the failed leader. Existing Router
+		// retry deadlines bound this wait; only a newer authoritative meta may
+		// become appendable.
+		return ch.Meta{}, ch.ErrNotReady
 	}
 	return meta, nil
 }

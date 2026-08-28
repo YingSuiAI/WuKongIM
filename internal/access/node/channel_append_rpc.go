@@ -18,6 +18,8 @@ import (
 // ChannelAppendRPCServiceID is the cluster RPC service for SEND forwarding to the channel append authority.
 const ChannelAppendRPCServiceID uint8 = clusternet.RPCChannelAuthoritySend
 
+const defaultChannelAppendRPCAttemptTimeout = time.Second
+
 // ChannelAppend accepts send batches that are authoritative on this node.
 type ChannelAppend interface {
 	// SubmitForAuthority submits item-aligned sends to the local channel authority.
@@ -117,9 +119,16 @@ func (c *Client) ForwardSendBatch(ctx context.Context, target channelappend.Auth
 	if err != nil {
 		return channelAppendFillActiveErrors(results, activeIndexes, err)
 	}
-	respBody, err := c.node.CallRPC(ctx, target.LeaderNodeID, ChannelAppendRPCServiceID, body)
+	attemptTimeout := c.channelAppendAttemptTimeout
+	if attemptTimeout <= 0 {
+		attemptTimeout = defaultChannelAppendRPCAttemptTimeout
+	}
+	attemptCtx, cancelAttempt := context.WithTimeout(ctx, attemptTimeout)
+	respBody, err := c.node.CallRPC(attemptCtx, target.LeaderNodeID, ChannelAppendRPCServiceID, body)
+	attemptTimedOut := errors.Is(attemptCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil
+	cancelAttempt()
 	if err != nil {
-		return channelAppendFillActiveErrors(results, activeIndexes, channelAppendRPCError(err))
+		return channelAppendFillActiveErrors(results, activeIndexes, channelAppendRPCError(err, attemptTimedOut))
 	}
 	resp, err := decodeChannelAppendResponse(respBody)
 	if err != nil {
@@ -137,31 +146,47 @@ func (c *Client) ForwardSendBatch(ctx context.Context, target channelappend.Auth
 	return results
 }
 
-func channelAppendRPCError(err error) error {
+func channelAppendRPCError(err error, attemptTimedOut bool) error {
 	switch {
 	case err == nil:
 		return nil
+	case attemptTimedOut && (errors.Is(err, context.DeadlineExceeded) || errors.Is(err, transport.ErrTimeout) || errors.Is(err, transport.ErrCanceled)):
+		return fmt.Errorf("%w: channel append rpc attempt timed out", channelappend.ErrAppendOutcomeUnknown)
 	case errors.Is(err, transport.ErrCanceled):
 		return context.Canceled
 	case errors.Is(err, transport.ErrTimeout):
 		return context.DeadlineExceeded
-	case channelAppendTransportUnavailable(err):
+	case channelAppendTransportUnavailableBeforeSubmit(err):
 		return fmt.Errorf("%w: %w", channelappend.ErrRouteNotReady, err)
+	case channelAppendTransportOutcomeUnknown(err):
+		return fmt.Errorf("%w: %w", channelappend.ErrAppendOutcomeUnknown, err)
 	default:
 		return err
 	}
 }
 
-func channelAppendTransportUnavailable(err error) bool {
+func channelAppendTransportUnavailableBeforeSubmit(err error) bool {
 	switch {
 	case errors.Is(err, transport.ErrDialFailed),
 		errors.Is(err, transport.ErrNodeNotFound),
-		errors.Is(err, transport.ErrStopped),
+		errors.Is(err, syscall.ECONNREFUSED):
+		return true
+	default:
+		return false
+	}
+}
+
+func channelAppendTransportOutcomeUnknown(err error) bool {
+	var remoteErr transport.RemoteError
+	if errors.As(err, &remoteErr) && remoteErr.Code == transport.RemoteErrorCodeGeneric && remoteErr.Message == transport.ErrStopped.Error() {
+		return true
+	}
+	switch {
+	case errors.Is(err, transport.ErrStopped),
 		errors.Is(err, net.ErrClosed),
 		errors.Is(err, io.EOF),
 		errors.Is(err, io.ErrUnexpectedEOF),
 		errors.Is(err, syscall.ECONNRESET),
-		errors.Is(err, syscall.ECONNREFUSED),
 		errors.Is(err, syscall.EPIPE):
 		return true
 	default:

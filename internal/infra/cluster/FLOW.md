@@ -679,6 +679,12 @@ Route errors are translated at this adapter boundary:
 `channelappend.ErrRouteNotReady`. Remote forwarding is supplied by the
 `internal/access/node` Channel Append RPC client; remote item results are
 returned item-aligned without interpreting successful payloads.
+The runtime Router distinguishes a definitely unsubmitted route failure from
+an ambiguous remote result. After timeout/EOF/reset, it preserves the original
+command and `client_msg_no` but forces the next actual authority writer through
+the existing durable sender/client/payload-hash lookup before any new append.
+This is the only cross-leader retry path; it does not add a second router or
+clone a leader locally.
 
 ## Recipient Authority Flow
 
@@ -836,5 +842,9 @@ Person-channel directory admission is a bounded, coalesced, node-owned batch:
 it reuses request-scoped authoritative channel facts, persists a generation-
 fenced pending task before SEND proceeds, detaches canceled waiters without
 canceling accepted work, and wakes the background projector after each durable
-wave. Projection becomes ready only after both UID memberships commit; delete
+wave. An ambiguous admission during Slot election is recovered only at this
+idempotent boundary: the adapter rereads authoritative Channel projection state
+before every retry and resubmits the exact same task value only while the row is
+still missing or unadmitted, within the existing caller-visible four-second
+batch deadline. Projection becomes ready only after both UID memberships commit; delete
 and recreate cannot reuse cached ready state from an older generation.

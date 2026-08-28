@@ -22,6 +22,17 @@ type channelMetaCache struct {
 	// stale marks an installed exact version unusable until a fresh resolve
 	// confirms the same complete version or installs a newer one.
 	stale map[ch.ChannelID]struct{}
+	// failed retains the exact authoritative version whose append authority was
+	// unreachable. A fresh resolve of the same version must start or join
+	// durable failover instead of routing back to the known-dead leader.
+	failed map[ch.ChannelID]appendAuthorityVersion
+}
+
+type appendAuthorityVersion struct {
+	leader          ch.NodeID
+	epoch           uint64
+	leaderEpoch     uint64
+	routeGeneration uint64
 }
 
 // get returns one appendable, non-stale cached metadata snapshot.
@@ -74,6 +85,7 @@ func (c *channelMetaCache) selectResolved(id ch.ChannelID, meta ch.Meta) (ch.Met
 		}
 		c.items[id] = cloneMeta(meta)
 		delete(c.stale, id)
+		c.clearFailedIfChangedLocked(id, meta)
 	}
 	return cloneMeta(meta), true
 }
@@ -94,6 +106,7 @@ func (c *channelMetaCache) installIfNewerLocked(id ch.ChannelID, meta ch.Meta) (
 	installed := cloneMeta(meta)
 	c.items[id] = installed
 	delete(c.stale, id)
+	c.clearFailedIfChangedLocked(id, installed)
 	return cloneMeta(installed), true
 }
 
@@ -162,7 +175,39 @@ func (c *channelMetaCache) invalidateAuthority(id ch.ChannelID, leader ch.NodeID
 		(routeGeneration != 0 && meta.RouteGeneration != routeGeneration) {
 		return false
 	}
+	if c.failed == nil {
+		c.failed = make(map[ch.ChannelID]appendAuthorityVersion)
+	}
+	c.failed[id] = appendAuthorityVersion{leader: leader, epoch: epoch, leaderEpoch: leaderEpoch, routeGeneration: routeGeneration}
 	return c.markStaleLocked(id)
+}
+
+// failedAuthorityMatches reports whether meta is the same authority version
+// whose append failed. A newer authoritative projection clears the marker.
+func (c *channelMetaCache) failedAuthorityMatches(id ch.ChannelID, meta ch.Meta) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	failed, ok := c.failed[id]
+	if !ok {
+		return false
+	}
+	if failed.matches(meta) {
+		return true
+	}
+	delete(c.failed, id)
+	return false
+}
+
+func (c *channelMetaCache) clearFailedIfChangedLocked(id ch.ChannelID, meta ch.Meta) {
+	failed, ok := c.failed[id]
+	if ok && !failed.matches(meta) {
+		delete(c.failed, id)
+	}
+}
+
+func (v appendAuthorityVersion) matches(meta ch.Meta) bool {
+	return meta.Leader == v.leader && meta.Epoch == v.epoch && meta.LeaderEpoch == v.leaderEpoch &&
+		((v.routeGeneration == 0 && meta.RouteGeneration == 0) || (v.routeGeneration != 0 && meta.RouteGeneration == v.routeGeneration))
 }
 
 // markStaleLocked records one exact invalidation while the caller holds mu.

@@ -52,8 +52,14 @@ scheduled backup or restore
   explicitly decoded compatibility layout without that pagination metadata.
 - Channel append RPC never resolves routes, creates proxy Channel state,
   appends outside local authority, or runs post-commit effects elsewhere.
-- Transport cancellation and unavailable-target failures map to stable typed
-  caller errors without reordering active aligned items.
+- The Channel append client bounds each remote transport attempt independently
+  of the outer SEND deadline. Dial failure, node-not-found, and connection
+  refusal prove that submission did not begin and map to route-not-ready.
+  Attempt timeout, EOF, reset, stopped transport, and broken pipe have an
+  ambiguous commit outcome and map to `ErrAppendOutcomeUnknown`; the runtime
+  Router may retry only through its durable idempotency-recovery admission.
+- Transport cancellation and typed failures preserve stable caller errors
+  without reordering active aligned items. The adapter itself never retries.
 - Manager latest-message RPC preserves bounded scan saturation as its stable
   backpressure status instead of collapsing it into general unavailability.
 - Presence batch lookups preserve input alignment and isolate group-scoped

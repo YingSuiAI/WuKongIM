@@ -19,7 +19,7 @@ func TestPersonDirectoryTaskAdmissionAndMembershipProjectionUseBoundedSlotComman
 	proposer := &collectingMembershipProposer{}
 	node := newStartedSlotProxyPortNode(t, proposer)
 	node.cfg.Channel.ReplicaCount = 1
-	node.channelDataNodes.UpdateAtRevision(node.router.Table().Revision, []uint64{1, 2})
+	node.channelDataNodes.UpdateAtRevision(node.router.Table().Revision, []uint64{1, 2}, []uint64{1, 2})
 	channelID := runtimechannelid.EncodePersonChannel("u1", "u2")
 
 	admissionResults := node.AdmitPersonDirectoryTasks(context.Background(), []metadb.PersonDirectoryTask{{
@@ -98,7 +98,7 @@ func TestAdmitPersonDirectoryTasksPreservesAlignedCrossSlotResults(t *testing.T)
 	proposer := &selectiveMembershipProposer{failHashSlot: 0, err: admissionErr}
 	node := newStartedSlotProxyPortNode(t, proposer)
 	node.cfg.Channel.ReplicaCount = 1
-	node.channelDataNodes.UpdateAtRevision(node.router.Table().Revision, []uint64{1, 2})
+	node.channelDataNodes.UpdateAtRevision(node.router.Table().Revision, []uint64{1, 2}, []uint64{1, 2})
 	left := personChannelForHashSlot(t, 4, 0)
 	right := personChannelForHashSlot(t, 4, 3)
 
@@ -118,7 +118,7 @@ func TestAdmitPersonDirectoryTaskWavesEmitsFastSlotBeforeSlowSibling(t *testing.
 	proposer := &blockingSelectiveMembershipProposer{slowHashSlot: 0, entered: make(chan uint16, 2), release: releaseSlow}
 	node := newStartedSlotProxyPortNode(t, proposer)
 	node.cfg.Channel.ReplicaCount = 1
-	node.channelDataNodes.UpdateAtRevision(node.router.Table().Revision, []uint64{1, 2})
+	node.channelDataNodes.UpdateAtRevision(node.router.Table().Revision, []uint64{1, 2}, []uint64{1, 2})
 	left := personChannelForHashSlot(t, 4, 0)
 	right := personChannelForHashSlot(t, 4, 3)
 

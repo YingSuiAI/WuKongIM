@@ -535,11 +535,15 @@ func (n *Node) installRestoreChannelRuntimeMeta(
 		for index, replica := range target.Replicas {
 			replicas[index] = uint64(replica)
 		}
+		isr := make([]uint64, len(target.ISR))
+		for index, member := range target.ISR {
+			isr[index] = uint64(member)
+		}
 		metadata := metadb.NormalizeChannelRuntimeMeta(metadb.ChannelRuntimeMeta{
 			ChannelID: id.ID, ChannelType: int64(id.Type),
 			ChannelEpoch: boundary.Epoch, LeaderEpoch: 1,
 			Leader: uint64(target.Leader), Replicas: replicas,
-			ISR: append([]uint64(nil), replicas...), MinISR: int64(target.MinISR),
+			ISR: isr, MinISR: int64(target.MinISR),
 			Status:              uint8(channelruntime.StatusActive),
 			RetentionThroughSeq: boundary.LogStartOffset,
 		})
@@ -555,11 +559,12 @@ type restoreSlotDataNodes struct {
 	nodes    []uint64
 }
 
-func (n restoreSlotDataNodes) PlacementDataNodes(_ context.Context, expectedRevision uint64) ([]uint64, error) {
+func (n restoreSlotDataNodes) PlacementDataNodes(_ context.Context, expectedRevision uint64) (channels.PlacementDataNodeSet, error) {
 	if n.revision != expectedRevision {
-		return nil, channelruntime.ErrStaleMeta
+		return channels.PlacementDataNodeSet{}, channelruntime.ErrStaleMeta
 	}
-	return append([]uint64(nil), n.nodes...), nil
+	nodes := append([]uint64(nil), n.nodes...)
+	return channels.PlacementDataNodeSet{Active: nodes, Schedulable: append([]uint64(nil), nodes...)}, nil
 }
 
 func (n *Node) restoreChannelPlacement(

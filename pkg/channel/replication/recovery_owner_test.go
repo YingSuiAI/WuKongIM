@@ -48,6 +48,47 @@ func TestRecoveryProbeOwnerSelectsQuorumPrefixInsteadOfMinorityTail(t *testing.T
 	}
 }
 
+func TestRecoveryProbeOwnerAcceptsVerifiedCommitCertificateWithEmptyQuorumPeer(t *testing.T) {
+	identity := recoveryIdentity(1, 41)
+	dispatcher := &scriptedRecoveryProbeDispatcher{results: map[ch.NodeID]ProbeResult{
+		1: recoveryReport(1, 1, 1, []EntryProbe{{Index: 1, Present: true, Identity: identity}}).Result,
+		2: {},
+		3: {},
+	}}
+
+	selected, err := recoverQuorumPrefix(context.Background(), recoveryProbeRequest{
+		ChannelKey: "1:certificate", ChannelID: ch.ChannelID{ID: "certificate", Type: 1},
+		Leader: 2, Voters: []ch.NodeID{1, 2, 3}, Quorum: 2, Timeout: time.Minute,
+	}, dispatcher)
+	if err != nil {
+		t.Fatalf("recoverQuorumPrefix() error = %v", err)
+	}
+	if selected.Index != 1 || selected.CertifiedCommitted != 1 || selected.Identity != identity || selected.CertifiedIdentity != identity {
+		t.Fatalf("recoverQuorumPrefix() = %+v, want certificate at 1", selected)
+	}
+	if len(selected.Supporters) != 1 || selected.Supporters[0].Voter != 1 || selected.Supporters[0].State.Committed != 1 {
+		t.Fatalf("certificate supporters = %+v, want voter 1", selected.Supporters)
+	}
+}
+
+func TestRecoveryProbeOwnerRejectsConflictingCommitCertificates(t *testing.T) {
+	first := recoveryIdentity(1, 51)
+	second := recoveryIdentity(1, 52)
+	dispatcher := &scriptedRecoveryProbeDispatcher{results: map[ch.NodeID]ProbeResult{
+		1: recoveryReport(1, 1, 1, []EntryProbe{{Index: 1, Present: true, Identity: first}}).Result,
+		2: recoveryReport(2, 1, 1, []EntryProbe{{Index: 1, Present: true, Identity: second}}).Result,
+		3: {},
+	}}
+
+	_, err := recoverQuorumPrefix(context.Background(), recoveryProbeRequest{
+		ChannelKey: "1:certificate-conflict", ChannelID: ch.ChannelID{ID: "certificate-conflict", Type: 1},
+		Leader: 3, Voters: []ch.NodeID{1, 2, 3}, Quorum: 2, Timeout: time.Minute,
+	}, dispatcher)
+	if !errors.Is(err, ch.ErrLogConflict) {
+		t.Fatalf("recoverQuorumPrefix() error = %v, want log conflict", err)
+	}
+}
+
 func TestRecoveryProbeOwnerFailsClosedWhenIdentityPageLosesQuorum(t *testing.T) {
 	prefix := recoveryIdentity(5, 5)
 	dispatcher := &scriptedRecoveryProbeDispatcher{

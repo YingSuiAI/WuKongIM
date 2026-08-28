@@ -4,6 +4,7 @@ package cluster
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -131,6 +132,34 @@ func TestClusterThreeNodeDefaultChannelsReplicateToFollowerStore(t *testing.T) {
 		t.Fatalf("AppendChannel(default channels) error = %v", err)
 	}
 
-	follower := firstNonLeaderNode(t, nodes, route.Leader)
-	requireChannelMessage(t, follower, channelID, res.MessageSeq, 1002, []byte("follower-fetch"))
+	meta, err := nodes[0].GetChannelRuntimeMeta(ctx, channelID.ID, int64(channelID.Type))
+	if err != nil {
+		t.Fatalf("GetChannelRuntimeMeta() error = %v", err)
+	}
+	committedFollowers := 0
+	for _, follower := range nodes {
+		if follower.NodeID() == route.Leader {
+			continue
+		}
+		requireChannelMessage(t, follower, channelID, res.MessageSeq, 1002, []byte("follower-fetch"))
+		if _, err := follower.ChannelRuntimeEvict(ctx, channelruntime.RuntimeSelector{ChannelIDs: []channelruntime.ChannelID{channelID}}); err != nil {
+			t.Fatalf("ChannelRuntimeEvict(follower=%d) error = %v", follower.NodeID(), err)
+		}
+		if _, err := follower.probeLocalChannelRuntime(ctx, channelID.ID, channelID.Type); !errors.Is(err, channelruntime.ErrChannelNotFound) {
+			t.Fatalf("follower %d runtime probe error = %v, want unloaded Channel runtime", follower.NodeID(), err)
+		}
+		probe, err := nodes[0].ProbeChannelReplica(ctx, follower.NodeID(), meta)
+		if err != nil {
+			t.Fatalf("ProbeChannelReplica(unloaded follower=%d) error = %v", follower.NodeID(), err)
+		}
+		if probe.ChannelID != channelID || probe.Role != channelruntime.RoleFollower || probe.LEO < res.MessageSeq {
+			t.Fatalf("ProbeChannelReplica(unloaded follower=%d) = %+v, want durable follower through %d", follower.NodeID(), probe, res.MessageSeq)
+		}
+		if probe.HW >= res.MessageSeq {
+			committedFollowers++
+		}
+	}
+	if committedFollowers < 1 {
+		t.Fatalf("committed followers = %d, successful ACK must persist HW %d on at least one non-leader follower", committedFollowers, res.MessageSeq)
+	}
 }
