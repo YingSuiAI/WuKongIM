@@ -58,7 +58,7 @@ func (a *App) wireDelivery() {
 	a.deliveryWorker = runtime
 	if presenceNode, ok := a.cluster.(clusterinfra.PresenceNode); ok {
 		adapter := accessnode.New(accessnode.Options{
-			Delivery:      accessnode.AdaptOnlineDeliveryOwnerPush(runtime),
+			Delivery:      runtime,
 			DeliveryEvent: runtime,
 			Logger:        a.logger.Named("node"),
 		})

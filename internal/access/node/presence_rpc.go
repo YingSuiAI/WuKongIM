@@ -9,7 +9,6 @@ import (
 	backupcontract "github.com/WuKongIM/WuKongIM/internal/contracts/backup"
 	"github.com/WuKongIM/WuKongIM/internal/contracts/onlinedelivery"
 	"github.com/WuKongIM/WuKongIM/internal/observability/diagnostics"
-	runtimedelivery "github.com/WuKongIM/WuKongIM/internal/runtime/delivery"
 	authoritypresence "github.com/WuKongIM/WuKongIM/internal/runtime/presence"
 	managementusecase "github.com/WuKongIM/WuKongIM/internal/usecase/management"
 	"github.com/WuKongIM/WuKongIM/internal/usecase/presence"
@@ -75,7 +74,7 @@ type PresenceOwner interface {
 
 // DeliveryOwnerPush accepts owner-node delivery batches over node RPC.
 type DeliveryOwnerPush interface {
-	Push(context.Context, runtimedelivery.PushCommand) (runtimedelivery.PushResult, error)
+	PushOwner(context.Context, onlinedelivery.OwnerPush) (onlinedelivery.OwnerPushResult, error)
 }
 
 // DeliveryEventPush accepts typed EVENT batches over node RPC.

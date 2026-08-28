@@ -26,7 +26,9 @@ func TestPresenceResolverPreservesExactTargetsAndAlignedResults(t *testing.T) {
 		results: []presenceusecase.EndpointLookupResult{{
 			Routes: []presenceusecase.Route{{
 				UID: "u1", OwnerNodeID: 3, OwnerBootID: 4, OwnerSeq: 5,
-				SessionID: 6, DeviceID: "d1", DeviceFlag: 1, DeviceLevel: 2,
+				SessionID: 6, DeviceID: "d1", AppInstanceID: "app-1",
+				InstallationGeneration: 7, SessionGeneration: 8, AuthorizationFence: 9,
+				ProtocolVersion: 6, DeviceFlag: 1, DeviceLevel: 2,
 			}},
 		}},
 	}
@@ -42,7 +44,9 @@ func TestPresenceResolverPreservesExactTargetsAndAlignedResults(t *testing.T) {
 	}
 	wantRoutes := []onlinedelivery.Route{{
 		UID: "u1", OwnerNodeID: 3, OwnerBootID: 4, OwnerSeq: 5,
-		SessionID: 6, DeviceID: "d1", DeviceFlag: 1, DeviceLevel: 2,
+		SessionID: 6, DeviceID: "d1", AppInstanceID: "app-1",
+		InstallationGeneration: 7, SessionGeneration: 8, AuthorizationFence: 9,
+		ProtocolVersion: 6, DeviceFlag: 1, DeviceLevel: 2,
 	}}
 	if !reflect.DeepEqual(got[0].Routes, wantRoutes) {
 		t.Fatalf("first routes = %#v, want %#v", got[0].Routes, wantRoutes)

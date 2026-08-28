@@ -136,7 +136,9 @@ func exactLocalSession(registry *online.Registry, route onlinedelivery.Route) (o
 		local.OwnerSeq != route.OwnerSeq ||
 		local.DeviceID != route.DeviceID ||
 		local.AppInstanceID != route.AppInstanceID ||
+		local.InstallationGeneration != route.InstallationGeneration ||
 		local.SessionGeneration != route.SessionGeneration ||
+		local.AuthorizationFence != route.AuthorizationFence ||
 		local.ProtocolVersion != route.ProtocolVersion ||
 		local.DeviceFlag != route.DeviceFlag ||
 		local.DeviceLevel != route.DeviceLevel {
