@@ -18,6 +18,9 @@ const (
 	KindUpdateControllerVoters Kind = "update_controller_voters"
 	// KindPromoteControllerVoter atomically declares a live Controller Raft voter in durable cluster state.
 	KindPromoteControllerVoter Kind = "promote_controller_voter"
+	// KindReserveControllerVoterPromotion fences target preparation and live
+	// membership changes against Slot replica-count expansion.
+	KindReserveControllerVoterPromotion Kind = "reserve_controller_voter_promotion"
 	// KindUpsertSlotAssignmentAndTask atomically writes a slot assignment and reconcile task.
 	KindUpsertSlotAssignmentAndTask Kind = "upsert_slot_assignment_and_task"
 	// KindUpsertSlotReplicaMoveTask writes a staged Slot replica move task without changing assignment peers.

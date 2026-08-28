@@ -3,6 +3,7 @@ package management
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -17,7 +18,7 @@ func TestPromoteControllerVoterHappyPathDelegatesLiveProofToWriter(t *testing.T)
 		result: control.PromoteControllerVoterResult{
 			Changed:        true,
 			Node:           control.Node{NodeID: 4, Addr: "10.0.0.4:11110", Roles: []control.Role{control.RoleController, control.RoleData}},
-			Revision:       10,
+			Revision:       11,
 			PreviousVoters: []uint64{1, 2},
 			NextVoters:     []uint64{1, 2, 4},
 			Warnings:       []string{"controller_voter_count_even"},
@@ -27,7 +28,7 @@ func TestPromoteControllerVoterHappyPathDelegatesLiveProofToWriter(t *testing.T)
 		response: PrepareControllerVoterResponse{
 			NodeID:        4,
 			Prepared:      true,
-			StateRevision: 9,
+			StateRevision: 10,
 		},
 	}
 	observer := &recordingControllerVoterPromotionObserver{}
@@ -43,8 +44,8 @@ func TestPromoteControllerVoterHappyPathDelegatesLiveProofToWriter(t *testing.T)
 	if err != nil {
 		t.Fatalf("PromoteControllerVoter() error = %v", err)
 	}
-	if !resp.Changed || resp.NodeID != 4 || resp.StateRevision != 10 {
-		t.Fatalf("PromoteControllerVoter() = %#v, want changed node 4 revision 10", resp)
+	if !resp.Changed || resp.NodeID != 4 || resp.StateRevision != 11 {
+		t.Fatalf("PromoteControllerVoter() = %#v, want changed node 4 revision 11", resp)
 	}
 	if !sameUint64Slice(resp.PreviousVoters, []uint64{1, 2}) || !sameUint64Slice(resp.NextVoters, []uint64{1, 2, 4}) {
 		t.Fatalf("response voters = prev %#v next %#v, want [1 2] -> [1 2 4]", resp.PreviousVoters, resp.NextVoters)
@@ -52,7 +53,10 @@ func TestPromoteControllerVoterHappyPathDelegatesLiveProofToWriter(t *testing.T)
 	if promoter.calls != 1 {
 		t.Fatalf("promoter calls = %d, want 1", promoter.calls)
 	}
-	if promoter.request.NodeID != 4 || promoter.request.ExpectedRevision != 9 ||
+	if promoter.reserveCalls != 1 || promoter.reservation.ExpectedRevision != 9 {
+		t.Fatalf("reservation = %#v, calls = %d", promoter.reservation, promoter.reserveCalls)
+	}
+	if promoter.request.NodeID != 4 || promoter.request.ExpectedRevision != 10 ||
 		!sameUint64Slice(promoter.request.ExpectedVoters, []uint64{1, 2}) ||
 		promoter.request.ObservedConfigIndex != 0 ||
 		len(promoter.request.ObservedVoters) != 0 {
@@ -64,8 +68,8 @@ func TestPromoteControllerVoterHappyPathDelegatesLiveProofToWriter(t *testing.T)
 	if preparer.calls != 1 {
 		t.Fatalf("preparer calls = %d, want 1", preparer.calls)
 	}
-	if preparer.request.NodeID != 4 || preparer.request.ClusterID != snapshot.ClusterID || preparer.request.ExpectedRevision != 9 {
-		t.Fatalf("prepare request identity = %#v, want node 4 cluster-a revision 9", preparer.request)
+	if preparer.request.NodeID != 4 || preparer.request.ClusterID != snapshot.ClusterID || preparer.request.ExpectedRevision != 10 {
+		t.Fatalf("prepare request identity = %#v, want node 4 cluster-a reserved revision 10", preparer.request)
 	}
 	wantEndpoints := []ControllerVoterEndpoint{{NodeID: 1, Addr: "10.0.0.1:11110"}, {NodeID: 2, Addr: "10.0.0.2:11110"}, {NodeID: 4, Addr: "10.0.0.4:11110"}}
 	if len(preparer.request.NextVoters) != len(wantEndpoints) {
@@ -400,16 +404,50 @@ func (o *recordingControllerVoterPromotionObserver) ObserveControllerVoterPromot
 }
 
 type fakeControllerVoterPromoter struct {
-	request control.PromoteControllerVoterRequest
-	result  control.PromoteControllerVoterResult
-	calls   int
-	err     error
+	reservation  control.PromoteControllerVoterRequest
+	reserveCalls int
+	reserveErr   error
+	request      control.PromoteControllerVoterRequest
+	result       control.PromoteControllerVoterResult
+	calls        int
+	err          error
 }
 
 func (f *fakeControllerVoterPromoter) PromoteControllerVoter(_ context.Context, req control.PromoteControllerVoterRequest) (control.PromoteControllerVoterResult, error) {
+	if req.ReserveOnly {
+		f.reserveCalls++
+		f.reservation = req
+		return control.PromoteControllerVoterResult{Revision: req.ExpectedRevision + 1}, f.reserveErr
+	}
 	f.calls++
 	f.request = req
 	return f.result, f.err
+}
+
+func TestPromoteControllerVoterTransitionFencePrecedesPreparation(t *testing.T) {
+	for _, concurrent := range []bool{false, true} {
+		t.Run(fmt.Sprint("concurrent_", concurrent), func(t *testing.T) {
+			snapshot := controllerVoterPromotionSnapshot()
+			promoter := &fakeControllerVoterPromoter{}
+			if concurrent {
+				// Expansion wins the leader-side race after Manager's snapshot.
+				promoter.reserveErr = controller.ErrProposalRejected
+			} else {
+				snapshot.SlotReplicaCountTransition = &control.SlotReplicaCountTransition{SourceReplicaCount: 1, TargetReplicaCount: 3}
+			}
+			preparer := &fakeControllerVoterPreparer{}
+			app := New(Options{Cluster: fakeNodeSnapshotReader{snapshot: snapshot},
+				ControllerVoterPromoter: promoter, ControllerVoterPreparer: preparer,
+				ControllerVoterReadiness: fakeControllerVoterReadiness{readiness: readyControllerVoterReadiness(4, snapshot.ClusterID, snapshot.Revision)},
+			})
+			if _, err := app.PromoteControllerVoter(context.Background(), PromoteControllerVoterRequest{NodeID: 4}); err == nil {
+				t.Fatal("expected transition rejection")
+			}
+			if preparer.calls != 0 || promoter.calls != 0 {
+				t.Fatalf("fence allowed preparation/final promotion: %d/%d", preparer.calls, promoter.calls)
+			}
+		})
+	}
 }
 
 type fakeControllerVoterReadiness struct {

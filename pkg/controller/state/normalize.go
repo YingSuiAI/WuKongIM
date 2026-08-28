@@ -7,6 +7,11 @@ func (s *ClusterState) Normalize() {
 	if s == nil {
 		return
 	}
+	if s.ControllerVoterPromotion != nil {
+		sort.Slice(s.ControllerVoterPromotion.PreviousVoters, func(i, j int) bool {
+			return s.ControllerVoterPromotion.PreviousVoters[i] < s.ControllerVoterPromotion.PreviousVoters[j]
+		})
+	}
 	if s.SlotReplicaCountTransition != nil {
 		sort.Slice(s.SlotReplicaCountTransition.TargetNodeIDs, func(i, j int) bool {
 			return s.SlotReplicaCountTransition.TargetNodeIDs[i] < s.SlotReplicaCountTransition.TargetNodeIDs[j]
@@ -101,6 +106,11 @@ func (s *ClusterState) Normalize() {
 // Clone returns a deep copy of the cluster state.
 func (s ClusterState) Clone() ClusterState {
 	out := s
+	if s.ControllerVoterPromotion != nil {
+		promotion := *s.ControllerVoterPromotion
+		promotion.PreviousVoters = cloneUint64s(promotion.PreviousVoters)
+		out.ControllerVoterPromotion = &promotion
+	}
 	if s.SlotReplicaCountTransition != nil {
 		transition := *s.SlotReplicaCountTransition
 		transition.TargetNodeIDs = cloneUint64s(s.SlotReplicaCountTransition.TargetNodeIDs)

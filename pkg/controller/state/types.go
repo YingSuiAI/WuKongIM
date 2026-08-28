@@ -206,6 +206,9 @@ type ClusterState struct {
 	// of every physical Slot's voter count. ReplicaCount remains the last fully
 	// converged cluster-wide value until every Slot reaches TargetReplicaCount.
 	SlotReplicaCountTransition *SlotReplicaCountTransition `json:"slot_replica_count_transition,omitempty"`
+	// ControllerVoterPromotion reserves one forward-only promotion before target
+	// preparation or live Raft membership changes can begin.
+	ControllerVoterPromotion *ControllerVoterPromotion `json:"controller_voter_promotion,omitempty"`
 	// Controllers lists the desired Controller Raft voters.
 	Controllers []ControllerVoter `json:"controllers"`
 	// Nodes lists durable cluster members.
@@ -237,6 +240,14 @@ type SlotReplicaCountTransition struct {
 	StartedAtRevision uint64 `json:"started_at_revision"`
 	// TargetNodeIDs is the exact immutable final voter topology for every Slot.
 	TargetNodeIDs []uint64 `json:"target_node_ids"`
+}
+
+// ControllerVoterPromotion excludes Slot expansion until one exact promotion
+// completes. Failed requests retain this intent for forward recovery.
+type ControllerVoterPromotion struct {
+	TargetNodeID   uint64   `json:"target_node_id"`
+	TargetAddr     string   `json:"target_addr"`
+	PreviousVoters []uint64 `json:"previous_voters"`
 }
 
 // ClusterConfig stores durable cluster sizing and placement defaults.

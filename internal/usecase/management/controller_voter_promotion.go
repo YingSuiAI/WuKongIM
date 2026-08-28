@@ -144,6 +144,9 @@ func (a *App) PromoteControllerVoter(ctx context.Context, req PromoteControllerV
 	if req.ExpectedRevision != 0 && req.ExpectedRevision != snapshot.Revision {
 		return PromoteControllerVoterResponse{}, controllerVoterPromotionBlocked("expected_revision_mismatch")
 	}
+	if snapshot.SlotReplicaCountTransition != nil {
+		return PromoteControllerVoterResponse{}, controllerVoterPromotionBlocked("slot_replica_count_transition_active")
+	}
 	target, ok := findControlNode(snapshot, req.NodeID)
 	if !ok {
 		return PromoteControllerVoterResponse{}, ErrNodeLifecycleNotFound
@@ -180,6 +183,16 @@ func (a *App) PromoteControllerVoter(ctx context.Context, req PromoteControllerV
 	if err := validateControllerVoterReadiness(snapshot, req.NodeID, readiness); err != nil {
 		return PromoteControllerVoterResponse{}, err
 	}
+	// Persist mutual exclusion on the Controller leader before the target stops
+	// mirror sync. This reservation also closes the cross-RPC race with expansion.
+	reservation, err := a.controllerVoterPromoter.PromoteControllerVoter(ctx, control.PromoteControllerVoterRequest{
+		NodeID: req.NodeID, ExpectedRevision: snapshot.Revision,
+		ExpectedVoters: append([]uint64(nil), previousVoters...), ReserveOnly: true,
+	})
+	if err != nil {
+		return PromoteControllerVoterResponse{}, mapControllerVoterPromotionWriteError(err)
+	}
+	snapshot.Revision = reservation.Revision
 	phaseStarted = time.Now()
 	prep, err := a.controllerVoterPreparer.PrepareControllerVoter(ctx, PrepareControllerVoterRequest{
 		NodeID:           req.NodeID,

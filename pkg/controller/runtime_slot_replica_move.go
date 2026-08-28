@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/WuKongIM/WuKongIM/pkg/controller/command"
+	"github.com/WuKongIM/WuKongIM/pkg/controller/fsm"
 	"github.com/WuKongIM/WuKongIM/pkg/controller/state"
 )
 
@@ -147,6 +148,9 @@ func validateSlotReplicaMoveRequest(st state.ClusterState, assignment state.Slot
 }
 
 func validateSlotReplicaAdditionRequest(st state.ClusterState, assignment state.SlotAssignment, req SlotReplicaMoveRequest) error {
+	if st.ControllerVoterPromotion != nil {
+		return fmt.Errorf("%w: %s", ErrProposalRejected, fsm.ReasonControllerVoterPromotionActive)
+	}
 	if req.TargetReplicaCount <= st.Config.ReplicaCount {
 		return fmt.Errorf("controller: target replica count must increase current replica count")
 	}

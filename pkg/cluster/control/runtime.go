@@ -482,6 +482,7 @@ func (r *Runtime) PromoteControllerVoter(ctx context.Context, req PromoteControl
 		return resp.PromoteControllerVoter, nil
 	}
 	result, err := r.backend.PromoteControllerVoter(ctx, controller.PromoteControllerVoterRequest{
+		ReserveOnly:         req.ReserveOnly,
 		NodeID:              req.NodeID,
 		ExpectedRevision:    req.ExpectedRevision,
 		ExpectedVoters:      copyOptionalUint64Slice(req.ExpectedVoters),

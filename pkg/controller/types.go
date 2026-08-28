@@ -209,6 +209,8 @@ type (
 
 // PromoteControllerVoterRequest finalizes one proven Controller voter promotion in Controller state.
 type PromoteControllerVoterRequest struct {
+	// ReserveOnly persists the promotion fence without preparing or changing Raft membership.
+	ReserveOnly bool
 	// NodeID is the target node promoted into Controller Raft voting membership.
 	NodeID uint64
 	// Addr is the target Controller address; empty uses the durable node address.

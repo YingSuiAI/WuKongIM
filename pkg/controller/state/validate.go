@@ -34,6 +34,25 @@ func (s ClusterState) Validate() error {
 	if err := validateControllers(s.Controllers, nodes); err != nil {
 		return err
 	}
+	if promotion := s.ControllerVoterPromotion; promotion != nil {
+		if s.SlotReplicaCountTransition != nil {
+			return invalid("Controller voter promotion cannot overlap Slot replica count transition")
+		}
+		node, ok := nodes[promotion.TargetNodeID]
+		if !ok || node.Addr != promotion.TargetAddr || node.JoinState != NodeJoinStateActive || !node.HasRole(NodeRoleData) {
+			return invalid("Controller voter promotion requires the reserved active data node")
+		}
+		voters := make([]uint64, 0, len(s.Controllers))
+		for _, voter := range s.Controllers {
+			if voter.NodeID == promotion.TargetNodeID {
+				return invalid("Controller voter promotion target is already a voter")
+			}
+			voters = append(voters, voter.NodeID)
+		}
+		if !equalUint64Set(voters, promotion.PreviousVoters) {
+			return invalid("Controller voter promotion previous voters changed")
+		}
+	}
 	if s.SlotReplicaCountTransition != nil {
 		if len(s.Controllers) != 1 {
 			return invalid("slot replica count transition requires exactly one Controller voter")

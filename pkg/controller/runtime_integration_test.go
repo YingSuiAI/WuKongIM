@@ -1720,6 +1720,7 @@ func TestRuntimePrepareControllerVoterValidatesLocalNodeAgainstPreservedStateBef
 		{
 			name: "missing local node",
 			mutate: func(st ClusterState) ClusterState {
+				st.ControllerVoterPromotion = nil
 				st.Controllers = []ControllerVoter{{NodeID: 1, Addr: "n1", Role: ControllerRoleVoter}}
 				st.Nodes = []Node{st.Nodes[0]}
 				return checksumClusterStateForTest(t, st)
@@ -1729,6 +1730,7 @@ func TestRuntimePrepareControllerVoterValidatesLocalNodeAgainstPreservedStateBef
 		{
 			name: "inactive local node",
 			mutate: func(st ClusterState) ClusterState {
+				st.ControllerVoterPromotion = nil
 				st.Controllers = []ControllerVoter{{NodeID: 1, Addr: "n1", Role: ControllerRoleVoter}}
 				st.Nodes[1].Roles = []NodeRole{NodeRoleData}
 				st.Nodes[1].JoinState = NodeJoinStateLeaving
@@ -1742,6 +1744,7 @@ func TestRuntimePrepareControllerVoterValidatesLocalNodeAgainstPreservedStateBef
 				st.Controllers = []ControllerVoter{{NodeID: 1, Addr: "n1", Role: ControllerRoleVoter}}
 				st.Nodes[1].Roles = []NodeRole{NodeRoleData}
 				st.Nodes[1].Addr = "n4-durable"
+				st.ControllerVoterPromotion.TargetAddr = "n4-durable"
 				return checksumClusterStateForTest(t, st)
 			},
 			nextVoters: []Voter{{NodeID: 1, Addr: "n1"}, {NodeID: 4, Addr: "n4"}},
@@ -1966,11 +1969,12 @@ func runtimeBootstrapVisibleState(t *testing.T, revision uint64, withTask bool) 
 func mirroredPrepareDataNodeStateForTest(t *testing.T, clusterID string, revision uint64) ClusterState {
 	t.Helper()
 	st := ClusterState{
-		SchemaVersion:    CurrentSchemaVersion,
-		ClusterID:        clusterID,
-		Revision:         revision,
-		AppliedRaftIndex: 22,
-		UpdatedAt:        time.Unix(1710000000, 0).UTC(),
+		ControllerVoterPromotion: &cv2state.ControllerVoterPromotion{TargetNodeID: 4, TargetAddr: "n4", PreviousVoters: []uint64{1}},
+		SchemaVersion:            CurrentSchemaVersion,
+		ClusterID:                clusterID,
+		Revision:                 revision,
+		AppliedRaftIndex:         22,
+		UpdatedAt:                time.Unix(1710000000, 0).UTC(),
 		Config: ClusterConfig{
 			SlotCount:             1,
 			HashSlotCount:         4,

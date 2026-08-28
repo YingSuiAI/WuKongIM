@@ -66,6 +66,37 @@ func (r *Runtime) PromoteControllerVoter(ctx context.Context, req PromoteControl
 	if req.ExpectedVoters != nil && !sameRuntimeUint64Set(req.ExpectedVoters, previousVoters) {
 		return PromoteControllerVoterResult{}, fmt.Errorf("%w: %s", ErrProposalRejected, fsm.ReasonControllerVoterSetMismatch)
 	}
+	// Reserve through the same FSM that admits Slot expansion. The durable
+	// reservation precedes every live membership change and survives retries,
+	// leader changes and target preparation in a separate RPC.
+	if !containsRuntimeUint64(previousVoters, req.NodeID) {
+		reserved, reserveErr := r.raft.ProposeResult(ctx, command.Command{
+			Kind:     command.KindReserveControllerVoterPromotion,
+			IssuedAt: r.cfg.Now().UTC(), ExpectedRevision: &expectedRevision,
+			ControllerVoterPromotion: &command.ControllerVoterPromotion{
+				TargetNodeID: req.NodeID, TargetAddr: addr,
+				ExpectedPreviousVoters: previousVoters,
+			},
+		})
+		if reserveErr != nil {
+			return PromoteControllerVoterResult{}, reserveErr
+		}
+		if err := r.publishFromState(ctx); err != nil {
+			return PromoteControllerVoterResult{}, err
+		}
+		st, err = r.LocalState(ctx)
+		if err != nil {
+			return PromoteControllerVoterResult{}, err
+		}
+		expectedRevision = st.Revision
+		if req.ReserveOnly {
+			return PromoteControllerVoterResult{Changed: reserved.Changed, Node: node,
+				Revision: st.Revision, PreviousVoters: previousVoters, NextVoters: previousVoters}, nil
+		}
+	} else if req.ReserveOnly {
+		return PromoteControllerVoterResult{Node: node, Revision: st.Revision,
+			PreviousVoters: previousVoters, NextVoters: previousVoters}, nil
+	}
 	observedConfigIndex := req.ObservedConfigIndex
 	observedVoters := append([]uint64(nil), req.ObservedVoters...)
 	if observedConfigIndex == 0 || len(observedVoters) == 0 {
@@ -164,11 +195,25 @@ func (r *Runtime) PrepareControllerVoter(ctx context.Context, req PrepareControl
 			r.restartMirrorRefreshLoopIfStillMirror()
 		}
 	}()
+	// Refresh after the leader reserved the intent, before touching the mirror
+	// file. Otherwise a healthy target can lag the reservation by one revision.
+	if r.syncClient != nil {
+		if err := r.syncTick(ctx); err != nil {
+			return PrepareControllerVoterResult{}, err
+		}
+	}
 	selection, err := r.selectPreservedMirrorState(ctx)
 	if err != nil {
 		return PrepareControllerVoterResult{}, err
 	}
 	st := selection.selected.state
+	if st.SlotReplicaCountTransition != nil {
+		return PrepareControllerVoterResult{}, fmt.Errorf("%w: %s", ErrProposalRejected, fsm.ReasonSlotReplicaCountTransitionActive)
+	}
+	if !containsRuntimeUint64(controllerNodeIDsForRuntime(st.Controllers), req.NodeID) &&
+		(st.ControllerVoterPromotion == nil || st.ControllerVoterPromotion.TargetNodeID != req.NodeID || st.ControllerVoterPromotion.TargetAddr != r.cfg.Addr) {
+		return PrepareControllerVoterResult{}, fmt.Errorf("%w: controller voter preparation requires its durable promotion reservation", ErrProposalRejected)
+	}
 	if st.ClusterID != req.ClusterID {
 		return PrepareControllerVoterResult{}, fmt.Errorf("controller: mirror state cluster mismatch local=%q request=%q", st.ClusterID, req.ClusterID)
 	}

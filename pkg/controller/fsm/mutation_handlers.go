@@ -59,6 +59,29 @@ func (sm *StateMachine) applyUpdateControllerVoters(next *state.ClusterState, cm
 	return validateChanged(next, before, cmd)
 }
 
+func (sm *StateMachine) applyReserveControllerVoterPromotion(next *state.ClusterState, cmd command.Command) ApplyResult {
+	promotion := cmd.ControllerVoterPromotion
+	if next.Revision == 0 || promotion == nil || promotion.TargetNodeID == 0 || promotion.TargetAddr == "" {
+		return reject(ReasonInvalidCommand)
+	}
+	if next.SlotReplicaCountTransition != nil {
+		return reject(ReasonSlotReplicaCountTransitionActive)
+	}
+	reservation := &state.ControllerVoterPromotion{
+		TargetNodeID: promotion.TargetNodeID, TargetAddr: promotion.TargetAddr,
+		PreviousVoters: append([]uint64(nil), promotion.ExpectedPreviousVoters...),
+	}
+	if next.ControllerVoterPromotion != nil {
+		if reflect.DeepEqual(next.ControllerVoterPromotion, reservation) {
+			return noop(ReasonNoChange)
+		}
+		return reject(ReasonControllerVoterPromotionActive)
+	}
+	before := next.Clone()
+	next.ControllerVoterPromotion = reservation
+	return validateChanged(next, before, cmd)
+}
+
 func (sm *StateMachine) applyPromoteControllerVoter(next *state.ClusterState, cmd command.Command) ApplyResult {
 	promotion := cmd.ControllerVoterPromotion
 	if next.Revision == 0 || promotion == nil || promotion.TargetNodeID == 0 || promotion.TargetAddr == "" {
@@ -66,6 +89,10 @@ func (sm *StateMachine) applyPromoteControllerVoter(next *state.ClusterState, cm
 	}
 	if next.SlotReplicaCountTransition != nil {
 		return reject(ReasonSlotReplicaCountTransitionActive)
+	}
+	if reservation := next.ControllerVoterPromotion; reservation != nil &&
+		(reservation.TargetNodeID != promotion.TargetNodeID || reservation.TargetAddr != promotion.TargetAddr) {
+		return reject(ReasonControllerVoterPromotionActive)
 	}
 	currentVoters := controllerVoterNodeIDs(next.Controllers)
 	controller, controllerExists := controllerVoterByNodeID(next.Controllers, promotion.TargetNodeID)
@@ -106,6 +133,7 @@ func (sm *StateMachine) applyPromoteControllerVoter(next *state.ClusterState, cm
 		})
 	}
 	next.Nodes[nodeIdx].Roles = appendNodeRoleIfMissing(next.Nodes[nodeIdx].Roles, state.NodeRoleControllerVoter)
+	next.ControllerVoterPromotion = nil
 	next.Normalize()
 	if reflect.DeepEqual(before.Controllers, next.Controllers) && reflect.DeepEqual(before.Nodes, next.Nodes) {
 		return noop(ReasonNoChange)
@@ -180,6 +208,9 @@ func (sm *StateMachine) applyUpsertSlotReplicaMoveTask(next *state.ClusterState,
 	}
 	before := next.Clone()
 	if cmd.SlotReplicaCountTransition != nil {
+		if next.ControllerVoterPromotion != nil {
+			return reject(ReasonControllerVoterPromotionActive)
+		}
 		if next.SlotReplicaCountTransition == nil {
 			transition := *cmd.SlotReplicaCountTransition
 			next.SlotReplicaCountTransition = &transition

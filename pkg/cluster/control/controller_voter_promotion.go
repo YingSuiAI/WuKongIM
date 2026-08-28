@@ -10,6 +10,8 @@ const controllerVoterCountEvenWarning = "controller_voter_count_even"
 
 // PromoteControllerVoterRequest requests online promotion of an active node into Controller Raft voting membership.
 type PromoteControllerVoterRequest struct {
+	// ReserveOnly persists the promotion fence before target-side preparation.
+	ReserveOnly bool `json:"reserve_only,omitempty"`
 	// NodeID is the target node.
 	NodeID uint64 `json:"node_id"`
 	// ExpectedRevision fences the manager intent to the observed control revision.
