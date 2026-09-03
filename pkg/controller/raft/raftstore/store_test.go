@@ -67,6 +67,37 @@ func TestStoreSnapshotAndCompactBoundsStartupSuffix(t *testing.T) {
 	require.Equal(t, uint64(8), loaded.Metadata.Index)
 }
 
+func TestStoreCompactKeepsSuffixInSegmentCrossingBoundary(t *testing.T) {
+	ctx := context.Background()
+	dir := filepath.Join(t.TempDir(), "controller-raft")
+	store, err := Open(ctx, Config{Dir: dir, NodeID: 1, SegmentSize: 64})
+	require.NoError(t, err)
+	require.NoError(t, store.SaveReady(ctx,
+		raftpb.HardState{Term: 1, Vote: 1, Commit: 3},
+		[]raftpb.Entry{{Index: 1, Term: 1, Data: make([]byte, 80)}, {Index: 2, Term: 1}, {Index: 3, Term: 1}},
+		raftpb.Snapshot{},
+	))
+	require.NoError(t, store.SaveReady(ctx,
+		raftpb.HardState{Term: 1, Vote: 1, Commit: 7},
+		[]raftpb.Entry{{Index: 4, Term: 1}, {Index: 5, Term: 1}, {Index: 6, Term: 1}, {Index: 7, Term: 1, Data: make([]byte, 80)}},
+		raftpb.Snapshot{},
+	))
+	require.NoError(t, store.SaveReady(ctx,
+		raftpb.HardState{Term: 1, Vote: 1, Commit: 8},
+		[]raftpb.Entry{{Index: 8, Term: 1}},
+		raftpb.Snapshot{},
+	))
+	require.NoError(t, store.Compact(ctx, 5))
+	require.NoError(t, store.Close())
+
+	reopened, err := Open(ctx, Config{Dir: dir, NodeID: 1, SegmentSize: 64})
+	require.NoError(t, err)
+	defer reopened.Close()
+	entries, err := reopened.Entries(6, 9, 0)
+	require.NoError(t, err)
+	require.Equal(t, []uint64{6, 7, 8}, []uint64{entries[0].Index, entries[1].Index, entries[2].Index})
+}
+
 func TestStoreSaveReadySkipsMetadataRewriteWhenReadyHasNoDurableState(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("read-only directory permissions are platform-specific")
