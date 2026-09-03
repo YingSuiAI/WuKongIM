@@ -190,12 +190,12 @@ func (w *wal) releaseBefore(index uint64) error {
 	if len(files) <= 1 {
 		return nil
 	}
-	for _, path := range files[:len(files)-1] {
-		_, first, err := parseSegmentName(filepath.Base(path))
+	for i, path := range files[:len(files)-1] {
+		_, nextFirst, err := parseSegmentName(filepath.Base(files[i+1]))
 		if err != nil {
 			return err
 		}
-		if first >= index {
+		if nextFirst > index {
 			continue
 		}
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
