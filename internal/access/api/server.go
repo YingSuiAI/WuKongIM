@@ -215,7 +215,7 @@ type Options struct {
 	BenchEnabled bool
 	// BenchToken optionally requires one exact bearer capability on every /bench/v1/* and /debug/* route.
 	BenchToken string
-	// ServiceToken requires an exact bearer capability on mutating service routes.
+	// ServiceToken requires an exact bearer capability on privileged service routes.
 	ServiceToken string
 	// BenchMaxBatchSize limits top-level records accepted by one bench mutation request.
 	BenchMaxBatchSize int

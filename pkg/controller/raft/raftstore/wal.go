@@ -68,6 +68,10 @@ func (w *wal) replay() (replayState, error) {
 	if err != nil {
 		return replayState{}, err
 	}
+	startsAfterReleasedPrefix, err := walStartsAfterReleasedPrefix(files)
+	if err != nil {
+		return replayState{}, err
+	}
 	state := replayState{}
 	var crc uint32
 	for fileIdx, path := range files {
@@ -77,7 +81,7 @@ func (w *wal) replay() (replayState, error) {
 		}
 		sawCompleteRecord := false
 		for {
-			rec, nextCRC, err := readRecord(f, crc)
+			rec, nextCRC, err := w.readReplayRecord(f, crc, startsAfterReleasedPrefix && fileIdx == 0 && !sawCompleteRecord)
 			if err != nil {
 				if errors.Is(err, io.EOF) {
 					if !sawCompleteRecord {
@@ -264,6 +268,10 @@ func (w *wal) loadTailState(files []string) error {
 	if state.Snapshot.Index > w.lastIndex {
 		w.lastIndex = state.Snapshot.Index
 	}
+	startsAfterReleasedPrefix, err := walStartsAfterReleasedPrefix(files)
+	if err != nil {
+		return err
+	}
 	var crc uint32
 	for fileIdx, path := range files {
 		flags := os.O_RDONLY
@@ -276,7 +284,7 @@ func (w *wal) loadTailState(files []string) error {
 		}
 		lastCompleteOffset := int64(0)
 		for {
-			_, next, err := readRecord(f, crc)
+			_, next, err := w.readReplayRecord(f, crc, startsAfterReleasedPrefix && fileIdx == 0 && lastCompleteOffset == 0)
 			if err != nil {
 				if errors.Is(err, io.EOF) {
 					if lastCompleteOffset == 0 {
@@ -312,6 +320,27 @@ func (w *wal) loadTailState(files []string) error {
 	}
 	w.crc = crc
 	return nil
+}
+
+func (w *wal) readReplayRecord(r io.Reader, prevCRC uint32, retainedHeader bool) (walRecord, uint32, error) {
+	if !retainedHeader {
+		return readRecord(r, prevCRC)
+	}
+	rec, storedCRC, err := readRecordFrame(r)
+	if err != nil {
+		return walRecord{}, prevCRC, err
+	}
+	if rec.Type != recordSegmentHeader || len(rec.Payload) != 8 {
+		return walRecord{}, prevCRC, fmt.Errorf("controller/raftstore: invalid retained segment header")
+	}
+	nodeID, err := unmarshalUint64(rec.Payload)
+	if err != nil {
+		return walRecord{}, prevCRC, err
+	}
+	if nodeID != w.cfg.NodeID {
+		return walRecord{}, prevCRC, fmt.Errorf("controller/raftstore: retained segment node id %d does not match %d", nodeID, w.cfg.NodeID)
+	}
+	return rec, storedCRC, nil
 }
 
 func (w *wal) writeLocked(rec walRecord) error {
@@ -474,6 +503,17 @@ func walSegmentFiles(dir string) ([]string, error) {
 	}
 	sort.Slice(files, func(i, j int) bool { return filepath.Base(files[i]) < filepath.Base(files[j]) })
 	return files, nil
+}
+
+func walStartsAfterReleasedPrefix(files []string) (bool, error) {
+	if len(files) == 0 {
+		return false, nil
+	}
+	seq, _, err := parseSegmentName(filepath.Base(files[0]))
+	if err != nil {
+		return false, err
+	}
+	return seq > 0, nil
 }
 
 func segmentName(seq, first uint64) string {

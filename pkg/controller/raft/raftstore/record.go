@@ -64,29 +64,37 @@ func writeRecord(w io.Writer, rec walRecord, prevCRC uint32) error {
 }
 
 func readRecord(r io.Reader, prevCRC uint32) (walRecord, uint32, error) {
-	var lenBuf [4]byte
-	if _, err := io.ReadFull(r, lenBuf[:]); err != nil {
-		if errors.Is(err, io.EOF) {
-			return walRecord{}, prevCRC, io.EOF
-		}
-		return walRecord{}, prevCRC, ErrTruncatedRecord
+	rec, wantCRC, err := readRecordFrame(r)
+	if err != nil {
+		return walRecord{}, prevCRC, err
 	}
-	length := binary.BigEndian.Uint32(lenBuf[:])
-	if length < 5 {
-		return walRecord{}, prevCRC, ErrTruncatedRecord
-	}
-	frame := make([]byte, length)
-	if _, err := io.ReadFull(r, frame); err != nil {
-		return walRecord{}, prevCRC, ErrTruncatedRecord
-	}
-	typ := recordType(frame[0])
-	wantCRC := binary.BigEndian.Uint32(frame[1:5])
-	payload := append([]byte(nil), frame[5:]...)
-	gotCRC := recordCRC(prevCRC, typ, payload)
+	gotCRC := recordCRC(prevCRC, rec.Type, rec.Payload)
 	if gotCRC != wantCRC {
 		return walRecord{}, prevCRC, ErrCRCMismatch
 	}
-	return walRecord{Type: typ, Payload: payload}, gotCRC, nil
+	return rec, gotCRC, nil
+}
+
+func readRecordFrame(r io.Reader) (walRecord, uint32, error) {
+	var lenBuf [4]byte
+	if _, err := io.ReadFull(r, lenBuf[:]); err != nil {
+		if errors.Is(err, io.EOF) {
+			return walRecord{}, 0, io.EOF
+		}
+		return walRecord{}, 0, ErrTruncatedRecord
+	}
+	length := binary.BigEndian.Uint32(lenBuf[:])
+	if length < 5 {
+		return walRecord{}, 0, ErrTruncatedRecord
+	}
+	frame := make([]byte, length)
+	if _, err := io.ReadFull(r, frame); err != nil {
+		return walRecord{}, 0, ErrTruncatedRecord
+	}
+	typ := recordType(frame[0])
+	storedCRC := binary.BigEndian.Uint32(frame[1:5])
+	payload := append([]byte(nil), frame[5:]...)
+	return walRecord{Type: typ, Payload: payload}, storedCRC, nil
 }
 
 func marshalEntryRecord(entries []raftpb.Entry) ([]byte, error) {

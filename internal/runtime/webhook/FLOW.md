@@ -31,10 +31,15 @@ It does not own message durability, presence, Channel ordering, or crash replay.
 
 - Admission is bounded and best effort; full, closed, canceled, and exhausted
   events are observed and dropped.
+- Every failed send attempt retains a bounded failure class. Final retry
+  exhaustion emits a structured App warning with request, event, and available
+  Channel/message identity, never the request body, signing secret, or token.
 - Webhook failure never changes SENDACK, durable append, membership, or owner
   delivery results.
 - Large offline fanout remains batched; never enqueue one item per recipient.
-- This runtime provides no durability or crash-replay guarantee.
+- This runtime provides no durability or crash-replay guarantee. Its default
+  delivery budget is three immediate attempts before the in-memory item is
+  dropped.
 
 ## Read First
 

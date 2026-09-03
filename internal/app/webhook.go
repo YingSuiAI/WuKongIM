@@ -2,11 +2,15 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 
 	"github.com/WuKongIM/WuKongIM/internal/runtime/channelappend"
 	runtimewebhook "github.com/WuKongIM/WuKongIM/internal/runtime/webhook"
 	"github.com/WuKongIM/WuKongIM/internal/usecase/presence"
+	"github.com/WuKongIM/WuKongIM/pkg/wklog"
 )
 
 type webhookEventRuntime interface {
@@ -26,6 +30,10 @@ type webhookOfflineObserver struct {
 
 type webhookPresenceObserver struct {
 	runtime webhookEventRuntime
+}
+
+type webhookLogObserver struct {
+	logger wklog.Logger
 }
 
 type composedPersistAfterEnqueuer struct {
@@ -66,6 +74,7 @@ func (a *App) wireWebhook() error {
 		RetryMaxAttempts:    a.cfg.Webhook.RetryMaxAttempts,
 		FocusEvents:         a.cfg.Webhook.FocusEvents,
 		Goroutines:          a.goroutines,
+		Observer:            webhookLogObserver{logger: a.logger.Named("webhook")},
 	})
 	if err != nil {
 		return fmt.Errorf("internal/app: create webhook runtime: %w", err)
@@ -75,6 +84,57 @@ func (a *App) wireWebhook() error {
 	a.webhookOffline = webhookOfflineObserver{runtime: runtime, uidBatchSize: a.cfg.Webhook.OfflineUIDBatchSize}
 	a.webhookPresence = webhookPresenceObserver{runtime: runtime}
 	return nil
+}
+
+func (o webhookLogObserver) ObserveWebhook(observation runtimewebhook.Observation) {
+	if o.logger == nil || (observation.Result != "retry" && observation.Result != "retry_exhausted") {
+		return
+	}
+	fields := []wklog.Field{
+		wklog.Event("internal.app.webhook." + observation.Result),
+		wklog.String("webhookEvent", observation.Event),
+		wklog.String("queue", observation.Queue),
+		wklog.Result(observation.Result),
+		wklog.Int("items", observation.Items),
+		wklog.Attempt(observation.Attempt),
+		wklog.Duration("duration", observation.Duration),
+		wklog.ErrorCode(webhookFailureClass(observation.Err)),
+	}
+	if observation.RequestID != "" {
+		fields = append(fields, wklog.RequestID(observation.RequestID))
+	}
+	if observation.ChannelID != "" {
+		fields = append(fields, wklog.ChannelID(observation.ChannelID), wklog.ChannelType(int64(observation.ChannelType)))
+	}
+	if observation.MessageID != 0 {
+		fields = append(fields, wklog.MessageID(int64(observation.MessageID)), wklog.MessageSeq(observation.MessageSeq))
+	}
+	if observation.Result == "retry_exhausted" {
+		o.logger.Warn("webhook delivery retry exhausted; dropping in-memory batch", fields...)
+		return
+	}
+	o.logger.Debug("webhook delivery attempt failed", fields...)
+}
+
+func webhookFailureClass(err error) string {
+	switch {
+	case err == nil:
+		return "none"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "timeout"
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	}
+	const statusPrefix = "webhook: http status "
+	message := err.Error()
+	if strings.HasPrefix(message, statusPrefix) {
+		status := strings.TrimPrefix(message, statusPrefix)
+		code, parseErr := strconv.Atoi(status)
+		if parseErr == nil && code >= 100 && code <= 599 {
+			return "http_" + status
+		}
+	}
+	return "transport"
 }
 
 func (e webhookNotifyEnqueuer) EnqueuePersistAfter(ctx context.Context, event channelappend.CommittedEnvelope) {

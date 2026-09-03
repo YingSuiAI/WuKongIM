@@ -44,7 +44,7 @@ type RuntimeOptions struct {
 	Goroutines *goruntimeregistry.Registry
 	// Sender delivers encoded webhook requests.
 	Sender Sender
-	// Observer receives low-cardinality runtime observations.
+	// Observer receives structured runtime observations.
 	Observer Observer
 	// QueueSize bounds accepted webhook events waiting in memory per event queue.
 	QueueSize int
@@ -302,17 +302,17 @@ func (r *Runtime) PresenceLease(ctx context.Context, status PresenceLease) {
 func (r *Runtime) handleNotifyBatch(ctx context.Context, batch []Message) error {
 	body, err := buildNotifyBody(batch)
 	if err != nil {
-		r.observeSend(EventMsgNotify, resultEncodeError, len(batch), 0, 0, err)
+		r.observeSend(EventMsgNotify, resultEncodeError, len(batch), 0, 0, "", observationIdentityForMessages(batch), err)
 		return nil
 	}
-	r.sendWithRetry(ctx, EventMsgNotify, body, len(batch))
+	r.sendWithRetryIdentity(ctx, EventMsgNotify, body, len(batch), observationIdentityForMessages(batch))
 	return nil
 }
 
 func (r *Runtime) handleOnlineBatch(ctx context.Context, batch []PresenceLease) error {
 	body, err := buildPresenceLeaseBody(batch)
 	if err != nil {
-		r.observeSend(EventPresenceLease, resultEncodeError, len(batch), 0, 0, err)
+		r.observeSend(EventPresenceLease, resultEncodeError, len(batch), 0, 0, "", observationIdentity{}, err)
 		return nil
 	}
 	r.sendWithRetry(ctx, EventPresenceLease, body, len(batch))
@@ -324,15 +324,19 @@ func (r *Runtime) handleOfflineBatch(ctx context.Context, batch workqueue.Mailbo
 		body, err := buildOfflineBody(item, r.opts.OfflineUIDBatchSize)
 		items := len(item.ToUIDs)
 		if err != nil {
-			r.observeSend(EventMsgOffline, resultEncodeError, items, 0, 0, err)
+			r.observeSend(EventMsgOffline, resultEncodeError, items, 0, 0, "", observationIdentityForMessage(item.Message), err)
 			continue
 		}
-		r.sendWithRetry(ctx, EventMsgOffline, body, items)
+		r.sendWithRetryIdentity(ctx, EventMsgOffline, body, items, observationIdentityForMessage(item.Message))
 	}
 	return nil
 }
 
 func (r *Runtime) sendWithRetry(ctx context.Context, event string, body []byte, items int) {
+	r.sendWithRetryIdentity(ctx, event, body, items, observationIdentity{})
+}
+
+func (r *Runtime) sendWithRetryIdentity(ctx context.Context, event string, body []byte, items int, identity observationIdentity) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -342,12 +346,12 @@ func (r *Runtime) sendWithRetry(ctx context.Context, event string, body []byte, 
 	}
 	requestID, err := newRequestID()
 	if err != nil {
-		r.observeSend(event, resultError, items, 0, 0, err)
+		r.observeSend(event, resultError, items, 0, 0, "", identity, err)
 		return
 	}
 	for attempt := 1; attempt <= attempts; attempt++ {
 		if err := ctx.Err(); err != nil {
-			r.observeSend(event, contextResult(err), items, attempt, 0, err)
+			r.observeSend(event, contextResult(err), items, attempt, 0, requestID, identity, err)
 			return
 		}
 		attemptCtx := ctx
@@ -360,18 +364,54 @@ func (r *Runtime) sendWithRetry(ctx context.Context, event string, body []byte, 
 		cancel()
 		duration := time.Since(started)
 		if err == nil {
-			r.observeSend(event, resultOK, items, attempt, duration, nil)
+			r.observeSend(event, resultOK, items, attempt, duration, requestID, identity, nil)
 			return
 		}
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			r.observeSend(event, contextResult(ctxErr), items, attempt, duration, ctxErr)
+			r.observeSend(event, contextResult(ctxErr), items, attempt, duration, requestID, identity, ctxErr)
 			return
 		}
 		if attempt == attempts {
-			r.observeSend(event, resultRetryExhausted, items, attempt, duration, err)
+			r.observeSend(event, resultRetryExhausted, items, attempt, duration, requestID, identity, err)
 			return
 		}
-		r.observeSend(event, resultRetry, items, attempt, duration, err)
+		r.observeSend(event, resultRetry, items, attempt, duration, requestID, identity, err)
+	}
+}
+
+type observationIdentity struct {
+	ChannelID   string
+	ChannelType uint8
+	MessageID   uint64
+	MessageSeq  uint64
+}
+
+func observationIdentityForMessages(messages []Message) observationIdentity {
+	if len(messages) == 0 {
+		return observationIdentity{}
+	}
+	identity := observationIdentityForMessage(messages[0])
+	if len(messages) == 1 {
+		return identity
+	}
+	identity.MessageID = 0
+	identity.MessageSeq = 0
+	for _, message := range messages[1:] {
+		if message.ChannelID != identity.ChannelID || message.ChannelType != identity.ChannelType {
+			identity.ChannelID = ""
+			identity.ChannelType = 0
+			break
+		}
+	}
+	return identity
+}
+
+func observationIdentityForMessage(message Message) observationIdentity {
+	return observationIdentity{
+		ChannelID:   message.ChannelID,
+		ChannelType: message.ChannelType,
+		MessageID:   message.MessageID,
+		MessageSeq:  message.MessageSeq,
 	}
 }
 
@@ -408,18 +448,23 @@ func (r *Runtime) observeAdmission(event string, queue string, result string, it
 	})
 }
 
-func (r *Runtime) observeSend(event string, result string, items int, attempt int, duration time.Duration, err error) {
+func (r *Runtime) observeSend(event string, result string, items int, attempt int, duration time.Duration, requestID string, identity observationIdentity, err error) {
 	if r == nil || r.observer == nil {
 		return
 	}
 	r.observer.ObserveWebhook(Observation{
-		Queue:    queueForEvent(event),
-		Event:    event,
-		Result:   result,
-		Items:    items,
-		Attempt:  attempt,
-		Duration: duration,
-		Err:      err,
+		Queue:       queueForEvent(event),
+		Event:       event,
+		RequestID:   requestID,
+		ChannelID:   identity.ChannelID,
+		ChannelType: identity.ChannelType,
+		MessageID:   identity.MessageID,
+		MessageSeq:  identity.MessageSeq,
+		Result:      result,
+		Items:       items,
+		Attempt:     attempt,
+		Duration:    duration,
+		Err:         err,
 	})
 }
 

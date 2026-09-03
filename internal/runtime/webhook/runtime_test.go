@@ -101,7 +101,7 @@ func TestRuntimeRetriesThenDrops(t *testing.T) {
 		OnlineBatchMaxWait:  time.Millisecond,
 		OfflineUIDBatchSize: 1,
 		RequestTimeout:      time.Second,
-		RetryMaxAttempts:    2,
+		RetryMaxAttempts:    3,
 	})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -110,10 +110,29 @@ func TestRuntimeRetriesThenDrops(t *testing.T) {
 	if err := rt.Start(context.Background()); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
-	rt.Notify(context.Background(), Message{MessageID: 1, MessageSeq: 1})
+	rt.Notify(context.Background(), Message{
+		MessageID:   1,
+		MessageSeq:  7,
+		ChannelID:   "channel-1",
+		ChannelType: 2,
+		Payload:     []byte("sensitive-body"),
+	})
 	waitUntil(t, time.Second, func() bool { return observer.hasResult(EventMsgNotify, "retry_exhausted") })
-	if got := sender.calls.Load(); got != 2 {
-		t.Fatalf("sender calls = %d, want 2", got)
+	if got := sender.calls.Load(); got != 3 {
+		t.Fatalf("sender calls = %d, want 3", got)
+	}
+	var exhausted Observation
+	for _, observation := range observer.snapshot() {
+		if observation.Result == "retry_exhausted" {
+			exhausted = observation
+			break
+		}
+	}
+	if exhausted.RequestID == "" || exhausted.Attempt != 3 {
+		t.Fatalf("exhausted observation = %#v, want request id and attempt 3", exhausted)
+	}
+	if exhausted.ChannelID != "channel-1" || exhausted.ChannelType != 2 || exhausted.MessageID != 1 || exhausted.MessageSeq != 7 {
+		t.Fatalf("exhausted identity = %#v, want exact message identity", exhausted)
 	}
 }
 

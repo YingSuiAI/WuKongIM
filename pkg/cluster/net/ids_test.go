@@ -76,6 +76,9 @@ func rpcServiceIDsForTest() map[string]uint8 {
 		"slot_permission_metadata_batch": RPCSlotPermissionMetadataBatch,
 		"slot_identity_metadata":         RPCSlotIdentityMetadata,
 		"channel_quorum_exchange":        RPCChannelQuorumExchange,
+		"channel_committed_head":         RPCChannelCommittedHead,
+		"channel_committed_message":      RPCChannelCommittedMessage,
+		"channel_committed_messages":     RPCChannelCommittedMessages,
 	}
 }
 
@@ -84,11 +87,14 @@ func TestCenterIMRPCServiceIDsRemainStable(t *testing.T) {
 		got  uint8
 		want uint8
 	}{
-		"delivery event push":      {got: RPCDeliveryEventPush, want: 84},
-		"slot runtime metadata":    {got: RPCSlotRuntimeMetadata, want: 85},
-		"slot permission metadata": {got: RPCSlotPermissionMetadataBatch, want: 86},
-		"slot identity metadata":   {got: RPCSlotIdentityMetadata, want: 87},
-		"channel quorum exchange":  {got: RPCChannelQuorumExchange, want: 88},
+		"delivery event push":        {got: RPCDeliveryEventPush, want: 84},
+		"slot runtime metadata":      {got: RPCSlotRuntimeMetadata, want: 85},
+		"slot permission metadata":   {got: RPCSlotPermissionMetadataBatch, want: 86},
+		"slot identity metadata":     {got: RPCSlotIdentityMetadata, want: 87},
+		"channel quorum exchange":    {got: RPCChannelQuorumExchange, want: 88},
+		"channel committed head":     {got: RPCChannelCommittedHead, want: 89},
+		"channel committed message":  {got: RPCChannelCommittedMessage, want: 90},
+		"channel committed messages": {got: RPCChannelCommittedMessages, want: 91},
 	}
 	for name, serviceID := range want {
 		if serviceID.got != serviceID.want {
