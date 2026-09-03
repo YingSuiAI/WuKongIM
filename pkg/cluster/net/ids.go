@@ -123,6 +123,12 @@ const (
 	RPCSlotIdentityMetadata
 	// RPCChannelQuorumExchange carries bounded quorum replication, probe, and repair batches.
 	RPCChannelQuorumExchange
+	// RPCChannelCommittedHead reads one fenced committed sequence without content.
+	RPCChannelCommittedHead
+	// RPCChannelCommittedMessage proves one exact committed message tuple.
+	RPCChannelCommittedMessage
+	// RPCChannelCommittedMessages reads one fenced committed-message recovery page.
+	RPCChannelCommittedMessages
 )
 
 func transportServiceAlias(serviceID uint8) string {
@@ -175,6 +181,12 @@ func transportServiceAlias(serviceID uint8) string {
 		return "channel conversation heads"
 	case RPCChannelCommittedReads:
 		return "channel committed reads"
+	case RPCChannelCommittedHead:
+		return "channel committed head"
+	case RPCChannelCommittedMessage:
+		return "channel committed message"
+	case RPCChannelCommittedMessages:
+		return "channel committed messages"
 	case RPCChannelAuthoritySend:
 		return "send authority"
 	case RPCManagerConnection:

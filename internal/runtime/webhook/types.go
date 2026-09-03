@@ -92,7 +92,7 @@ type Sender interface {
 	Send(context.Context, SendRequest) error
 }
 
-// Observer receives low-cardinality webhook runtime observations.
+// Observer receives structured webhook runtime observations.
 type Observer interface {
 	ObserveWebhook(Observation)
 }
@@ -103,6 +103,16 @@ type Observation struct {
 	Queue string
 	// Event is the webhook event name.
 	Event string
+	// RequestID identifies one logical webhook request across its retry attempts.
+	RequestID string
+	// ChannelID identifies the channel when every item in the request belongs to one channel.
+	ChannelID string
+	// ChannelType is the type paired with ChannelID.
+	ChannelType uint8
+	// MessageID identifies the message when the request carries exactly one message.
+	MessageID uint64
+	// MessageSeq is the channel-local sequence paired with MessageID.
+	MessageSeq uint64
 	// Result is a bounded outcome label.
 	Result string
 	// Items reports the number of logical items in this observation.
@@ -115,6 +125,6 @@ type Observation struct {
 	Attempt int
 	// Duration is the measured send or admission duration when applicable.
 	Duration time.Duration
-	// Err carries the original error for logs while metrics use Result.
+	// Err carries the original error for observer-side classification. Observers must not serialize it directly.
 	Err error
 }

@@ -556,6 +556,9 @@ type serviceRPCServer interface {
 	handleForwardLastVisible(context.Context, LastVisibleRequest) (LastVisibleResponse, error)
 	handleForwardConversationHeads(context.Context, ConversationHeadsRequest) (ConversationHeadsResponse, error)
 	handleForwardCommittedReads(context.Context, CommittedReadsRequest) (CommittedReadsResponse, error)
+	handleForwardCommittedHead(context.Context, CommittedHeadRequest) (uint64, error)
+	handleForwardCommittedMessage(context.Context, CommittedMessageRequest) (CommittedMessageResult, error)
+	handleForwardCommittedMessages(context.Context, CommittedMessagesRequest) (CommittedMessagesResult, error)
 }
 
 // RegisterServiceHandlersOn registers Channel replication and append-forward
@@ -563,6 +566,30 @@ type serviceRPCServer interface {
 // underlying runtime must be rebuilt without replacing transport services.
 func RegisterServiceHandlersOn(registrar HandlerRegistrar, service serviceRPCServer) {
 	RegisterHandlersOn(registrar, service.Server())
+	registrar.Register(clusternet.RPCChannelCommittedHead, clusternet.HandlerFunc(func(ctx context.Context, payload []byte) ([]byte, error) {
+		req, err := decodeCommittedHeadRequest(payload)
+		if err != nil {
+			return nil, err
+		}
+		seq, err := service.handleForwardCommittedHead(ctx, req)
+		return encodeRPCResult(kindCommittedHeadResponse, committedHeadResponse{Sequence: seq}, err)
+	}))
+	registrar.Register(clusternet.RPCChannelCommittedMessage, clusternet.HandlerFunc(func(ctx context.Context, payload []byte) ([]byte, error) {
+		req, err := decodeCommittedMessageRequest(payload)
+		if err != nil {
+			return nil, err
+		}
+		result, err := service.handleForwardCommittedMessage(ctx, req)
+		return encodeRPCResult(kindCommittedMessageResponse, result, err)
+	}))
+	registrar.Register(clusternet.RPCChannelCommittedMessages, clusternet.HandlerFunc(func(ctx context.Context, payload []byte) ([]byte, error) {
+		req, err := decodeCommittedMessagesRequest(payload)
+		if err != nil {
+			return nil, err
+		}
+		result, err := service.handleForwardCommittedMessages(ctx, req)
+		return encodeRPCResult(kindCommittedMessagesResponse, result, err)
+	}))
 	registrar.Register(clusternet.RPCChannelAppend, clusternet.HandlerFunc(func(ctx context.Context, payload []byte) ([]byte, error) {
 		started := time.Now()
 		req, err := decodeAppendRequest(payload)

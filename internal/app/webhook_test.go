@@ -2,7 +2,13 @@ package app
 
 import (
 	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	accessmanager "github.com/WuKongIM/WuKongIM/internal/access/manager"
 	"github.com/WuKongIM/WuKongIM/internal/runtime/channelappend"
@@ -35,6 +41,99 @@ func TestNewWiresWebhookSubsystemWhenEnabled(t *testing.T) {
 	require.NotNil(t, app.webhookNotify)
 	require.NotNil(t, app.webhookOffline)
 	require.NotNil(t, app.webhookPresence)
+}
+
+func TestWebhookRetryExhaustionIsLoggedWithoutPayloadOrCredentials(t *testing.T) {
+	const (
+		payload       = "private-message-body"
+		signingSecret = "private-signing-secret"
+	)
+	var calls atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	logger := &recordingAppLogger{}
+	app, err := newTestApp(t, Config{
+		DataDir: t.TempDir(),
+		Webhook: WebhookConfig{
+			HTTPAddr:            server.URL,
+			SigningSecret:       signingSecret,
+			QueueSize:           4,
+			Workers:             1,
+			NotifyBatchMaxItems: 1,
+			NotifyBatchMaxWait:  time.Millisecond,
+			RequestTimeout:      time.Second,
+			RetryMaxAttempts:    3,
+		},
+	}, WithCluster(&fakeCluster{}), WithLogger(logger))
+	require.NoError(t, err)
+	require.NoError(t, app.webhook.Start(context.Background()))
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		require.NoError(t, app.webhook.Stop(ctx))
+	})
+
+	app.webhookNotify.EnqueuePersistAfter(context.Background(), channelappend.CommittedEnvelope{
+		MessageID:         71,
+		MessageSeq:        9,
+		ChannelID:         "safe-channel",
+		ChannelType:       2,
+		FromUID:           "sender-1",
+		ClientMsgNo:       "client-1",
+		ServerTimestampMS: time.Now().UnixMilli(),
+		Payload:           []byte(payload),
+	})
+
+	require.Eventually(t, func() bool {
+		return len(appLogEntriesForEvent(logger, "WARN", "internal.app.webhook.retry_exhausted")) == 1
+	}, time.Second, time.Millisecond)
+	require.Equal(t, int64(3), calls.Load())
+	entry := requireAppLogEvent(t, logger, "WARN", "internal.app.webhook.retry_exhausted")
+	requireAppLogField(t, entry, "webhookEvent", runtimewebhook.EventMsgNotify)
+	requireAppLogField(t, entry, "result", "retry_exhausted")
+	requireAppLogField(t, entry, "attempt", 3)
+	requireAppLogField(t, entry, "errorCode", "http_500")
+	requireAppLogField(t, entry, "channelID", "safe-channel")
+	requireAppLogField(t, entry, "channelType", int64(2))
+	requireAppLogField(t, entry, "messageID", int64(71))
+	requireAppLogField(t, entry, "messageSeq", uint64(9))
+	requestID := webhookTestLogField(t, entry, "requestID")
+	require.NotEmpty(t, requestID)
+	retries := appLogEntriesForEvent(logger, "DEBUG", "internal.app.webhook.retry")
+	require.Len(t, retries, 2)
+	for index, retry := range retries {
+		requireAppLogField(t, retry, "attempt", index+1)
+		requireAppLogField(t, retry, "errorCode", "http_500")
+		require.Equal(t, requestID, webhookTestLogField(t, retry, "requestID"))
+	}
+
+	for _, logged := range logger.entriesSnapshot() {
+		representation := fmt.Sprintf("%s %#v", logged.msg, logged.fields)
+		require.NotContains(t, representation, payload)
+		require.NotContains(t, representation, signingSecret)
+		for _, field := range logged.fields {
+			key := strings.ToLower(field.Key)
+			require.NotContains(t, key, "payload")
+			require.NotContains(t, key, "authorization")
+			require.NotContains(t, key, "signature")
+			require.NotContains(t, key, "token")
+		}
+	}
+}
+
+func webhookTestLogField(t *testing.T, entry recordedAppLogEntry, key string) any {
+	t.Helper()
+	for _, field := range entry.fields {
+		if field.Key == key {
+			return field.Value
+		}
+	}
+	t.Fatalf("missing webhook log field %s entries=%#v", key, entry.fields)
+	return nil
 }
 
 func TestWebhookConfigSnapshotUsesNormalizedStartupConfig(t *testing.T) {

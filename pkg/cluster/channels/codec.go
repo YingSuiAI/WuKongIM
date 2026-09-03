@@ -40,6 +40,12 @@ const (
 	kindConversationHeadsResponse
 	kindCommittedReads
 	kindCommittedReadsResponse
+	kindCommittedHead
+	kindCommittedHeadResponse
+	kindCommittedMessage
+	kindCommittedMessageResponse
+	kindCommittedMessages
+	kindCommittedMessagesResponse
 )
 
 // EncodePullRequest encodes a Channel pull request.
@@ -474,6 +480,26 @@ func appendRPCPayload(dst []byte, payload any, version uint8) ([]byte, bool) {
 		return appendConversationHeadsResponse(dst, v, version), true
 	case CommittedReadsResponse:
 		return appendCommittedReadsResponse(dst, v, version), true
+	case committedHeadResponse:
+		return appendUvarint(dst, v.Sequence), true
+	case CommittedMessageResult:
+		dst = appendBool(dst, v.Found)
+		if v.Found {
+			dst = appendMessage(dst, v.Message)
+			dst = appendBool(dst, v.Message.SyncOnce)
+		}
+		return dst, true
+	case CommittedMessagesResult:
+		dst = appendMessages(dst, v.Messages)
+		for _, message := range v.Messages {
+			dst = appendBool(dst, message.SyncOnce)
+		}
+		dst = appendUvarint(dst, v.ScanHead)
+		dst = appendUvarint(dst, v.FirstAvailableMessageSeq)
+		dst = appendUvarint(dst, v.NextAfterMessageSeq)
+		dst = appendBool(dst, v.RetentionGap)
+		dst = appendBool(dst, v.HasMore)
+		return dst, true
 	default:
 		return dst, false
 	}
@@ -498,6 +524,38 @@ func readRPCPayload(body []byte, offset int, payload any, version uint8) (int, e
 		*v, offset, err = readConversationHeadsResponse(body, offset, version)
 	case *CommittedReadsResponse:
 		*v, offset, err = readCommittedReadsResponse(body, offset, version)
+	case *committedHeadResponse:
+		v.Sequence, offset, err = readUvarint(body, offset)
+	case *CommittedMessageResult:
+		v.Found, offset, err = readBool(body, offset, "committed message found")
+		if err == nil && v.Found {
+			v.Message, offset, err = readMessage(body, offset, version)
+		}
+		if err == nil && v.Found {
+			v.Message.SyncOnce, offset, err = readBool(body, offset, "committed message sync once")
+		}
+	case *CommittedMessagesResult:
+		v.Messages, offset, err = readMessages(body, offset, version)
+		for index := range v.Messages {
+			if err == nil {
+				v.Messages[index].SyncOnce, offset, err = readBool(body, offset, "committed messages sync once")
+			}
+		}
+		if err == nil {
+			v.ScanHead, offset, err = readUvarint(body, offset)
+		}
+		if err == nil {
+			v.FirstAvailableMessageSeq, offset, err = readUvarint(body, offset)
+		}
+		if err == nil {
+			v.NextAfterMessageSeq, offset, err = readUvarint(body, offset)
+		}
+		if err == nil {
+			v.RetentionGap, offset, err = readBool(body, offset, "committed messages retention gap")
+		}
+		if err == nil {
+			v.HasMore, offset, err = readBool(body, offset, "committed messages has more")
+		}
 	default:
 		return offset, fmt.Errorf("channels: unsupported rpc result target %T", payload)
 	}
