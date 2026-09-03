@@ -51,8 +51,11 @@ It does not own entry protocols, concrete storage, cluster transport, or caches.
 6. A trusted service may scan one Channel in ascending sequence order within a
    fixed committed-head snapshot. Sparse sequences advance normally; logical
    retention returns an explicit gap and first-available sequence even when no
-   retained row remains. If retention advances beyond an older scan head, the
-   terminal page is empty with `retention_gap=true`, not an unavailable error.
+   retained row remains. An initial scan of an unknown, never-created Channel
+   at head zero returns an empty terminal page; a non-zero cursor for that
+   Channel remains absent. If retention advances beyond an older scan head,
+   the terminal page is empty with `retention_gap=true`, not an unavailable
+   error.
 
 ## Invariants and Failure Semantics
 

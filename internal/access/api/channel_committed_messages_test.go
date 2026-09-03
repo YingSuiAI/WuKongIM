@@ -93,6 +93,22 @@ func TestChannelCommittedMessagesReturnsTerminalRetentionGapPastScanHead(t *test
 	}
 }
 
+func TestChannelCommittedMessagesReturnsEmptyTerminalPageForUnknownInitialChannel(t *testing.T) {
+	u := &committedMessagesChannelUsecase{}
+	srv := New(Options{Channels: u, ServiceToken: "secret"})
+	req := httptest.NewRequest(http.MethodPost, "/channel/committed-messages", strings.NewReader(`{"channel_id":"not-created-yet","channel_type":2,"after_message_seq":0,"limit":10,"scan_head":0}`))
+	req.Header.Set("Authorization", "Bearer secret")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	want := `{"scan_head":0,"first_available_message_seq":0,"retention_gap":false,"next_after_message_seq":0,"has_more":false,"messages":[]}`
+	if rec.Code != http.StatusOK || !jsonEqual(rec.Body.String(), want) || u.calls != 1 {
+		t.Fatalf("status=%d calls=%d body=%s", rec.Code, u.calls, rec.Body.String())
+	}
+}
+
 func TestChannelCommittedMessagesMapsBadUnknownAndUnavailable(t *testing.T) {
 	tests := []struct {
 		name string
@@ -106,7 +122,8 @@ func TestChannelCommittedMessagesMapsBadUnknownAndUnavailable(t *testing.T) {
 		{name: "zero limit", body: `{"channel_id":"g","channel_type":2,"limit":0}`, use: &committedMessagesChannelUsecase{}, want: http.StatusBadRequest},
 		{name: "large limit", body: `{"channel_id":"g","channel_type":2,"limit":101}`, use: &committedMessagesChannelUsecase{}, want: http.StatusBadRequest},
 		{name: "after above scan head", body: `{"channel_id":"g","channel_type":2,"after_message_seq":3,"limit":1,"scan_head":2}`, use: &committedMessagesChannelUsecase{}, want: http.StatusBadRequest},
-		{name: "unknown", body: `{"channel_id":"g","channel_type":2,"limit":1}`, use: &committedMessagesChannelUsecase{}, want: http.StatusNotFound},
+		{name: "unknown past zero head", body: `{"channel_id":"g","channel_type":2,"after_message_seq":1,"limit":1}`, use: &committedMessagesChannelUsecase{}, want: http.StatusNotFound},
+		{name: "unknown nonzero scan head", body: `{"channel_id":"g","channel_type":2,"limit":1,"scan_head":1}`, use: &committedMessagesChannelUsecase{}, want: http.StatusNotFound},
 		{name: "unavailable", body: `{"channel_id":"g","channel_type":2,"limit":1}`, use: &committedMessagesChannelUsecase{err: errors.New("offline")}, want: http.StatusServiceUnavailable},
 		{name: "query error", body: `{"channel_id":"g","channel_type":2,"limit":1}`, use: &committedMessagesChannelUsecase{err: channelusecase.ErrCommittedMessagesQuery}, want: http.StatusBadRequest},
 	}

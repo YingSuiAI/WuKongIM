@@ -53,8 +53,14 @@ func (s *Server) handleChannelCommittedMessages(c *gin.Context) {
 		return
 	}
 	if !found {
-		c.JSON(http.StatusNotFound, gin.H{"error": "channel not found"})
-		return
+		if req.AfterMessageSeq != 0 || req.ScanHead != 0 {
+			c.JSON(http.StatusNotFound, gin.H{"error": "channel not found"})
+			return
+		}
+		// Committed head defines an unknown, never-created Channel as head zero.
+		// Its initial recovery page is therefore the empty terminal page for the
+		// same frozen head, while non-zero cursors remain absent.
+		page = channelusecase.CommittedMessagesPage{}
 	}
 	response := committedMessagesResponse{
 		ScanHead: page.ScanHead, FirstAvailableMessageSeq: page.FirstAvailableMessageSeq,
