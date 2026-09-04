@@ -151,6 +151,25 @@ func TestChannelMessageReaderSingleUsesRoutedOneItemBatch(t *testing.T) {
 	}
 }
 
+func TestChannelMessageReaderTreatsMissingEmptyChannelRuntimeAsEmptyPage(t *testing.T) {
+	reader := NewChannelMessageReader(&recordingReadNode{batchResults: []clusterchannels.CommittedReadResult{{
+		Err: channelruntime.ErrChannelNotFound,
+	}}})
+
+	page, err := reader.SyncMessages(context.Background(), message.ChannelMessageQuery{
+		ChannelID: message.ChannelID{ID: "new-empty-channel", Type: 2},
+		Limit:     10,
+		PullMode:  message.PullModeDown,
+	})
+
+	if err != nil {
+		t.Fatalf("SyncMessages() error = %v, want empty page", err)
+	}
+	if page.HasMore || len(page.Messages) != 0 {
+		t.Fatalf("page = %#v, want empty terminal page", page)
+	}
+}
+
 func TestChannelMessageReaderBatchUsesOneAlignedClusterRead(t *testing.T) {
 	node := &recordingReadNode{batchResults: []clusterchannels.CommittedReadResult{
 		{Read: channelstore.ReadCommittedResult{Messages: []channelruntime.Message{{MessageSeq: 2}, {MessageSeq: 3}}}},
@@ -173,6 +192,25 @@ func TestChannelMessageReaderBatchUsesOneAlignedClusterRead(t *testing.T) {
 	}
 	if results[1].Err == nil {
 		t.Fatalf("second result=%+v, want item error", results[1])
+	}
+}
+
+func TestChannelMessageReaderBatchTreatsMissingEmptyChannelRuntimeAsEmptyPage(t *testing.T) {
+	reader := NewChannelMessageReader(&recordingReadNode{batchResults: []clusterchannels.CommittedReadResult{{
+		Err: channelruntime.ErrChannelNotFound,
+	}}})
+
+	results, err := reader.SyncMessagesBatch(context.Background(), []message.ChannelMessageQuery{{
+		ChannelID: message.ChannelID{ID: "new-empty-channel", Type: 2},
+		Limit:     10,
+		PullMode:  message.PullModeDown,
+	}})
+
+	if err != nil {
+		t.Fatalf("SyncMessagesBatch() error = %v", err)
+	}
+	if len(results) != 1 || results[0].Err != nil || results[0].Page.HasMore || len(results[0].Page.Messages) != 0 {
+		t.Fatalf("results = %#v, want one empty terminal page", results)
 	}
 }
 
