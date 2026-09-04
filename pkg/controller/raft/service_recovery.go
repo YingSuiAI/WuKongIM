@@ -62,6 +62,9 @@ func (s *Service) recoverStartup(ctx context.Context, store *raftstore.Store) (r
 		return runStartupState{}, err
 	}
 	stateSnap := s.cfg.StateMachine.Snapshot(ctx)
+	if stateSnap.Revision == 0 && !etcdraft.IsEmptySnap(snap) && len(snap.Data) == 0 {
+		return runStartupState{}, fmt.Errorf("controller/raft: materialized state is missing and raft snapshot %d has no recoverable data", snap.Metadata.Index)
+	}
 	if stateSnap.Revision == 0 && !etcdraft.IsEmptySnap(snap) && len(snap.Data) > 0 {
 		restored, err := state.Decode(snap.Data)
 		if err != nil {
@@ -88,6 +91,14 @@ func (s *Service) recoverStartup(ctx context.Context, store *raftstore.Store) (r
 	replayFrom := store.AppliedIndex() + 1
 	if stateSnap.Revision != 0 {
 		replayFrom = stateSnap.AppliedRaftIndex + 1
+	} else if etcdraft.IsEmptySnap(snap) {
+		// Applied metadata proves that materialization completed, but cannot
+		// replace the missing materialized state. Rebuild from the first entry
+		// still retained by the WAL when no snapshot can provide that state.
+		replayFrom, err = store.FirstIndex()
+		if err != nil {
+			return runStartupState{}, err
+		}
 	}
 	if hs.Commit >= replayFrom {
 		entries, err := store.Entries(replayFrom, hs.Commit+1, 0)

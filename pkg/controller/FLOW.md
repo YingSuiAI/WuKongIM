@@ -36,7 +36,10 @@ not depend on `pkg/cluster`.
    final state file, publishes it, then persists the applied boundary.
 2. Startup restores materialized state or the latest snapshot, replays the
    committed suffix, and automatic/manual compaction snapshots only applied
-   materialized state before trimming covered WAL history.
+   materialized state before trimming covered WAL history. If materialized
+   state is missing and no snapshot exists, startup rebuilds from the first
+   retained WAL entry even when applied metadata is ahead; a retained snapshot
+   boundary without recoverable snapshot data fails closed.
 3. Planner, lifecycle, and task APIs propose versioned fenced commands through
    Raft, while non-voter mirrors refresh the complete state file and watchers
    publish latest-state wakeups.
@@ -74,6 +77,9 @@ not depend on `pkg/cluster`.
   Failed Slot tasks retain their proven phase and may only resume forward.
 - Watch buffers retain the newest visible state under pressure; bounded
   observers and diagnostics must never stall apply.
+- Public Slot move and leader-transfer admission opens only after the complete
+  Runtime startup succeeds. Starting, stopping, stopped, and failed-start
+  runtimes fail closed before reading cached state or proposing work.
 
 ## Read First
 

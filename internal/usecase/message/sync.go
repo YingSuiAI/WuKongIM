@@ -171,7 +171,7 @@ func (a *App) SyncChannelMessages(ctx context.Context, query SyncChannelMessages
 		return SyncChannelMessagesResult{}, err
 	}
 	page, err := a.reader.SyncMessages(ctx, prepared.query)
-	if errors.Is(err, metadb.ErrNotFound) {
+	if isEmptyChannelRuntime(err) {
 		return SyncChannelMessagesResult{Messages: []SyncedMessage{}}, nil
 	}
 	if err != nil {
@@ -223,7 +223,7 @@ func (a *App) SyncChannelMessagesBatch(ctx context.Context, query SyncChannelMes
 		item := &result.Items[index]
 		item.ChannelID = query.Items[index].ChannelID
 		item.ChannelType = query.Items[index].ChannelType
-		if errors.Is(readResult.Err, metadb.ErrNotFound) {
+		if isEmptyChannelRuntime(readResult.Err) {
 			item.Result.Messages = []SyncedMessage{}
 			continue
 		}
@@ -237,6 +237,10 @@ func (a *App) SyncChannelMessagesBatch(ctx context.Context, query SyncChannelMes
 		}
 	}
 	return result, nil
+}
+
+func isEmptyChannelRuntime(err error) bool {
+	return errors.Is(err, metadb.ErrNotFound) || errors.Is(err, ErrChannelNotFound)
 }
 
 func (a *App) prepareSyncChannelMessages(ctx context.Context, query SyncChannelMessagesQuery) (preparedSyncChannelMessages, error) {

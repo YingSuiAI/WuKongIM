@@ -394,7 +394,9 @@ readiness as diagnostics; it is not a distributed authority source.
 
 ```text
 Stop(ctx)
-  -> mark stopping, reject new foreground calls, and immediately invalidate the current preferred-leader intent generation
+  -> mark stopping, reject new foreground calls, atomically publish RoutesReady/SlotsReady/ChannelsReady=false, and immediately invalidate the current preferred-leader intent generation
+  -> keep later in-flight control snapshots, Slot observations, and restore runtime publications not-ready while stopping
+  -> reject restore resume and Channel background-loop restarts after the stopping fence
   -> stop low-frequency Controller health reporting
   -> stop Controller watch loop
   -> stop Controller task reconciliation loop
@@ -767,10 +769,13 @@ retention floors, newest display messages, and the current UID's latest
 committed ordinary sender-index sequence. The Leader validates route epochs and
 terminal channel state. For locally loaded quorum channels, one bounded reactor
 probe per Leader batch supplies the live HW because durable HW checkpoints are
-intentionally coalesced; unloaded channels fall back to durable checkpoint HW,
-while `MinISR=1` leaders retain their durable LEO rule. Channel-not-found maps
-to delete; temporary route, leadership, or readiness errors stay item-scoped
-for unresolved retry.
+intentionally coalesced. An unloaded quorum Leader whose durable HW trails its
+LEO applies the exact Slot-authoritative metadata through a bounded activation
+batch, probes the recovered runtime under the same channel and leader epochs,
+and retries the head read; a current durable checkpoint remains readable without
+activation. `MinISR=1` leaders retain their durable LEO rule. Channel-not-found
+maps to delete; temporary route, leadership, or readiness errors stay
+item-scoped for unresolved retry.
 
 `WithProposer` and `WithChannels` are public override options for tests, smoke harnesses, and app-level composition. If callers do not provide them, `Node.Start` creates a default Controller runtime, proposer, and Channel runtime service, backs Channel runtime with the message DB under `DataDir/channellog`, wires the node-local data-plane lease as Channel runtime append admission, registers Channel runtime replication/append-forward handlers on the default node RPC transport, and owns the Channel runtime tick loop plus default store factory cleanup. The default proposer is backed by a real local Slot Multi-Raft runtime, durable Slot Raft log storage under `DataDir/slotraft`, metadata FSM storage under `DataDir/slotmeta`, and cluster typed RPC transport for multi-replica Slot Raft traffic.
 The default Slot runtime also owns a narrow Slot proxy for authoritative channel

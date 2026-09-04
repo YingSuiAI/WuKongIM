@@ -305,11 +305,21 @@ func (s *session) LoadOrStoreValue(key string, value any) (actual any, loaded bo
 		return nil, false
 	}
 	if isHotValueKey(key) {
-		if actual, ok := s.hotValue(key); ok && actual != nil {
-			return actual, true
+		for {
+			current := s.hotValues.Load()
+			if actual, loaded := current.load(key); loaded {
+				return actual, true
+			}
+
+			next := sessionHotValues{}
+			if current != nil {
+				next = *current
+			}
+			next.set(key, value)
+			if s.hotValues.CompareAndSwap(current, &next) {
+				return value, false
+			}
 		}
-		s.setHotValue(key, value)
-		return value, false
 	}
 	return s.values.LoadOrStore(key, value)
 }
@@ -340,7 +350,8 @@ func (s *session) hotValue(key string) (any, bool) {
 	if values == nil {
 		return nil, true
 	}
-	return values.value(key), true
+	value, _ := values.load(key)
+	return value, true
 }
 
 func isHotValueKey(key string) bool {
@@ -404,75 +415,75 @@ func (v *sessionHotValues) set(key string, value any) {
 	}
 }
 
-func (v *sessionHotValues) value(key string) any {
+func (v *sessionHotValues) load(key string) (any, bool) {
 	if v == nil {
-		return nil
+		return nil, false
 	}
 	switch key {
 	case hotSessionValueUID:
 		if v.uidSet {
-			return v.uid
+			return v.uid, true
 		}
 	case hotSessionValueDeviceID:
 		if v.deviceIDSet {
-			return v.deviceID
+			return v.deviceID, true
 		}
 	case hotSessionValueAppInstanceID:
 		if v.appInstanceIDSet {
-			return v.appInstanceID
+			return v.appInstanceID, true
 		}
 	case hotSessionValueDeviceSessionID:
 		if v.deviceSessionIDSet {
-			return v.deviceSessionID
+			return v.deviceSessionID, true
 		}
 	case hotSessionValueIMSessionID:
 		if v.imSessionIDSet {
-			return v.imSessionID
+			return v.imSessionID, true
 		}
 	case hotSessionValueInstallationGeneration:
 		if v.installationGenerationSet {
-			return v.installationGeneration
+			return v.installationGeneration, true
 		}
 	case hotSessionValueSessionGeneration:
 		if v.sessionGenerationSet {
-			return v.sessionGeneration
+			return v.sessionGeneration, true
 		}
 	case hotSessionValueAuthorizationFence:
 		if v.authorizationFenceSet {
-			return v.authorizationFence
+			return v.authorizationFence, true
 		}
 	case hotSessionValueDeviceFlag:
 		if v.deviceFlagSet {
-			return v.deviceFlag
+			return v.deviceFlag, true
 		}
 	case hotSessionValueDeviceLevel:
 		if v.deviceLevelSet {
-			return v.deviceLevel
+			return v.deviceLevel, true
 		}
 	case hotSessionValueProtocolVersion:
 		if v.protocolVersionSet {
-			return v.protocolVersion
+			return v.protocolVersion, true
 		}
 	case hotSessionValueProtocolName:
 		if v.protocolNameSet {
-			return v.protocolName
+			return v.protocolName, true
 		}
 	case hotSessionValueEncryptionEnabled:
 		if v.encryptionEnabledSet {
-			return v.encryptionEnabled
+			return v.encryptionEnabled, true
 		}
 	case hotSessionValueAESKey:
 		if v.aesKeySet {
-			return v.aesKey
+			return v.aesKey, true
 		}
 	case hotSessionValueAESIV:
 		if v.aesIVSet {
-			return v.aesIV
+			return v.aesIV, true
 		}
 	case hotSessionValueCrypto:
 		if v.cryptoSet {
-			return v.crypto
+			return v.crypto, true
 		}
 	}
-	return nil
+	return nil, false
 }

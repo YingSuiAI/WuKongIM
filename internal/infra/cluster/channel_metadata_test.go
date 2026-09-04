@@ -282,6 +282,47 @@ func TestChannelMetadataStoreMapsAuthoritativePermissionBatch(t *testing.T) {
 	}
 }
 
+func TestChannelMetadataStoreRejectsInvalidPermissionReadsWithoutMisaligningValidResults(t *testing.T) {
+	node := &recordingChannelMetadataNode{permissionBatchResults: []slotproxy.PermissionMetadataReadResult{
+		{Found: true, Channel: metadb.Channel{ChannelID: "g1", ChannelType: 2, Ban: 1}},
+		{Value: true},
+	}}
+	store := NewChannelMetadataStore(node, nil, nil)
+	reads := []messageusecase.PermissionRead{
+		{Kind: messageusecase.PermissionReadChannel, ChannelID: "g1", ChannelType: 2},
+		{Kind: messageusecase.PermissionReadKind(255), ChannelID: "invalid", ChannelType: 2},
+		{Kind: messageusecase.PermissionReadSubscriberContains, ChannelID: "g1", ChannelType: 2, UID: "u1"},
+	}
+
+	results := store.ReadPermissionsBatch(context.Background(), reads)
+
+	if len(results) != 3 || !results[0].Found || results[0].Channel.Ban != 1 || !errors.Is(results[1].Err, metadb.ErrInvalidArgument) || !results[2].Value {
+		t.Fatalf("ReadPermissionsBatch() = %#v, want valid facts aligned around invalid input", results)
+	}
+	if got, want := node.permissionBatchReads, []slotproxy.PermissionMetadataRead{
+		{Kind: slotproxy.PermissionMetadataReadChannel, ChannelID: "g1", ChannelType: 2},
+		{Kind: slotproxy.PermissionMetadataReadSubscriberContains, ChannelID: "g1", ChannelType: 2, UID: "u1"},
+	}; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("proxy reads = %#v, want only valid reads %#v", got, want)
+	}
+}
+
+func TestChannelMetadataStoreDoesNotDispatchAllInvalidPermissionBatch(t *testing.T) {
+	node := &recordingChannelMetadataNode{}
+	store := NewChannelMetadataStore(node, nil, nil)
+
+	results := store.ReadPermissionsBatch(context.Background(), []messageusecase.PermissionRead{{
+		Kind: messageusecase.PermissionReadKind(255), ChannelID: "invalid", ChannelType: 2,
+	}})
+
+	if len(results) != 1 || !errors.Is(results[0].Err, metadb.ErrInvalidArgument) {
+		t.Fatalf("ReadPermissionsBatch() = %#v, want invalid argument", results)
+	}
+	if node.permissionBatchReads != nil {
+		t.Fatalf("proxy reads = %#v, want no dispatch", node.permissionBatchReads)
+	}
+}
+
 func TestChannelMetadataStoreRejectsOrdinaryReadsWithoutAuthoritativeCapability(t *testing.T) {
 	node := &localOnlyChannelMetadataNode{}
 	store := NewChannelMetadataStore(node, nil, nil)

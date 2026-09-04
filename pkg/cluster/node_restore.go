@@ -42,7 +42,16 @@ func (n *Node) ResumeLocalRestoreRuntime() {
 	if n == nil {
 		return
 	}
+	// Linearize the restore-cache transition with Stop's lifecycle fence. The
+	// individual loop starters repeat the stopping check under their own locks
+	// so Stop cannot be followed by a late background-loop publication.
+	n.mu.RLock()
+	if n.stopping.Load() {
+		n.mu.RUnlock()
+		return
+	}
 	n.messageEventStreamCache.resumeAfterRestore()
+	n.mu.RUnlock()
 	n.startChannelTickLoop()
 	n.startChannelRetentionGCLoop()
 	n.startChannelMigrationLoop()

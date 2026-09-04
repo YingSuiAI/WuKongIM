@@ -47,7 +47,7 @@ func TestServiceReadCommittedMessageRejectsUncommittedAndMismatchedIdentity(t *t
 	require.NoError(t, err)
 	_, err = store.AppendLeader(context.Background(), channelstore.AppendLeaderRequest{Records: []ch.Record{{ID: 71}, {ID: 72}}})
 	require.NoError(t, err)
-	runtime := &conversationHeadProbeRuntime{fakeRuntime: &fakeRuntime{}, probe: ch.RuntimeProbeResult{Channels: []ch.RuntimeProbeChannel{{
+	runtime := &runtimeHWProbeRuntime{fakeRuntime: &fakeRuntime{}, probe: ch.RuntimeProbeResult{Channels: []ch.RuntimeProbeChannel{{
 		ChannelID: id, ChannelEpoch: 2, LeaderEpoch: 3, Role: ch.RoleLeader, Status: ch.StatusActive, LEO: 2, HW: 1,
 	}}}}
 	svc, err := NewService(Config{
@@ -145,14 +145,6 @@ func TestServiceReadCommittedMessageUnknownBadAndUnavailableSemantics(t *testing
 		require.ErrorIs(t, err, ch.ErrInvalidConfig)
 	}
 
-	id := ch.ChannelID{ID: "quorum-no-probe", Type: 2}
-	unavailable, err := NewService(Config{
-		Runtime: &fakeRuntime{}, LocalNode: 1, Store: channelstore.NewMemoryFactory(),
-		MetaSource: NewStaticMetaSource([]ch.Meta{committedMessageMeta(id, 2)}),
-	})
-	require.NoError(t, err)
-	_, _, err = unavailable.ReadCommittedMessage(context.Background(), id, 1, 1)
-	require.ErrorIs(t, err, ch.ErrNotReady)
 }
 
 func TestCommittedMessageCodecRejectsLegacyAndTrailingFrames(t *testing.T) {

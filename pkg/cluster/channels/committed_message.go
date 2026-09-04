@@ -94,7 +94,7 @@ func (s *Service) handleForwardCommittedMessage(ctx context.Context, req Committ
 		ExpectedChannelEpoch: req.ExpectedChannelEpoch, ExpectedLeaderEpoch: req.ExpectedLeaderEpoch,
 		ExpectedMinISR: req.ExpectedMinISR,
 	}
-	committed, err := s.readCommittedFrontier(ctx, headReq, store)
+	committed, err := s.readCommittedFrontier(ctx, headReq, meta, store)
 	if err != nil {
 		return CommittedMessageResult{}, err
 	}

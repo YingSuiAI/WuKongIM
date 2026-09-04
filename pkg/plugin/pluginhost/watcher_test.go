@@ -1,12 +1,22 @@
 package pluginhost
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 )
+
+func TestWatcherImmediateStopUsesStableDoneChannel(t *testing.T) {
+	dir := t.TempDir()
+	for range 64 {
+		watcher := NewWatcher(WatcherOptions{Dir: dir})
+		require.NoError(t, watcher.Start(context.Background()))
+		watcher.Stop()
+	}
+}
 
 func TestWatcherDebouncerCoalescesDuplicatePluginEvents(t *testing.T) {
 	dir := t.TempDir()

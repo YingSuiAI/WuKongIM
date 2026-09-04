@@ -12,6 +12,8 @@ import (
 	managementusecase "github.com/WuKongIM/WuKongIM/internal/usecase/management"
 	channelruntime "github.com/WuKongIM/WuKongIM/pkg/channel"
 	channelstore "github.com/WuKongIM/WuKongIM/pkg/channel/store"
+	clusterpkg "github.com/WuKongIM/WuKongIM/pkg/cluster"
+	clusterchannels "github.com/WuKongIM/WuKongIM/pkg/cluster/channels"
 	"github.com/WuKongIM/WuKongIM/pkg/cluster/control"
 	metadb "github.com/WuKongIM/WuKongIM/pkg/db/meta"
 	goruntimeregistry "github.com/WuKongIM/WuKongIM/pkg/goroutine"
@@ -234,16 +236,30 @@ func (r *ManagementMessageReader) MaxMessageSeqForMeta(ctx context.Context, meta
 	if r == nil || r.node == nil {
 		return 0, nil
 	}
-	read, err := r.node.ReadChannelCommitted(ctx, channelruntime.ChannelID{ID: meta.ChannelID, Type: uint8(meta.ChannelType)}, channelstore.ReadCommittedRequest{
-		FromSeq:  maxUint64(),
-		MaxSeq:   maxUint64(),
-		Limit:    1,
-		MaxBytes: maxInt(),
-		Reverse:  true,
-	})
+	batchNode, ok := r.node.(channelMessageBatchReadNode)
+	if !ok {
+		return 0, mapAppendError(clusterpkg.ErrRouteNotReady)
+	}
+	results, err := batchNode.ReadChannelCommittedBatch(ctx, []clusterchannels.CommittedRead{{
+		ChannelID: channelruntime.ChannelID{ID: meta.ChannelID, Type: uint8(meta.ChannelType)},
+		Request: channelstore.ReadCommittedRequest{
+			FromSeq:  maxUint64(),
+			MaxSeq:   maxUint64(),
+			Limit:    1,
+			MaxBytes: maxInt(),
+			Reverse:  true,
+		},
+	}})
 	if err != nil {
 		return 0, mapAppendError(err)
 	}
+	if len(results) != 1 {
+		return 0, mapAppendError(fmt.Errorf("management: routed tail result count %d, want 1", len(results)))
+	}
+	if results[0].Err != nil {
+		return 0, mapAppendError(results[0].Err)
+	}
+	read := results[0].Read
 	if len(read.Messages) == 0 {
 		return 0, nil
 	}

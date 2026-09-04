@@ -65,7 +65,8 @@ func (s *Service) handleForwardCommittedHead(ctx context.Context, req CommittedH
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	if err := s.validateCommittedHeadRoute(ctx, req); err != nil {
+	meta, err := s.resolveCommittedHeadRoute(ctx, req)
+	if err != nil {
 		return 0, err
 	}
 	if s.store == nil {
@@ -76,7 +77,7 @@ func (s *Service) handleForwardCommittedHead(ctx context.Context, req CommittedH
 		return 0, err
 	}
 	defer func() { _ = store.Close() }()
-	committed, err := s.readCommittedFrontier(ctx, req, store)
+	committed, err := s.readCommittedFrontier(ctx, req, meta, store)
 	if err != nil {
 		return 0, err
 	}
@@ -86,24 +87,33 @@ func (s *Service) handleForwardCommittedHead(ctx context.Context, req CommittedH
 	return committed, nil
 }
 
-func (s *Service) readCommittedFrontier(ctx context.Context, req CommittedHeadRequest, store channelstore.ChannelStore) (uint64, error) {
+func (s *Service) readCommittedFrontier(ctx context.Context, req CommittedHeadRequest, meta ch.Meta, store channelstore.ChannelStore) (uint64, error) {
 	state, err := store.Load(ctx)
 	if err != nil {
 		return 0, err
 	}
 	committed := state.HW
+	liveHW, loaded, err := s.readCommittedHeadRuntime(ctx, req)
+	if err != nil {
+		return 0, err
+	}
 	if req.ExpectedMinISR == 1 {
 		committed = state.LEO
-	} else {
-		liveHW, loaded, checked, err := s.readCommittedHeadRuntime(ctx, req)
-		if err != nil {
-			return 0, err
+		if loaded {
+			committed = maxUint64Value(committed, liveHW)
 		}
-		if !checked {
-			// A quorum Channel's durable HW may trail the loaded leader. Without
-			// an exact runtime probe, returning it as the current committed head
-			// would silently lower the authoritative frontier.
-			return 0, ch.ErrNotReady
+	} else {
+		if !loaded && state.HW < state.LEO {
+			if err := s.runtime.ApplyMetaContext(ctx, meta); err != nil {
+				return 0, err
+			}
+			liveHW, loaded, err = s.readCommittedHeadRuntime(ctx, req)
+			if err != nil {
+				return 0, err
+			}
+			if !loaded {
+				return 0, ch.ErrNotReady
+			}
 		}
 		if loaded {
 			committed = maxUint64Value(committed, liveHW)
@@ -123,58 +133,59 @@ func (s *Service) readCommittedFrontier(ctx context.Context, req CommittedHeadRe
 
 // readCommittedHeadRuntime distinguishes a loaded leader from an unloaded
 // channel so a coalesced durable HW checkpoint cannot lower the captured head.
-func (s *Service) readCommittedHeadRuntime(ctx context.Context, req CommittedHeadRequest) (hw uint64, loaded bool, checked bool, err error) {
-	probeRuntime, ok := s.runtime.(conversationRuntimeProbe)
-	if !ok {
-		return 0, false, false, nil
-	}
-	probe, err := probeRuntime.RuntimeProbe(ctx, ch.RuntimeSelector{ChannelIDs: []ch.ChannelID{req.ChannelID}})
+func (s *Service) readCommittedHeadRuntime(ctx context.Context, req CommittedHeadRequest) (hw uint64, loaded bool, err error) {
+	probe, err := s.runtime.RuntimeProbe(ctx, ch.RuntimeSelector{ChannelIDs: []ch.ChannelID{req.ChannelID}})
 	if err != nil {
-		return 0, false, true, err
+		return 0, false, err
 	}
 	if len(probe.Channels) == 1 && len(probe.Missing) == 0 && probe.Channels[0].ChannelID == req.ChannelID {
 		channel := probe.Channels[0]
 		switch {
 		case channel.Role != ch.RoleLeader:
-			return 0, false, true, ch.ErrNotLeader
+			return 0, false, ch.ErrNotLeader
 		case channel.Status != ch.StatusActive:
-			return 0, false, true, ch.ErrNotReady
+			return 0, false, ch.ErrNotReady
 		case channel.ChannelEpoch != req.ExpectedChannelEpoch || channel.LeaderEpoch != req.ExpectedLeaderEpoch:
-			return 0, false, true, ch.ErrStaleMeta
+			return 0, false, ch.ErrStaleMeta
 		case channel.HW > channel.LEO:
-			return 0, false, true, ch.ErrNotReady
+			return 0, false, ch.ErrNotReady
 		default:
-			return channel.HW, true, true, nil
+			return channel.HW, true, nil
 		}
 	}
 	if len(probe.Channels) == 0 && len(probe.Missing) == 1 && probe.Missing[0] == req.ChannelID {
-		return 0, false, true, nil
+		return 0, false, nil
 	}
-	return 0, false, true, ch.ErrNotReady
+	return 0, false, ch.ErrNotReady
 }
 
 func (s *Service) validateCommittedHeadRoute(ctx context.Context, req CommittedHeadRequest) error {
+	_, err := s.resolveCommittedHeadRoute(ctx, req)
+	return err
+}
+
+func (s *Service) resolveCommittedHeadRoute(ctx context.Context, req CommittedHeadRequest) (ch.Meta, error) {
 	if s == nil || req.ChannelID.ID == "" || req.ChannelID.Type == 0 || req.ExpectedLeader == 0 ||
 		req.ExpectedChannelEpoch == 0 || req.ExpectedLeaderEpoch == 0 || req.ExpectedMinISR < 1 {
-		return ch.ErrInvalidConfig
+		return ch.Meta{}, ch.ErrInvalidConfig
 	}
 	meta, ok, err := s.resolveReadMeta(ctx, req.ChannelID)
 	if errors.Is(err, ch.ErrChannelNotFound) || errors.Is(err, metadb.ErrNotFound) {
-		return ch.ErrNotReady
+		return ch.Meta{}, ch.ErrNotReady
 	}
 	if err != nil {
-		return err
+		return ch.Meta{}, err
 	}
 	if !ok || !validCommittedHeadMeta(req.ChannelID, meta) {
-		return ch.ErrNotReady
+		return ch.Meta{}, ch.ErrNotReady
 	}
 	if meta.Leader != s.localNode || req.ExpectedLeader != s.localNode {
-		return ch.ErrNotLeader
+		return ch.Meta{}, ch.ErrNotLeader
 	}
 	if meta.Epoch != req.ExpectedChannelEpoch || meta.LeaderEpoch != req.ExpectedLeaderEpoch || meta.MinISR != req.ExpectedMinISR {
-		return ch.ErrStaleMeta
+		return ch.Meta{}, ch.ErrStaleMeta
 	}
-	return nil
+	return meta, nil
 }
 
 // validCommittedHeadMeta narrows append-authority validation for a scalar

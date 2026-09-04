@@ -83,6 +83,118 @@ func TestStateMachineCreateChannelMigrationTaskWithRuntimeGuardRejectsStaleMeta(
 	}
 }
 
+func TestStateMachineCommitTimeStaleNoopPersistsAppliedIndexAcrossRestart(t *testing.T) {
+	ctx := context.Background()
+	dbPath := t.TempDir()
+	db := openTestDBAt(t, dbPath)
+	sm := mustNewStateMachine(t, db, 11)
+	first := fsmTestChannelMigrationTask("task-first", "channel-commit-stale-watermark")
+	fsmApplyOK(t, ctx, sm, 1, EncodeCreateChannelMigrationTaskCommand(first))
+
+	conflict := first
+	conflict.TaskID = "task-conflict"
+	result, err := sm.Apply(ctx, multiraft.Command{
+		SlotID: 11,
+		Index:  2,
+		Term:   1,
+		Data:   EncodeCreateChannelMigrationTaskCommand(conflict),
+	})
+	if err != nil {
+		t.Fatalf("Apply(conflicting task create) error = %v", err)
+	}
+	if got := string(result); got != ApplyResultStaleMeta {
+		t.Fatalf("conflicting task create result = %q, want %q", got, ApplyResultStaleMeta)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("Close() before restart error = %v", err)
+	}
+
+	reopened := openTestDBAt(t, dbPath)
+	restarted := mustNewStateMachine(t, reopened, 11)
+	durable := restarted.(multiraft.DurableAppliedStateMachine)
+	if got, err := durable.DurableAppliedIndex(ctx); err != nil || got != 2 {
+		t.Fatalf("DurableAppliedIndex() after restart = %d, %v; want 2, nil", got, err)
+	}
+	stored, err := reopened.ForSlot(11).GetChannelMigrationTask(ctx, first.ChannelID, first.ChannelType, first.TaskID)
+	if err != nil {
+		t.Fatalf("GetChannelMigrationTask(first) after restart error = %v", err)
+	}
+	if stored.TaskID != first.TaskID {
+		t.Fatalf("stored task after conflicting no-op = %#v, want task %q", stored, first.TaskID)
+	}
+	if _, err := reopened.ForSlot(11).GetChannelMigrationTask(ctx, conflict.ChannelID, conflict.ChannelType, conflict.TaskID); !errors.Is(err, metadb.ErrNotFound) {
+		t.Fatalf("GetChannelMigrationTask(conflict) after restart error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestStateMachineBatchCommitTimeStaleInMiddlePersistsTailAcrossRestart(t *testing.T) {
+	ctx := context.Background()
+	dbPath := t.TempDir()
+	db := openTestDBAt(t, dbPath)
+	sm := mustNewStateMachine(t, db, 11)
+	first := fsmTestChannelMigrationTask("task-batch-first", "channel-batch-commit-stale-watermark")
+	fsmApplyOK(t, ctx, sm, 1, EncodeCreateChannelMigrationTaskCommand(first))
+
+	conflict := first
+	conflict.TaskID = "task-batch-conflict"
+	results, err := sm.(multiraft.BatchStateMachine).ApplyBatch(ctx, []multiraft.Command{
+		{
+			SlotID: 11,
+			Index:  2,
+			Term:   1,
+			Data:   EncodeUpsertUserCommand(metadb.User{UID: "batch-before-stale", Token: "before"}),
+		},
+		{
+			SlotID: 11,
+			Index:  3,
+			Term:   1,
+			Data:   EncodeCreateChannelMigrationTaskCommand(conflict),
+		},
+		{
+			SlotID: 11,
+			Index:  4,
+			Term:   1,
+			Data:   EncodeUpsertChannelCommand(metadb.Channel{ChannelID: "batch-after-stale", ChannelType: 1, Ban: 1}),
+		},
+	})
+	if err != nil {
+		t.Fatalf("ApplyBatch(valid, stale, valid) error = %v", err)
+	}
+	wantResults := []string{ApplyResultOK, ApplyResultStaleMeta, ApplyResultOK}
+	for i, want := range wantResults {
+		if got := string(results[i]); got != want {
+			t.Fatalf("ApplyBatch result[%d] = %q, want %q", i, got, want)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("Close() before restart error = %v", err)
+	}
+
+	reopened := openTestDBAt(t, dbPath)
+	restarted := mustNewStateMachine(t, reopened, 11)
+	durable := restarted.(multiraft.DurableAppliedStateMachine)
+	if got, err := durable.DurableAppliedIndex(ctx); err != nil || got != 4 {
+		t.Fatalf("DurableAppliedIndex() after restart = %d, %v; want 4, nil", got, err)
+	}
+	user, err := reopened.ForSlot(11).GetUser(ctx, "batch-before-stale")
+	if err != nil {
+		t.Fatalf("GetUser(before stale) after restart error = %v", err)
+	}
+	if user.Token != "before" {
+		t.Fatalf("user before stale after restart = %#v", user)
+	}
+	channel, err := reopened.ForSlot(11).GetChannel(ctx, "batch-after-stale", 1)
+	if err != nil {
+		t.Fatalf("GetChannel(after stale) after restart error = %v", err)
+	}
+	if channel.Ban != 1 {
+		t.Fatalf("channel after stale after restart = %#v", channel)
+	}
+	if _, err := reopened.ForSlot(11).GetChannelMigrationTask(ctx, conflict.ChannelID, conflict.ChannelType, conflict.TaskID); !errors.Is(err, metadb.ErrNotFound) {
+		t.Fatalf("GetChannelMigrationTask(conflict) after restart error = %v, want ErrNotFound", err)
+	}
+}
+
 func TestStateMachineChannelSetFenceRejectsForeignRuntimeFence(t *testing.T) {
 	ctx := context.Background()
 	db := openTestDB(t)

@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/WuKongIM/WuKongIM/internal/usecase/message"
@@ -151,6 +152,22 @@ func TestChannelMessageReaderSingleUsesRoutedOneItemBatch(t *testing.T) {
 	}
 }
 
+func TestChannelMessageReaderPreservesMissingChannelRuntimeError(t *testing.T) {
+	reader := NewChannelMessageReader(&recordingReadNode{batchResults: []clusterchannels.CommittedReadResult{{
+		Err: channelruntime.ErrChannelNotFound,
+	}}})
+
+	_, err := reader.SyncMessages(context.Background(), message.ChannelMessageQuery{
+		ChannelID: message.ChannelID{ID: "new-empty-channel", Type: 2},
+		Limit:     10,
+		PullMode:  message.PullModeDown,
+	})
+
+	if !errors.Is(err, message.ErrChannelNotFound) {
+		t.Fatalf("SyncMessages() error = %v, want %v", err, message.ErrChannelNotFound)
+	}
+}
+
 func TestChannelMessageReaderBatchUsesOneAlignedClusterRead(t *testing.T) {
 	node := &recordingReadNode{batchResults: []clusterchannels.CommittedReadResult{
 		{Read: channelstore.ReadCommittedResult{Messages: []channelruntime.Message{{MessageSeq: 2}, {MessageSeq: 3}}}},
@@ -173,6 +190,25 @@ func TestChannelMessageReaderBatchUsesOneAlignedClusterRead(t *testing.T) {
 	}
 	if results[1].Err == nil {
 		t.Fatalf("second result=%+v, want item error", results[1])
+	}
+}
+
+func TestChannelMessageReaderBatchPreservesMissingChannelRuntimeError(t *testing.T) {
+	reader := NewChannelMessageReader(&recordingReadNode{batchResults: []clusterchannels.CommittedReadResult{{
+		Err: channelruntime.ErrChannelNotFound,
+	}}})
+
+	results, err := reader.SyncMessagesBatch(context.Background(), []message.ChannelMessageQuery{{
+		ChannelID: message.ChannelID{ID: "new-empty-channel", Type: 2},
+		Limit:     10,
+		PullMode:  message.PullModeDown,
+	}})
+
+	if err != nil {
+		t.Fatalf("SyncMessagesBatch() error = %v", err)
+	}
+	if len(results) != 1 || !errors.Is(results[0].Err, message.ErrChannelNotFound) {
+		t.Fatalf("results = %#v, want one channel-not-found error", results)
 	}
 }
 

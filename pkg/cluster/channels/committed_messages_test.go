@@ -72,7 +72,7 @@ func TestServiceReadCommittedMessagesExcludesPresentUncommittedSuffix(t *testing
 	id := ch.ChannelID{ID: "committed-only", Type: 2}
 	base := channelstore.NewMemoryFactory()
 	appendCommittedMessageRecords(t, base, id, 3)
-	runtime := &conversationHeadProbeRuntime{fakeRuntime: &fakeRuntime{}, probe: ch.RuntimeProbeResult{Channels: []ch.RuntimeProbeChannel{{
+	runtime := &runtimeHWProbeRuntime{fakeRuntime: &fakeRuntime{}, probe: ch.RuntimeProbeResult{Channels: []ch.RuntimeProbeChannel{{
 		ChannelID: id, ChannelEpoch: 2, LeaderEpoch: 3, Role: ch.RoleLeader, Status: ch.StatusActive, LEO: 3, HW: 2,
 	}}}}
 	svc, err := NewService(Config{
@@ -222,16 +222,10 @@ func TestServiceReadCommittedMessagesBadUnknownAndUnavailableSemantics(t *testin
 		require.ErrorIs(t, err, ch.ErrInvalidConfig)
 	}
 
-	id := ch.ChannelID{ID: "quorum-no-probe", Type: 2}
-	unavailable, err := NewService(Config{Runtime: &fakeRuntime{}, LocalNode: 1, Store: channelstore.NewMemoryFactory(), MetaSource: NewStaticMetaSource([]ch.Meta{committedMessageMeta(id, 2)})})
-	require.NoError(t, err)
-	_, _, err = unavailable.ReadCommittedMessages(context.Background(), id, 0, 1, 0)
-	require.ErrorIs(t, err, ch.ErrNotReady)
-
-	id = ch.ChannelID{ID: "head-ahead", Type: 2}
+	id := ch.ChannelID{ID: "head-ahead", Type: 2}
 	base := channelstore.NewMemoryFactory()
 	appendCommittedMessageRecords(t, base, id, 2)
-	unavailable, err = NewService(Config{Runtime: &fakeRuntime{}, LocalNode: 1, Store: base, MetaSource: NewStaticMetaSource([]ch.Meta{committedMessageMeta(id, 1)})})
+	unavailable, err := NewService(Config{Runtime: &fakeRuntime{}, LocalNode: 1, Store: base, MetaSource: NewStaticMetaSource([]ch.Meta{committedMessageMeta(id, 1)})})
 	require.NoError(t, err)
 	_, _, err = unavailable.ReadCommittedMessages(context.Background(), id, 1, 1, 3)
 	require.ErrorIs(t, err, ch.ErrNotReady)
