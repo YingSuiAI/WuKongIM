@@ -106,20 +106,25 @@ func TestSyncChannelMessagesFailsClosedOnMembershipAuthorityErrorBeforeMessageRe
 }
 
 func TestSyncChannelMessagesReturnsEmptyForMissingChannelRuntime(t *testing.T) {
-	app := New(Options{Reader: &recordingChannelMessageReader{err: metadb.ErrNotFound}, Memberships: liveSyncMembershipStore(), MembershipAuthority: allowLiveMembershipAuthority()})
+	for _, readerErr := range []error{metadb.ErrNotFound, ErrChannelNotFound} {
+		readerErr := readerErr
+		t.Run(readerErr.Error(), func(t *testing.T) {
+			app := New(Options{Reader: &recordingChannelMessageReader{err: readerErr}, Memberships: liveSyncMembershipStore(), MembershipAuthority: allowLiveMembershipAuthority()})
 
-	result, err := app.SyncChannelMessages(context.Background(), SyncChannelMessagesQuery{
-		LoginUID:    "u1",
-		ChannelID:   "g1",
-		ChannelType: 2,
-		Limit:       30,
-	})
+			result, err := app.SyncChannelMessages(context.Background(), SyncChannelMessagesQuery{
+				LoginUID:    "u1",
+				ChannelID:   "g1",
+				ChannelType: 2,
+				Limit:       30,
+			})
 
-	if err != nil {
-		t.Fatalf("SyncChannelMessages() error = %v", err)
-	}
-	if result.More || len(result.Messages) != 0 {
-		t.Fatalf("result = %#v, want empty page", result)
+			if err != nil {
+				t.Fatalf("SyncChannelMessages() error = %v", err)
+			}
+			if result.More || len(result.Messages) != 0 {
+				t.Fatalf("result = %#v, want empty page", result)
+			}
+		})
 	}
 }
 
@@ -195,6 +200,29 @@ func TestSyncChannelMessagesBatchValidatesMembershipsBeforeOneGroupedRead(t *tes
 	}
 	if len(result.Items) != 2 || result.Items[0].Err != nil || result.Items[1].Err != nil {
 		t.Fatalf("result=%+v, want two aligned successes", result)
+	}
+}
+
+func TestSyncChannelMessagesBatchReturnsEmptyForMissingChannelRuntime(t *testing.T) {
+	reader := &recordingChannelMessageReader{batchResults: []ChannelMessageReadResult{{Err: ErrChannelNotFound}}}
+	app := New(Options{
+		Reader:              reader,
+		Memberships:         liveSyncMembershipStore(),
+		MembershipAuthority: allowLiveMembershipAuthority(),
+	})
+
+	result, err := app.SyncChannelMessagesBatch(context.Background(), SyncChannelMessagesBatchQuery{
+		LoginUID: "u1",
+		Items: []SyncChannelMessagesQuery{{
+			ChannelID: "g1", ChannelType: 2, Limit: 30,
+		}},
+	})
+
+	if err != nil {
+		t.Fatalf("SyncChannelMessagesBatch() error = %v", err)
+	}
+	if len(result.Items) != 1 || result.Items[0].Err != nil || result.Items[0].Result.More || len(result.Items[0].Result.Messages) != 0 {
+		t.Fatalf("result = %#v, want one empty terminal page", result)
 	}
 }
 
