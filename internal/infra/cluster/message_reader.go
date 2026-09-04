@@ -72,9 +72,6 @@ func (r *ChannelMessageReader) SyncMessages(ctx context.Context, query message.C
 		return message.ChannelMessagePage{}, message.ErrSyncBatchResultMismatch
 	}
 	if results[0].Err != nil {
-		if isMissingEmptyChannelRuntime(results[0].Err) {
-			return message.ChannelMessagePage{}, nil
-		}
 		return message.ChannelMessagePage{}, mapAppendError(results[0].Err)
 	}
 	return channelMessagePageFromRead(query, limit, results[0].Read), nil
@@ -113,19 +110,12 @@ func (r *ChannelMessageReader) SyncMessagesBatch(ctx context.Context, queries []
 	results := make([]message.ChannelMessageReadResult, len(queries))
 	for index, readResult := range readResults {
 		if readResult.Err != nil {
-			if isMissingEmptyChannelRuntime(readResult.Err) {
-				continue
-			}
 			results[index].Err = mapAppendError(readResult.Err)
 			continue
 		}
 		results[index].Page = channelMessagePageFromRead(queries[index], limits[index], readResult.Read)
 	}
 	return results, nil
-}
-
-func isMissingEmptyChannelRuntime(err error) bool {
-	return appendErrorMatches(err, channelruntime.ErrChannelNotFound)
 }
 
 func channelMessagePageFromRead(query message.ChannelMessageQuery, limit int, read channelstore.ReadCommittedResult) message.ChannelMessagePage {
