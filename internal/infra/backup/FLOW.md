@@ -30,7 +30,9 @@ backup use case.
    every node, and returns a stable secret-safe failure result.
 2. Full export resolves Slot leadership and term, fences a stable snapshot,
    streams metadata and grouped message artifacts directly to the repository,
-   and records all 256 Slot results before archive publication.
+   and records all 256 Slot results before archive publication. Finalization
+   validates the complete ordered 256-Slot progress set before its first
+   repository mutation.
 3. Restore enters maintenance, stages and verifies data, rechecks topology,
    switches atomically, and rolls back on failure before cleanup.
 

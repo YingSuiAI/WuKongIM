@@ -17,7 +17,10 @@ directly.
    channel memberships, plugin bindings, and message-event state.
 6. Read-only inspect APIs expose stable bounded scans without mutating storage.
 7. Hash-slot snapshot, backup, restore, and deletion operate on registered row,
-   index, and system spans and clear affected caches after mutation.
+   index, and system spans and clear affected caches after mutation. Portable
+   imports require the exact registry traversal order and strictly increasing
+   keys within each span; backup streams reject runtime-only and migration
+   spans before mutating the restore target.
 8. Channel runtime metadata create-only batches check existence and insert under
    the same hash-slot lock and commit. An existing row returns `created=false`
    without being overwritten; ordinary monotonic upsert remains the migration

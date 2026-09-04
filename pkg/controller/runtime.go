@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/WuKongIM/WuKongIM/pkg/controller/fsm"
@@ -19,6 +20,11 @@ import (
 // Runtime hosts Controller Raft or mirror sync behind the public facade.
 type Runtime struct {
 	cfg RuntimeConfig
+
+	// lifecycleMu serializes Start and Stop while admitting Slot mutations only
+	// across the fully started interval represented by lifecycle.
+	lifecycleMu sync.RWMutex
+	lifecycle   atomic.Uint32
 
 	mu    sync.RWMutex
 	state ClusterState
@@ -55,24 +61,53 @@ func NewRuntime(cfg RuntimeConfig) (*Runtime, error) {
 
 // Start starts the local Controller runtime.
 func (r *Runtime) Start(ctx context.Context) error {
+	if r == nil {
+		return ErrNotStarted
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	r.lifecycleMu.Lock()
+	defer r.lifecycleMu.Unlock()
+	switch runtimeLifecycle(r.lifecycle.Load()) {
+	case runtimeLifecycleStarted:
+		return nil
+	case runtimeLifecycleStarting, runtimeLifecycleRaftStarted, runtimeLifecycleStopping:
+		return ErrNotStarted
+	}
+	r.lifecycle.Store(uint32(runtimeLifecycleStarting))
+	succeeded := false
+	defer func() {
+		if !succeeded {
+			r.lifecycle.CompareAndSwap(uint32(runtimeLifecycleStarting), uint32(runtimeLifecycleStopped))
+			r.lifecycle.CompareAndSwap(uint32(runtimeLifecycleRaftStarted), uint32(runtimeLifecycleStopped))
+		}
+	}()
 	if err := os.MkdirAll(r.cfg.StateDir, 0o755); err != nil {
 		return err
 	}
 	r.store = statefile.New(filepath.Join(r.cfg.StateDir, "cluster-state.json"))
+	var err error
 	switch r.cfg.Role {
 	case RuntimeRoleVoter:
-		return r.startVoter(ctx)
+		err = r.startVoter(ctx)
 	case RuntimeRoleMirror:
-		return r.startMirror(ctx)
+		err = r.startMirror(ctx)
 	default:
-		return fmt.Errorf("controller: invalid runtime role %q", r.cfg.Role)
+		err = fmt.Errorf("controller: invalid runtime role %q", r.cfg.Role)
 	}
+	if err != nil {
+		return err
+	}
+	if !r.lifecycle.CompareAndSwap(uint32(runtimeLifecycleStarting), uint32(runtimeLifecycleStarted)) &&
+		!r.lifecycle.CompareAndSwap(uint32(runtimeLifecycleRaftStarted), uint32(runtimeLifecycleStarted)) {
+		return ErrStopped
+	}
+	succeeded = true
+	return nil
 }
 
 // Stop stops local Controller resources.
@@ -80,6 +115,29 @@ func (r *Runtime) Stop(ctx context.Context) error {
 	if err := ctxErr(ctx); err != nil {
 		return err
 	}
+	if r == nil {
+		return nil
+	}
+	for {
+		lifecycle := runtimeLifecycle(r.lifecycle.Load())
+		switch lifecycle {
+		case runtimeLifecycleStopped:
+			return nil
+		case runtimeLifecycleStopping:
+			r.lifecycleMu.Lock()
+			r.lifecycleMu.Unlock()
+			return nil
+		default:
+			if r.lifecycle.CompareAndSwap(uint32(lifecycle), uint32(runtimeLifecycleStopping)) {
+				goto stop
+			}
+		}
+	}
+
+stop:
+	r.lifecycleMu.Lock()
+	defer r.lifecycleMu.Unlock()
+	defer r.lifecycle.Store(uint32(runtimeLifecycleStopped))
 	r.stopRefreshLoop()
 	if r.raft != nil {
 		return r.raft.Stop()
@@ -181,4 +239,26 @@ func ctxErr(ctx context.Context) error {
 		return nil
 	}
 	return ctx.Err()
+}
+
+type runtimeLifecycle uint32
+
+const (
+	runtimeLifecycleStopped runtimeLifecycle = iota
+	runtimeLifecycleStarting
+	runtimeLifecycleRaftStarted
+	runtimeLifecycleStarted
+	runtimeLifecycleStopping
+)
+
+func (r *Runtime) lockStartedSlotRequest() (func(), error) {
+	if r == nil || runtimeLifecycle(r.lifecycle.Load()) != runtimeLifecycleStarted {
+		return nil, ErrNotStarted
+	}
+	r.lifecycleMu.RLock()
+	if runtimeLifecycle(r.lifecycle.Load()) != runtimeLifecycleStarted || r.raft == nil {
+		r.lifecycleMu.RUnlock()
+		return nil, ErrNotStarted
+	}
+	return r.lifecycleMu.RUnlock, nil
 }

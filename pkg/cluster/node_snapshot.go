@@ -107,8 +107,18 @@ func (n *Node) applySnapshot(ctx context.Context, snapshot control.Snapshot) err
 		slotsReady = localAssignedSlotsReady(localAssignedSlotIDs, statuses)
 	}
 	n.mu.Lock()
+	ready := !n.stopping.Load()
 	n.controlSnapshot = snapshot.Clone()
-	n.snapshot = Snapshot{NodeID: n.cfg.NodeID, ControllerLead: snapshot.ControllerID, StateRevision: snapshot.Revision, RoutesReady: n.router != nil && n.router.Table() != nil, SlotsReady: slotsReady, ChannelsReady: n.channels != nil, SlotCount: uint32(len(snapshot.Slots)), HashSlotCount: snapshot.HashSlots.Count}
+	n.snapshot = Snapshot{
+		NodeID:         n.cfg.NodeID,
+		ControllerLead: snapshot.ControllerID,
+		StateRevision:  snapshot.Revision,
+		RoutesReady:    ready && n.router != nil && n.router.Table() != nil,
+		SlotsReady:     ready && slotsReady,
+		ChannelsReady:  ready && n.channels != nil,
+		SlotCount:      uint32(len(snapshot.Slots)),
+		HashSlotCount:  snapshot.HashSlots.Count,
+	}
 	n.mu.Unlock()
 	n.publishPreferredLeaderIntent(snapshot)
 	if observer := n.cfg.Control.SnapshotObserver; observer != nil {
@@ -291,7 +301,7 @@ func (n *Node) markChannelsReady(ready bool) {
 	}
 	n.mu.Lock()
 	n.snapshot.NodeID = n.cfg.NodeID
-	n.snapshot.ChannelsReady = ready
+	n.snapshot.ChannelsReady = ready && !n.stopping.Load()
 	n.mu.Unlock()
 }
 

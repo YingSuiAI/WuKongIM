@@ -2,7 +2,6 @@ package channels
 
 import (
 	"context"
-	"errors"
 	"sync/atomic"
 	"testing"
 
@@ -29,7 +28,10 @@ func TestServiceReadCommittedHeadUsesDurableLEOAndSurvivesFullRetention(t *testi
 	require.Equal(t, 2, trimmed.Deleted)
 
 	guard := &committedHeadGuardFactory{base: base}
-	runtime := &conversationHeadProbeRuntime{fakeRuntime: &fakeRuntime{}, probeErr: errors.New("single replica must not probe runtime")}
+	runtime := &runtimeHWProbeRuntime{fakeRuntime: &fakeRuntime{}, probe: ch.RuntimeProbeResult{Channels: []ch.RuntimeProbeChannel{{
+		ChannelID: id, ChannelEpoch: 4, LeaderEpoch: 7,
+		Role: ch.RoleLeader, Status: ch.StatusActive, LEO: 2, HW: 1,
+	}}}}
 	svc, err := NewService(Config{
 		Runtime:   runtime,
 		LocalNode: 1,
@@ -45,7 +47,7 @@ func TestServiceReadCommittedHeadUsesDurableLEOAndSurvivesFullRetention(t *testi
 
 	require.NoError(t, err)
 	require.Equal(t, uint64(2), seq)
-	require.Equal(t, 0, runtime.probeCalls)
+	require.Equal(t, 1, runtime.probeCalls)
 	require.Equal(t, int64(1), guard.loads.Load())
 	require.Equal(t, int64(0), guard.contentReads.Load())
 	require.Equal(t, int64(0), guard.retentionReads.Load())
@@ -61,7 +63,7 @@ func TestServiceReadCommittedHeadUsesLiveLeaderHWForQuorumChannel(t *testing.T) 
 		{ID: 1}, {ID: 2}, {ID: 3},
 	}})
 	require.NoError(t, err)
-	runtime := &conversationHeadProbeRuntime{
+	runtime := &runtimeHWProbeRuntime{
 		fakeRuntime: &fakeRuntime{},
 		probe: ch.RuntimeProbeResult{Channels: []ch.RuntimeProbeChannel{{
 			ChannelID: id, ChannelEpoch: 3, LeaderEpoch: 5,
@@ -86,7 +88,7 @@ func TestServiceReadCommittedHeadUsesLiveLeaderHWForQuorumChannel(t *testing.T) 
 	require.Equal(t, 1, runtime.probeCalls)
 }
 
-func TestServiceReadCommittedHeadReloadsCheckpointAfterRuntimeEviction(t *testing.T) {
+func TestServiceReadCommittedHeadActivatesColdRuntimeBeforeUsingLaggingCheckpoint(t *testing.T) {
 	id := ch.ChannelID{ID: "evicted-quorum-head", Type: 2}
 	base := channelstore.NewMemoryFactory()
 	store, err := base.ChannelStore(ch.ChannelKeyForID(id), id)
@@ -94,12 +96,14 @@ func TestServiceReadCommittedHeadReloadsCheckpointAfterRuntimeEviction(t *testin
 	_, err = store.AppendLeader(context.Background(), channelstore.AppendLeaderRequest{Records: []ch.Record{{ID: 1}, {ID: 2}}})
 	require.NoError(t, err)
 	guard := &committedHeadGuardFactory{base: base}
-	guard.afterFirstLoad = func() {
-		require.NoError(t, store.StoreCheckpoint(context.Background(), ch.Checkpoint{HW: 2}))
-	}
-	runtime := &conversationHeadProbeRuntime{
-		fakeRuntime: &fakeRuntime{},
-		probe:       ch.RuntimeProbeResult{Missing: []ch.ChannelID{id}},
+	recovered := ch.RuntimeProbeResult{Channels: []ch.RuntimeProbeChannel{{
+		ChannelID: id, ChannelEpoch: 2, LeaderEpoch: 3,
+		Role: ch.RoleLeader, Status: ch.StatusActive, LEO: 2, HW: 2,
+	}}}
+	runtime := &runtimeHWProbeRuntime{
+		fakeRuntime:     &fakeRuntime{},
+		probe:           ch.RuntimeProbeResult{Checked: 1, Missing: []ch.ChannelID{id}},
+		probeAfterApply: &recovered,
 	}
 	svc, err := NewService(Config{
 		Runtime:   runtime,
@@ -116,45 +120,49 @@ func TestServiceReadCommittedHeadReloadsCheckpointAfterRuntimeEviction(t *testin
 
 	require.NoError(t, err)
 	require.Equal(t, uint64(2), seq)
-	require.Equal(t, int64(2), guard.loads.Load())
+	require.Equal(t, 1, runtime.applyCalls)
+	require.Equal(t, 2, runtime.probeCalls)
+	require.Equal(t, int64(1), guard.loads.Load())
 }
 
-func TestServiceReadCommittedHeadRejectsIncompleteRuntimeEvidence(t *testing.T) {
-	id := ch.ChannelID{ID: "incomplete-runtime-evidence", Type: 2}
+func TestServiceReadCommittedHeadRejectsColdRuntimeThatRemainsMissing(t *testing.T) {
+	id := ch.ChannelID{ID: "cold-quorum-head-remains-missing", Type: 2}
+	base := channelstore.NewMemoryFactory()
+	store, err := base.ChannelStore(ch.ChannelKeyForID(id), id)
+	require.NoError(t, err)
+	_, err = store.AppendLeader(context.Background(), channelstore.AppendLeaderRequest{Records: []ch.Record{{ID: 1}}})
+	require.NoError(t, err)
+	runtime := &runtimeHWProbeRuntime{
+		fakeRuntime: &fakeRuntime{},
+		probe:       ch.RuntimeProbeResult{Checked: 1, Missing: []ch.ChannelID{id}},
+	}
 	svc, err := NewService(Config{
-		Runtime:   &conversationHeadProbeRuntime{fakeRuntime: &fakeRuntime{}},
-		LocalNode: 1,
+		Runtime: runtime, LocalNode: 1,
 		MetaSource: NewStaticMetaSource([]ch.Meta{{
 			ID: id, Epoch: 2, LeaderEpoch: 3, Leader: 1,
 			Replicas: []ch.NodeID{1, 2}, ISR: []ch.NodeID{1, 2}, MinISR: 2, Status: ch.StatusActive,
 		}}),
-		Store: channelstore.NewMemoryFactory(),
+		Store: base,
 	})
 	require.NoError(t, err)
 
 	_, err = svc.ReadCommittedHead(context.Background(), id)
 
 	require.ErrorIs(t, err, ch.ErrNotReady)
+	require.Equal(t, 1, runtime.applyCalls)
+	require.Equal(t, 2, runtime.probeCalls)
 }
 
-func TestServiceReadCommittedHeadRejectsQuorumRuntimeWithoutProbe(t *testing.T) {
-	id := ch.ChannelID{ID: "quorum-runtime-without-probe", Type: 2}
-	base := channelstore.NewMemoryFactory()
-	store, err := base.ChannelStore(ch.ChannelKeyForID(id), id)
-	require.NoError(t, err)
-	_, err = store.AppendLeader(context.Background(), channelstore.AppendLeaderRequest{Records: []ch.Record{
-		{ID: 1}, {ID: 2}, {ID: 3}, {ID: 4}, {ID: 5}, {ID: 6}, {ID: 7}, {ID: 8},
-	}})
-	require.NoError(t, err)
-	require.NoError(t, store.StoreCheckpoint(context.Background(), ch.Checkpoint{HW: 7}))
+func TestServiceReadCommittedHeadRejectsIncompleteRuntimeEvidence(t *testing.T) {
+	id := ch.ChannelID{ID: "incomplete-runtime-evidence", Type: 2}
 	svc, err := NewService(Config{
-		Runtime:   &fakeRuntime{},
+		Runtime:   &runtimeHWProbeRuntime{fakeRuntime: &fakeRuntime{}},
 		LocalNode: 1,
 		MetaSource: NewStaticMetaSource([]ch.Meta{{
 			ID: id, Epoch: 2, LeaderEpoch: 3, Leader: 1,
 			Replicas: []ch.NodeID{1, 2}, ISR: []ch.NodeID{1, 2}, MinISR: 2, Status: ch.StatusActive,
 		}}),
-		Store: base,
+		Store: channelstore.NewMemoryFactory(),
 	})
 	require.NoError(t, err)
 

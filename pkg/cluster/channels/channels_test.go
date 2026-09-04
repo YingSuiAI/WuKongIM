@@ -599,11 +599,14 @@ func TestSlotMetaSourceMapsMissingRuntimeMetaToChannelNotFound(t *testing.T) {
 	}
 }
 
-func TestServiceRequiresCombinedRuntime(t *testing.T) {
+func TestServiceRequiresCompleteRuntimeAuthorityContract(t *testing.T) {
 	_, err := NewService(Config{Runtime: clusterOnlyRuntime{}})
 	if err == nil {
 		t.Fatal("NewService() error = nil, want combined runtime error")
 	}
+	_, err = NewService(Config{Runtime: runtimeWithoutReadAuthority{}})
+	require.ErrorContains(t, err, "RuntimeProbe")
+	require.ErrorContains(t, err, "ApplyMetaContext")
 	svc, err := NewService(Config{Runtime: &fakeRuntime{}})
 	if err != nil {
 		t.Fatalf("NewService() error = %v", err)
@@ -3031,7 +3034,7 @@ func TestServiceReadConversationHeadsUsesOneLiveRuntimeProbeBeforeLeaderCheckpoi
 		{ID: first, Epoch: 3, LeaderEpoch: 5, Leader: 1, Replicas: []ch.NodeID{1, 2, 3}, ISR: []ch.NodeID{1, 2, 3}, MinISR: 2, Status: ch.StatusActive},
 		{ID: second, Epoch: 7, LeaderEpoch: 9, Leader: 1, Replicas: []ch.NodeID{1, 2, 3}, ISR: []ch.NodeID{1, 2, 3}, MinISR: 2, Status: ch.StatusActive},
 	})
-	runtime := &conversationHeadProbeRuntime{
+	runtime := &runtimeHWProbeRuntime{
 		fakeRuntime: &fakeRuntime{},
 		probe: ch.RuntimeProbeResult{Channels: []ch.RuntimeProbeChannel{
 			{ChannelID: first, ChannelEpoch: 3, LeaderEpoch: 5, Role: ch.RoleLeader, Status: ch.StatusActive, LEO: 2, HW: 2},
@@ -3051,6 +3054,132 @@ func TestServiceReadConversationHeadsUsesOneLiveRuntimeProbeBeforeLeaderCheckpoi
 		require.True(t, result.Head.Found)
 		require.Equal(t, uint64(2), result.Head.Message.MessageSeq)
 		require.Equal(t, []byte("tail"), result.Head.Message.Payload)
+	}
+}
+
+func TestServiceReadConversationHeadsActivatesColdQuorumLeaderBeforeUsingLaggingCheckpoint(t *testing.T) {
+	id := ch.ChannelID{ID: "conversation-head-cold-quorum", Type: 2}
+	factory := channelstore.NewMemoryFactory()
+	store, err := factory.ChannelStore(ch.ChannelKeyForID(id), id)
+	require.NoError(t, err)
+	_, err = store.AppendLeader(context.Background(), channelstore.AppendLeaderRequest{Records: []ch.Record{{
+		ID: 1, FromUID: "u2", Payload: []byte("committed-before-restart"),
+	}}})
+	require.NoError(t, err)
+	require.NoError(t, store.Close())
+	meta := ch.Meta{
+		ID: id, Epoch: 3, LeaderEpoch: 5, RouteGeneration: 7, Leader: 1,
+		Replicas: []ch.NodeID{1, 2, 3}, ISR: []ch.NodeID{1, 2, 3}, MinISR: 2, Status: ch.StatusActive,
+	}
+	source := NewStaticMetaSource([]ch.Meta{meta})
+	runtime := &runtimeHWProbeRuntime{
+		fakeRuntime: &fakeRuntime{},
+		probe:       ch.RuntimeProbeResult{Checked: 1, Missing: []ch.ChannelID{id}},
+		probeAfterApply: &ch.RuntimeProbeResult{Checked: 1, LoadedLeader: 1, Channels: []ch.RuntimeProbeChannel{{
+			ChannelID: id, ChannelEpoch: 3, LeaderEpoch: 5,
+			Role: ch.RoleLeader, Status: ch.StatusActive, LEO: 1, HW: 1,
+		}}},
+	}
+	svc, err := NewService(Config{Runtime: runtime, LocalNode: 1, MetaSource: source, Store: factory})
+	require.NoError(t, err)
+
+	heads, err := svc.ReadConversationHeads(context.Background(), []ch.ChannelID{id}, "u1")
+	require.NoError(t, err)
+	require.Len(t, heads, 1)
+	require.NoError(t, heads[0].Err)
+	require.Equal(t, 1, runtime.applyCalls)
+	require.Equal(t, 2, runtime.probeCalls)
+	require.Equal(t, meta.ID, runtime.lastApplied.ID)
+	require.Equal(t, meta.Epoch, runtime.lastApplied.Epoch)
+	require.Equal(t, meta.LeaderEpoch, runtime.lastApplied.LeaderEpoch)
+	require.Equal(t, meta.RouteGeneration, runtime.lastApplied.RouteGeneration)
+	require.Equal(t, uint64(1), heads[0].Head.LastCommittedSeq)
+	require.True(t, heads[0].Head.Found)
+	require.Equal(t, []byte("committed-before-restart"), heads[0].Head.Message.Payload)
+}
+
+func TestServiceReadConversationHeadsKeepsColdQuorumLeaderUnloadedWhenCheckpointIsCurrent(t *testing.T) {
+	id := ch.ChannelID{ID: "conversation-head-cold-checkpoint-current", Type: 2}
+	factory := channelstore.NewMemoryFactory()
+	store, err := factory.ChannelStore(ch.ChannelKeyForID(id), id)
+	require.NoError(t, err)
+	_, err = store.AppendLeader(context.Background(), channelstore.AppendLeaderRequest{Records: []ch.Record{{
+		ID: 1, FromUID: "u2", Payload: []byte("checkpointed"),
+	}}})
+	require.NoError(t, err)
+	require.NoError(t, store.StoreCheckpoint(context.Background(), ch.Checkpoint{HW: 1}))
+	require.NoError(t, store.Close())
+	meta := ch.Meta{
+		ID: id, Epoch: 3, LeaderEpoch: 5, RouteGeneration: 7, Leader: 1,
+		Replicas: []ch.NodeID{1, 2, 3}, ISR: []ch.NodeID{1, 2, 3}, MinISR: 2, Status: ch.StatusActive,
+	}
+	source := NewStaticMetaSource([]ch.Meta{meta})
+	runtime := &runtimeHWProbeRuntime{
+		fakeRuntime: &fakeRuntime{},
+		probe:       ch.RuntimeProbeResult{Checked: 1, Missing: []ch.ChannelID{id}},
+	}
+	svc, err := NewService(Config{Runtime: runtime, LocalNode: 1, MetaSource: source, Store: factory})
+	require.NoError(t, err)
+
+	heads, err := svc.ReadConversationHeads(context.Background(), []ch.ChannelID{id}, "u1")
+	require.NoError(t, err)
+	require.Len(t, heads, 1)
+	require.NoError(t, heads[0].Err)
+	require.Zero(t, runtime.applyCalls)
+	require.Equal(t, 1, runtime.probeCalls)
+	require.Equal(t, uint64(1), heads[0].Head.LastCommittedSeq)
+	require.True(t, heads[0].Head.Found)
+	require.Equal(t, []byte("checkpointed"), heads[0].Head.Message.Payload)
+}
+
+func TestServiceReadConversationHeadsColdActivationHonorsCallerCancellation(t *testing.T) {
+	id := ch.ChannelID{ID: "conversation-head-cold-canceled", Type: 2}
+	factory := channelstore.NewMemoryFactory()
+	store, err := factory.ChannelStore(ch.ChannelKeyForID(id), id)
+	require.NoError(t, err)
+	_, err = store.AppendLeader(context.Background(), channelstore.AppendLeaderRequest{Records: []ch.Record{{ID: 1, Payload: []byte("pending")}}})
+	require.NoError(t, err)
+	require.NoError(t, store.Close())
+	meta := ch.Meta{
+		ID: id, Epoch: 3, LeaderEpoch: 5, RouteGeneration: 7, Leader: 1,
+		Replicas: []ch.NodeID{1, 2, 3}, ISR: []ch.NodeID{1, 2, 3}, MinISR: 2, Status: ch.StatusActive,
+	}
+	runtime := &contextActivationRuntime{
+		runtimeHWProbeRuntime: &runtimeHWProbeRuntime{
+			fakeRuntime: &fakeRuntime{},
+			probe:       ch.RuntimeProbeResult{Checked: 1, Missing: []ch.ChannelID{id}},
+		},
+		started: make(chan struct{}),
+	}
+	svc, err := NewService(Config{Runtime: runtime, LocalNode: 1, MetaSource: NewStaticMetaSource([]ch.Meta{meta}), Store: factory})
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	type readOutcome struct {
+		results []ConversationHeadResult
+		err     error
+	}
+	outcomes := make(chan readOutcome, 1)
+	go func() {
+		results, readErr := svc.ReadConversationHeads(ctx, []ch.ChannelID{id}, "u1")
+		outcomes <- readOutcome{results: results, err: readErr}
+	}()
+	select {
+	case <-runtime.started:
+	case <-time.After(time.Second):
+		t.Fatal("cold activation did not start")
+	}
+	cancel()
+
+	select {
+	case outcome := <-outcomes:
+		require.NoError(t, outcome.err)
+		require.Len(t, outcome.results, 1)
+		require.ErrorIs(t, outcome.results[0].Err, context.Canceled)
+		require.Equal(t, 1, runtime.applyContextCalls)
+		require.Zero(t, runtime.applyCalls)
+	case <-time.After(time.Second):
+		t.Fatal("conversation head read did not honor caller cancellation")
 	}
 }
 
@@ -3214,6 +3343,118 @@ func TestServiceReadCommittedBatchGroupsRemoteReadsByLeaderAndKeepsAlignment(t *
 	})
 }
 
+func TestServiceReadCommittedBatchUsesLiveRuntimeHWBeforeLeaderCheckpoint(t *testing.T) {
+	id := ch.ChannelID{ID: "committed-read-live-hw", Type: 2}
+	factory := channelstore.NewMemoryFactory()
+	store, err := factory.ChannelStore(ch.ChannelKeyForID(id), id)
+	require.NoError(t, err)
+	_, err = store.AppendLeader(context.Background(), channelstore.AppendLeaderRequest{Records: []ch.Record{{ID: 30, Payload: []byte("committed")}}})
+	require.NoError(t, err)
+	require.NoError(t, store.Close())
+
+	source := NewStaticMetaSource([]ch.Meta{{
+		ID: id, Epoch: 3, LeaderEpoch: 5, Leader: 1,
+		Replicas: []ch.NodeID{1, 2, 3}, ISR: []ch.NodeID{1, 2, 3}, MinISR: 2, Status: ch.StatusActive,
+	}})
+	runtime := &runtimeHWProbeRuntime{
+		fakeRuntime: &fakeRuntime{},
+		probe: ch.RuntimeProbeResult{Channels: []ch.RuntimeProbeChannel{{
+			ChannelID: id, ChannelEpoch: 3, LeaderEpoch: 5,
+			Role: ch.RoleLeader, Status: ch.StatusActive, LEO: 1, HW: 1,
+		}}},
+	}
+	svc, err := NewService(Config{Runtime: runtime, LocalNode: 1, MetaSource: source, Store: factory})
+	require.NoError(t, err)
+
+	results, err := svc.ReadCommittedBatch(context.Background(), []CommittedRead{{
+		ChannelID: id,
+		Request: channelstore.ReadCommittedRequest{
+			FromSeq:  1,
+			MaxSeq:   1,
+			Limit:    1,
+			MaxBytes: 1024,
+		},
+	}})
+
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	require.NoError(t, results[0].Err)
+	require.Equal(t, 1, runtime.probeCalls)
+	require.Len(t, results[0].Read.Messages, 1)
+	require.Equal(t, uint64(1), results[0].Read.Messages[0].MessageSeq)
+	require.Equal(t, []byte("committed"), results[0].Read.Messages[0].Payload)
+}
+
+func TestServiceReadCommittedBatchActivatesColdRuntimeBeforeUsingLaggingCheckpoint(t *testing.T) {
+	id := ch.ChannelID{ID: "committed-read-cold-quorum", Type: 2}
+	factory := channelstore.NewMemoryFactory()
+	store, err := factory.ChannelStore(ch.ChannelKeyForID(id), id)
+	require.NoError(t, err)
+	_, err = store.AppendLeader(context.Background(), channelstore.AppendLeaderRequest{Records: []ch.Record{{ID: 30, Payload: []byte("cold-committed")}}})
+	require.NoError(t, err)
+	require.NoError(t, store.Close())
+	meta := ch.Meta{
+		ID: id, Epoch: 3, LeaderEpoch: 5, Leader: 1,
+		Replicas: []ch.NodeID{1, 2, 3}, ISR: []ch.NodeID{1, 2, 3}, MinISR: 2, Status: ch.StatusActive,
+	}
+	recovered := ch.RuntimeProbeResult{Checked: 1, Channels: []ch.RuntimeProbeChannel{{
+		ChannelID: id, ChannelEpoch: 3, LeaderEpoch: 5,
+		Role: ch.RoleLeader, Status: ch.StatusActive, LEO: 1, HW: 1,
+	}}}
+	runtime := &runtimeHWProbeRuntime{
+		fakeRuntime:     &fakeRuntime{},
+		probe:           ch.RuntimeProbeResult{Checked: 1, Missing: []ch.ChannelID{id}},
+		probeAfterApply: &recovered,
+	}
+	svc, err := NewService(Config{Runtime: runtime, LocalNode: 1, MetaSource: NewStaticMetaSource([]ch.Meta{meta}), Store: factory})
+	require.NoError(t, err)
+
+	results, err := svc.ReadCommittedBatch(context.Background(), []CommittedRead{{
+		ChannelID: id,
+		Request:   channelstore.ReadCommittedRequest{FromSeq: 1, MaxSeq: 1, Limit: 1, MaxBytes: 1024},
+	}})
+
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	require.NoError(t, results[0].Err)
+	require.Len(t, results[0].Read.Messages, 1)
+	require.Equal(t, []byte("cold-committed"), results[0].Read.Messages[0].Payload)
+	require.Equal(t, 1, runtime.applyCalls)
+	require.Equal(t, 2, runtime.probeCalls)
+}
+
+func TestServiceReadCommittedBatchRejectsColdRuntimeThatRemainsMissing(t *testing.T) {
+	id := ch.ChannelID{ID: "committed-read-cold-remains-missing", Type: 2}
+	factory := channelstore.NewMemoryFactory()
+	store, err := factory.ChannelStore(ch.ChannelKeyForID(id), id)
+	require.NoError(t, err)
+	_, err = store.AppendLeader(context.Background(), channelstore.AppendLeaderRequest{Records: []ch.Record{{ID: 30, Payload: []byte("uncommitted")}}})
+	require.NoError(t, err)
+	require.NoError(t, store.Close())
+	meta := ch.Meta{
+		ID: id, Epoch: 3, LeaderEpoch: 5, Leader: 1,
+		Replicas: []ch.NodeID{1, 2, 3}, ISR: []ch.NodeID{1, 2, 3}, MinISR: 2, Status: ch.StatusActive,
+	}
+	runtime := &runtimeHWProbeRuntime{
+		fakeRuntime: &fakeRuntime{},
+		probe:       ch.RuntimeProbeResult{Checked: 1, Missing: []ch.ChannelID{id}},
+	}
+	svc, err := NewService(Config{Runtime: runtime, LocalNode: 1, MetaSource: NewStaticMetaSource([]ch.Meta{meta}), Store: factory})
+	require.NoError(t, err)
+
+	results, err := svc.ReadCommittedBatch(context.Background(), []CommittedRead{{
+		ChannelID: id,
+		Request:   channelstore.ReadCommittedRequest{FromSeq: 1, MaxSeq: 1, Limit: 1, MaxBytes: 1024},
+	}})
+
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	require.ErrorIs(t, results[0].Err, ch.ErrNotReady)
+	require.Empty(t, results[0].Read.Messages)
+	require.Equal(t, 1, runtime.applyCalls)
+	require.Equal(t, 2, runtime.probeCalls)
+}
+
 func TestServiceReadCommittedBatchDoesNotReplayCommittedTailPastForwardCursor(t *testing.T) {
 	id := ch.ChannelID{ID: "committed-read-forward-past-tail", Type: 2}
 	factory := channelstore.NewMemoryFactory()
@@ -3245,16 +3486,54 @@ func TestServiceReadCommittedBatchDoesNotReplayCommittedTailPastForwardCursor(t 
 	require.Equal(t, uint64(2), results[0].Read.NextSeq)
 }
 
+func TestServiceReadCommittedBatchRejectsMinISRUpgradeDuringRead(t *testing.T) {
+	id := ch.ChannelID{ID: "committed-read-min-isr-upgrade", Type: 2}
+	factory := channelstore.NewMemoryFactory()
+	store, err := factory.ChannelStore(ch.ChannelKeyForID(id), id)
+	require.NoError(t, err)
+	_, err = store.AppendLeader(context.Background(), channelstore.AppendLeaderRequest{Records: []ch.Record{{ID: 30, Payload: []byte("old-single-replica-tail")}}})
+	require.NoError(t, err)
+	require.NoError(t, store.Close())
+
+	oldMeta := ch.Meta{
+		ID: id, Epoch: 1, LeaderEpoch: 1, RouteGeneration: 1, Leader: 1,
+		Replicas: []ch.NodeID{1}, ISR: []ch.NodeID{1}, MinISR: 1, Status: ch.StatusActive,
+	}
+	upgradedMeta := oldMeta
+	upgradedMeta.RouteGeneration = 2
+	upgradedMeta.Replicas = []ch.NodeID{1, 2, 3}
+	upgradedMeta.ISR = []ch.NodeID{1, 2, 3}
+	upgradedMeta.MinISR = 2
+	source := &countingMetaSource{metas: []ch.Meta{oldMeta, upgradedMeta}}
+	svc, err := NewService(Config{Runtime: &fakeRuntime{}, LocalNode: 1, MetaSource: source, Store: factory})
+	require.NoError(t, err)
+
+	results, err := svc.ReadCommittedBatch(context.Background(), []CommittedRead{{
+		ChannelID: id,
+		Request: channelstore.ReadCommittedRequest{
+			FromSeq: 1, MaxSeq: 1, Limit: 1, MaxBytes: 1024,
+		},
+	}})
+
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	require.ErrorIs(t, results[0].Err, ch.ErrStaleMeta)
+	require.Empty(t, results[0].Read.Messages)
+	require.Equal(t, 2, source.ensureCalls)
+}
+
 func TestServiceReadLocalLastVisibleClosesStoreOnReadErrorAndCancellation(t *testing.T) {
 	id := ch.ChannelID{ID: "read-last-close-on-error", Type: 1}
+	meta := ch.Meta{ID: id, Leader: 1, Epoch: 1, LeaderEpoch: 1, Replicas: []ch.NodeID{1}, ISR: []ch.NodeID{1}, MinISR: 1, Status: ch.StatusActive}
 
 	t.Run("read error", func(t *testing.T) {
 		wantErr := errors.New("read committed failed")
 		tracking := newLastVisibleTrackingFactory(channelstore.NewMemoryFactory())
 		tracking.readErr = wantErr
-		svc := &Service{store: tracking}
+		svc, err := NewService(Config{Runtime: &fakeRuntime{}, LocalNode: 1, MetaSource: &fakeEnsuringMetaSource{meta: meta}, Store: tracking})
+		require.NoError(t, err)
 
-		_, _, err := svc.readLocalLastVisible(context.Background(), id, 0)
+		_, _, err = svc.readLocalLastVisible(context.Background(), meta, 0)
 		require.ErrorIs(t, err, wantErr)
 		require.Equal(t, int64(1), tracking.acquired.Load())
 		require.Equal(t, int64(1), tracking.closed.Load())
@@ -3262,11 +3541,12 @@ func TestServiceReadLocalLastVisibleClosesStoreOnReadErrorAndCancellation(t *tes
 
 	t.Run("canceled context", func(t *testing.T) {
 		tracking := newLastVisibleTrackingFactory(channelstore.NewMemoryFactory())
-		svc := &Service{store: tracking}
+		svc, err := NewService(Config{Runtime: &fakeRuntime{}, LocalNode: 1, MetaSource: &fakeEnsuringMetaSource{meta: meta}, Store: tracking})
+		require.NoError(t, err)
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 
-		_, _, err := svc.readLocalLastVisible(ctx, id, 0)
+		_, _, err = svc.readLocalLastVisible(ctx, meta, 0)
 		require.ErrorIs(t, err, context.Canceled)
 		require.Equal(t, int64(1), tracking.acquired.Load())
 		require.Equal(t, int64(1), tracking.closed.Load())
@@ -3395,7 +3675,11 @@ func TestServiceReadChannelLastVisibleForwardsOverRPCToLeader(t *testing.T) {
 		{ID: 30, FromUID: "leader", ClientMsgNo: "client-30", ServerTimestampMS: 3000, Payload: []byte("leader-tail"), SizeBytes: 11},
 	}})
 	require.NoError(t, err)
-	leader, err := NewService(Config{Runtime: &fakeRuntime{}, LocalNode: 2, MetaSource: source, Store: leaderFactory, Forward: client})
+	leaderRuntime := &runtimeHWProbeRuntime{fakeRuntime: &fakeRuntime{}, probe: ch.RuntimeProbeResult{Checked: 1, Channels: []ch.RuntimeProbeChannel{{
+		ChannelID: id, ChannelEpoch: 1, LeaderEpoch: 1,
+		Role: ch.RoleLeader, Status: ch.StatusActive, LEO: 1, HW: 1,
+	}}}}
+	leader, err := NewService(Config{Runtime: leaderRuntime, LocalNode: 2, MetaSource: source, Store: leaderFactory, Forward: client})
 	require.NoError(t, err)
 	RegisterServiceHandlers(network, 2, leader)
 	followerFactory := channelstore.NewMemoryFactory()
@@ -3415,7 +3699,7 @@ func TestServiceReadChannelLastVisibleForwardsOverRPCToLeader(t *testing.T) {
 	require.Equal(t, []byte("leader-tail"), got.Payload)
 }
 
-func TestServiceReadChannelLastVisibleForwardToleratesLaggingLeaderMeta(t *testing.T) {
+func TestServiceReadChannelLastVisibleForwardRejectsMissingLeaderMeta(t *testing.T) {
 	id := ch.ChannelID{ID: "read-last-lagging-meta", Type: 1}
 	originMeta := ch.Meta{ID: id, Epoch: 3, LeaderEpoch: 5, Leader: 2, Replicas: []ch.NodeID{1, 2}, ISR: []ch.NodeID{1, 2}, MinISR: 2, Status: ch.StatusActive}
 	network := clusternet.NewLocalNetwork()
@@ -3435,10 +3719,9 @@ func TestServiceReadChannelLastVisibleForwardToleratesLaggingLeaderMeta(t *testi
 	require.NoError(t, err)
 
 	got, ok, err := origin.ReadChannelLastVisible(context.Background(), id, 0)
-	require.NoError(t, err)
-	require.True(t, ok)
-	require.Equal(t, uint64(40), got.MessageID)
-	require.Equal(t, []byte("lagging-tail"), got.Payload)
+	require.EqualError(t, err, metadb.ErrNotFound.Error())
+	require.False(t, ok)
+	require.Zero(t, got)
 	require.Equal(t, 1, leaderSource.calls)
 }
 
@@ -3498,6 +3781,25 @@ func TestServiceRecoversCommittedForwardAppendBatchAfterDeadline(t *testing.T) {
 
 type clusterOnlyRuntime struct{}
 
+// runtimeWithoutReadAuthority proves that the former Cluster+Server contract
+// cannot silently omit live-HW and caller-bounded activation capabilities.
+type runtimeWithoutReadAuthority struct {
+	clusterOnlyRuntime
+}
+
+func (runtimeWithoutReadAuthority) HandlePull(context.Context, channeltransport.PullRequest) (channeltransport.PullResponse, error) {
+	return channeltransport.PullResponse{}, nil
+}
+func (runtimeWithoutReadAuthority) HandleAck(context.Context, channeltransport.AckRequest) error {
+	return nil
+}
+func (runtimeWithoutReadAuthority) HandlePullHint(context.Context, channeltransport.PullHintRequest) error {
+	return nil
+}
+func (runtimeWithoutReadAuthority) HandleNotify(context.Context, channeltransport.NotifyRequest) error {
+	return nil
+}
+
 type batchOnlyChannelMetaSource struct {
 	metas map[ch.ChannelID]ch.Meta
 }
@@ -3551,14 +3853,45 @@ type fakeRuntime struct {
 	appendRequireApply bool
 }
 
-type conversationHeadProbeRuntime struct {
+type runtimeHWProbeRuntime struct {
 	*fakeRuntime
-	probe      ch.RuntimeProbeResult
-	probeErr   error
-	probeCalls int
+	probe           ch.RuntimeProbeResult
+	probeAfterApply *ch.RuntimeProbeResult
+	probeErr        error
+	probeCalls      int
 }
 
-func (r *conversationHeadProbeRuntime) RuntimeProbe(_ context.Context, _ ch.RuntimeSelector) (ch.RuntimeProbeResult, error) {
+type contextActivationRuntime struct {
+	*runtimeHWProbeRuntime
+	started           chan struct{}
+	startedOnce       sync.Once
+	applyContextCalls int
+}
+
+func (r *contextActivationRuntime) ApplyMetaContext(ctx context.Context, meta ch.Meta) error {
+	r.applyContextCalls++
+	r.lastApplied = meta
+	r.startedOnce.Do(func() { close(r.started) })
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func (r *runtimeHWProbeRuntime) ApplyMeta(meta ch.Meta) error {
+	err := r.fakeRuntime.ApplyMeta(meta)
+	if err == nil && r.probeAfterApply != nil {
+		r.probe = *r.probeAfterApply
+	}
+	return err
+}
+
+func (r *runtimeHWProbeRuntime) ApplyMetaContext(ctx context.Context, meta ch.Meta) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return r.ApplyMeta(meta)
+}
+
+func (r *runtimeHWProbeRuntime) RuntimeProbe(_ context.Context, _ ch.RuntimeSelector) (ch.RuntimeProbeResult, error) {
 	r.probeCalls++
 	return r.probe, r.probeErr
 }
@@ -3570,6 +3903,15 @@ func (f *fakeRuntime) ApplyMeta(meta ch.Meta) error {
 		return f.applyErr
 	}
 	return nil
+}
+func (f *fakeRuntime) ApplyMetaContext(ctx context.Context, meta ch.Meta) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return f.ApplyMeta(meta)
+}
+func (f *fakeRuntime) RuntimeProbe(_ context.Context, selector ch.RuntimeSelector) (ch.RuntimeProbeResult, error) {
+	return ch.RuntimeProbeResult{Checked: len(selector.ChannelIDs), Missing: append([]ch.ChannelID(nil), selector.ChannelIDs...)}, nil
 }
 func (f *fakeRuntime) Append(context.Context, ch.AppendRequest) (ch.AppendResult, error) {
 	f.appendCalls++
@@ -3823,7 +4165,20 @@ type concurrentMetaUpgradeRuntime struct {
 	appendCalls  int
 }
 
+func missingRuntimeProbe(selector ch.RuntimeSelector) ch.RuntimeProbeResult {
+	return ch.RuntimeProbeResult{Checked: len(selector.ChannelIDs), Missing: append([]ch.ChannelID(nil), selector.ChannelIDs...)}
+}
+
 func (r *concurrentMetaUpgradeRuntime) ApplyMeta(ch.Meta) error { return nil }
+func (r *concurrentMetaUpgradeRuntime) ApplyMetaContext(ctx context.Context, meta ch.Meta) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return r.ApplyMeta(meta)
+}
+func (r *concurrentMetaUpgradeRuntime) RuntimeProbe(_ context.Context, selector ch.RuntimeSelector) (ch.RuntimeProbeResult, error) {
+	return missingRuntimeProbe(selector), nil
+}
 func (r *concurrentMetaUpgradeRuntime) Append(context.Context, ch.AppendRequest) (ch.AppendResult, error) {
 	return ch.AppendResult{}, nil
 }
@@ -3853,6 +4208,15 @@ func (r *concurrentMetaUpgradeRuntime) HandlePullHint(context.Context, channeltr
 }
 
 func (r *staleOnceRuntime) ApplyMeta(ch.Meta) error { return nil }
+func (r *staleOnceRuntime) ApplyMetaContext(ctx context.Context, meta ch.Meta) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return r.ApplyMeta(meta)
+}
+func (r *staleOnceRuntime) RuntimeProbe(_ context.Context, selector ch.RuntimeSelector) (ch.RuntimeProbeResult, error) {
+	return missingRuntimeProbe(selector), nil
+}
 func (r *staleOnceRuntime) Append(context.Context, ch.AppendRequest) (ch.AppendResult, error) {
 	return ch.AppendResult{}, nil
 }
@@ -3883,6 +4247,15 @@ type retryableOnceRuntime struct {
 }
 
 func (r *retryableOnceRuntime) ApplyMeta(ch.Meta) error { return nil }
+func (r *retryableOnceRuntime) ApplyMetaContext(ctx context.Context, meta ch.Meta) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return r.ApplyMeta(meta)
+}
+func (r *retryableOnceRuntime) RuntimeProbe(_ context.Context, selector ch.RuntimeSelector) (ch.RuntimeProbeResult, error) {
+	return missingRuntimeProbe(selector), nil
+}
 func (r *retryableOnceRuntime) Append(context.Context, ch.AppendRequest) (ch.AppendResult, error) {
 	return ch.AppendResult{}, nil
 }
@@ -3919,6 +4292,15 @@ func (r *writeFenceRuntime) ApplyMeta(meta ch.Meta) error {
 	r.applyCalls++
 	r.fenced = meta.WriteFence.Set()
 	return nil
+}
+func (r *writeFenceRuntime) ApplyMetaContext(ctx context.Context, meta ch.Meta) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return r.ApplyMeta(meta)
+}
+func (r *writeFenceRuntime) RuntimeProbe(_ context.Context, selector ch.RuntimeSelector) (ch.RuntimeProbeResult, error) {
+	return missingRuntimeProbe(selector), nil
 }
 func (r *writeFenceRuntime) Append(context.Context, ch.AppendRequest) (ch.AppendResult, error) {
 	r.singleAppendCalls++
@@ -3984,6 +4366,17 @@ func (r *orderedWriteFenceRuntime) ApplyMeta(meta ch.Meta) error {
 	return nil
 }
 
+func (r *orderedWriteFenceRuntime) ApplyMetaContext(ctx context.Context, meta ch.Meta) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return r.ApplyMeta(meta)
+}
+
+func (r *orderedWriteFenceRuntime) RuntimeProbe(_ context.Context, selector ch.RuntimeSelector) (ch.RuntimeProbeResult, error) {
+	return missingRuntimeProbe(selector), nil
+}
+
 func (r *orderedWriteFenceRuntime) Append(context.Context, ch.AppendRequest) (ch.AppendResult, error) {
 	if r.isFenced() {
 		return ch.AppendResult{}, ch.ErrWriteFenced
@@ -4031,6 +4424,15 @@ func (r *validatingRuntime) ApplyMeta(meta ch.Meta) error {
 		return ch.ErrInvalidConfig
 	}
 	return nil
+}
+func (r *validatingRuntime) ApplyMetaContext(ctx context.Context, meta ch.Meta) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return r.ApplyMeta(meta)
+}
+func (r *validatingRuntime) RuntimeProbe(_ context.Context, selector ch.RuntimeSelector) (ch.RuntimeProbeResult, error) {
+	return missingRuntimeProbe(selector), nil
 }
 func (r *validatingRuntime) Append(context.Context, ch.AppendRequest) (ch.AppendResult, error) {
 	return ch.AppendResult{}, nil

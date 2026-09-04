@@ -441,7 +441,7 @@ func (n *Node) startChannelTickLoop() {
 	}
 	n.channelTickMu.Lock()
 	defer n.channelTickMu.Unlock()
-	if n.channels == nil || n.channelTickCancel != nil {
+	if n.stopping.Load() || n.channels == nil || n.channelTickCancel != nil {
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -482,7 +482,7 @@ func (n *Node) startChannelRetentionGCLoop() {
 	}
 	n.channelRetentionMu.Lock()
 	defer n.channelRetentionMu.Unlock()
-	if n.channelRetentionCancel != nil || !n.cfg.ChannelRetention.PhysicalGCEnabled {
+	if n.stopping.Load() || n.channelRetentionCancel != nil || !n.cfg.ChannelRetention.PhysicalGCEnabled {
 		return
 	}
 	if n.channels == nil || n.defaultChannelStore == nil || n.defaultSlotMetaDB == nil {
@@ -526,7 +526,7 @@ func (n *Node) startChannelMigrationLoop() {
 	}
 	n.channelMigrationMu.Lock()
 	defer n.channelMigrationMu.Unlock()
-	if n.channelMigrationCancel != nil || !n.cfg.ChannelMigration.Enabled {
+	if n.stopping.Load() || n.channelMigrationCancel != nil || !n.cfg.ChannelMigration.Enabled {
 		return
 	}
 	store := n.ChannelMigrationStore()

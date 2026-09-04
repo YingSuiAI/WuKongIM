@@ -36,6 +36,52 @@ func TestSingleNodeAppendStoresMessage(t *testing.T) {
 	require.Equal(t, uint64(1), messages[0].MessageSeq)
 }
 
+func TestApplyMetaContextBoundsColdActivationWait(t *testing.T) {
+	t.Run("canceled before submit", func(t *testing.T) {
+		clusterAPI, err := New(Config{LocalNode: 1, Store: store.NewMemoryFactory(), ReactorCount: 1})
+		require.NoError(t, err)
+		cluster := clusterAPI.(*cluster)
+		defer cluster.Close()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		err = cluster.ApplyMetaContext(ctx, ch.Meta{
+			Key: ch.ChannelKey("1:apply-meta-canceled"), ID: ch.ChannelID{ID: "apply-meta-canceled", Type: 1},
+			Epoch: 1, LeaderEpoch: 1, Leader: 1, Replicas: []ch.NodeID{1}, ISR: []ch.NodeID{1}, MinISR: 1, Status: ch.StatusActive,
+		})
+		require.ErrorIs(t, err, context.Canceled)
+	})
+
+	t.Run("deadline while store activation is pending", func(t *testing.T) {
+		factory := newServiceCountingStoreFactory()
+		meta := ch.Meta{
+			Key: ch.ChannelKey("1:apply-meta-deadline"), ID: ch.ChannelID{ID: "apply-meta-deadline", Type: 1},
+			Epoch: 1, LeaderEpoch: 1, Leader: 1, Replicas: []ch.NodeID{1}, ISR: []ch.NodeID{1}, MinISR: 1, Status: ch.StatusActive,
+		}
+		factory.blockLoad(meta.Key)
+		clusterAPI, err := New(Config{LocalNode: 1, Store: factory, ReactorCount: 1})
+		require.NoError(t, err)
+		cluster := clusterAPI.(*cluster)
+		defer func() {
+			factory.unblockLoad()
+			require.NoError(t, cluster.Close())
+		}()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+		errCh := make(chan error, 1)
+		go func() { errCh <- cluster.ApplyMetaContext(ctx, meta) }()
+		factory.waitLoadStarted(t)
+
+		select {
+		case err := <-errCh:
+			require.ErrorIs(t, err, context.DeadlineExceeded)
+		case <-time.After(time.Second):
+			t.Fatal("ApplyMetaContext did not honor the caller deadline")
+		}
+	})
+}
+
 func TestAppendAdmissionGuardRejectsLeaderAppend(t *testing.T) {
 	factory := store.NewMemoryFactory()
 	meta := ch.Meta{Key: ch.ChannelKey("1:guarded"), ID: ch.ChannelID{ID: "guarded", Type: 1}, Epoch: 2, LeaderEpoch: 3, Leader: 1, Replicas: []ch.NodeID{1}, ISR: []ch.NodeID{1}, MinISR: 1, Status: ch.StatusActive}

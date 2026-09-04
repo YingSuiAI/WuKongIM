@@ -44,6 +44,14 @@ func (r *Runtime) RequestSlotReplicaMove(ctx context.Context, req SlotReplicaMov
 	if err := ctxErr(ctx); err != nil {
 		return SlotReplicaMoveResult{}, err
 	}
+	unlock, err := r.lockStartedSlotRequest()
+	if err != nil {
+		return SlotReplicaMoveResult{}, err
+	}
+	defer unlock()
+	if err := ctxErr(ctx); err != nil {
+		return SlotReplicaMoveResult{}, err
+	}
 	st, err := r.LocalState(ctx)
 	if err != nil {
 		return SlotReplicaMoveResult{}, err

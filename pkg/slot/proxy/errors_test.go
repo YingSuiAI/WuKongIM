@@ -35,6 +35,26 @@ func TestRouteErrorMatchesCanonicalAliases(t *testing.T) {
 	}
 }
 
+func TestRouteErrorMatchesWrappedSentinels(t *testing.T) {
+	tests := []struct {
+		name     string
+		sentinel *routeError
+	}{
+		{name: "no leader", sentinel: ErrNoLeader},
+		{name: "not leader", sentinel: ErrNotLeader},
+		{name: "slot not found", sentinel: ErrSlotNotFound},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := fmt.Errorf("remote propose failed: %w", tt.sentinel)
+			if !routeErrorMatches(err, tt.sentinel) {
+				t.Fatalf("routeErrorMatches should match wrapped sentinel %v", tt.sentinel)
+			}
+		})
+	}
+}
+
 func TestRouteErrorDoesNotMatchRemovedLegacyAliases(t *testing.T) {
 	tests := []struct {
 		name     string

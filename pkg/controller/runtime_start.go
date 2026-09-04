@@ -40,6 +40,7 @@ func (r *Runtime) startVoter(ctx context.Context) error {
 		r.sm, r.raft = nil, nil
 		return err
 	}
+	r.lifecycle.CompareAndSwap(uint32(runtimeLifecycleStarting), uint32(runtimeLifecycleRaftStarted))
 	srv, err := server.New(server.Config{StateSource: sm, Proposer: service, Now: r.cfg.Now})
 	if err != nil {
 		_ = service.Stop()

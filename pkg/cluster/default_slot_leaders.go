@@ -161,7 +161,7 @@ func (n *Node) updateDefaultSlotsReady(revision uint64, ready bool) {
 	if n.controlSnapshot.Revision != revision || n.snapshot.StateRevision != revision {
 		return
 	}
-	n.snapshot.SlotsReady = ready
+	n.snapshot.SlotsReady = ready && !n.stopping.Load()
 }
 
 func routingSlotStatuses(statuses []slots.Status) []routing.SlotStatus {

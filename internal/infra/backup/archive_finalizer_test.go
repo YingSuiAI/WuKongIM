@@ -8,9 +8,29 @@ import (
 	"testing"
 	"time"
 
+	backupcontract "github.com/WuKongIM/WuKongIM/internal/contracts/backup"
 	backupinfra "github.com/WuKongIM/WuKongIM/internal/infra/backup"
 	backupartifact "github.com/WuKongIM/WuKongIM/pkg/backup"
 )
+
+func TestArchiveFinalizerRejectsIncompleteSlotProgressBeforeRepositoryAccess(t *testing.T) {
+	finalizer, err := backupinfra.NewArchiveFinalizer(
+		backupinfra.ArchiveFinalizerOptions{
+			ClusterID: "cluster-a", Application: "test",
+			Now: time.Now,
+		},
+	)
+	if err != nil {
+		t.Fatalf("NewArchiveFinalizer(): %v", err)
+	}
+	job := backupcontract.BackupJob{
+		ID: "incomplete", Trigger: backupcontract.TriggerManual,
+		Slots: make([]backupcontract.SlotProgress, backupcontract.HashSlotCount-1),
+	}
+	if err := finalizer.Publish(context.Background(), nil, job); err == nil {
+		t.Fatal("Publish() error = nil")
+	}
+}
 
 func TestArchiveFinalizerPrunesExpiredIncompleteBackup(t *testing.T) {
 	root := t.TempDir()

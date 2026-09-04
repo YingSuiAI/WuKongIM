@@ -128,6 +128,10 @@ func TestRaftLoggerWarningMapsToWarnLevel(t *testing.T) {
 	require.Len(t, entries, 1)
 	require.Equal(t, "WARN", entries[0].level)
 	require.Equal(t, "leader lost", entries[0].msg)
+
+	field, ok := entries[0].field("raftEvent")
+	require.True(t, ok)
+	require.Equal(t, "leader_change", field.Value)
 }
 
 func TestRaftLoggerClassifiesLeaderChange(t *testing.T) {
