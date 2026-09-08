@@ -2,6 +2,7 @@ package channel
 
 import (
 	"context"
+	"github.com/WuKongIM/WuKongIM/pkg/messagepayload"
 	"strconv"
 	"time"
 )
@@ -151,6 +152,9 @@ type Message struct {
 	// SyncOnce marks one-shot command-sync messages in the durable channel log.
 	SyncOnce bool
 	Payload  []byte
+	// PayloadCorrection is present only on current-body read projections. Raw
+	// log, replication, backup and SEND idempotency readers never populate it.
+	PayloadCorrection *messagepayload.Proof `json:"payload_correction,omitempty"`
 }
 
 // OpID identifies an asynchronous operation inside one channel generation.

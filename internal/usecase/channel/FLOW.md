@@ -12,6 +12,8 @@ including ordinary subscribers, temporary lists, allowlists, denylists,
 mutation versions, bounded page or chunk iteration, and the trusted-service
 committed-head, exact committed-message proof, and committed-message recovery
 page reads.
+It also owns the service-only create-only payload correction and original SEND
+claim lookup ports; ordinary message bodies are never Agent stream events.
 It does not own entry protocols, concrete storage, cluster transport, or caches.
 
 ## Boundaries
@@ -56,6 +58,13 @@ It does not own entry protocols, concrete storage, cluster transport, or caches.
    Channel remains absent. If retention advances beyond an older scan head,
    the terminal page is empty with `retention_gap=true`, not an unavailable
    error.
+7. A payload correction verifies the exact original tuple and SHA-256 through
+   Channel authority, then creates one immutable Slot-owned projection. Point,
+   scan and history expose corrected bytes with an optional outer digest proof;
+   original logs, SEND indexes, message IDs, sequence and committed head stay raw.
+8. Original SEND claim lookup routes the existing durable sender/client key to
+   Channel authority and verifies commitment. `not_committed` never authorizes a
+   new SEND; conflicting original digests remain conflicts.
 
 ## Invariants and Failure Semantics
 
@@ -71,9 +80,9 @@ It does not own entry protocols, concrete storage, cluster transport, or caches.
 ## Read First
 
 - [Application service](app.go)
-- [Committed-head port](committed_head.go)
 - [Committed-message proof port](committed_message.go)
-- [Committed-message recovery port](committed_messages.go)
+- [Payload correction and claim ports](payload_correction.go)
+- [Correction operations and rollout](../../../docs/runbooks/message-payload-correction.md)
 - [Import boundary](import_boundary_test.go)
 
 ## Update Triggers

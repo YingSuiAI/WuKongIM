@@ -74,6 +74,9 @@ type slot struct {
 	basicStatusRefreshCount int
 	// fullStatusRefreshCount counts full RawNode.Status refreshes for regression tests.
 	fullStatusRefreshCount int
+	// pendingReads waits for Raft quorum ReadIndex and durable FSM application.
+	pendingReads map[string]*readBarrierRequest
+	readSequence uint64
 }
 
 type trackedFuture struct {
@@ -100,6 +103,7 @@ const (
 	controlCompactLog
 	controlCaptureHashSlotSnapshot
 	controlFreshStatus
+	controlReadBarrier
 )
 
 type controlAction struct {
@@ -113,6 +117,7 @@ type controlAction struct {
 	backupSnapshot *hashSlotSnapshotRequest
 	strictTransfer *strictLeaderTransferRequest
 	freshStatus    *freshStatusRequest
+	readBarrier    *readBarrierRequest
 }
 
 // strictLeaderTransferRequest carries one exact, timeout-bounded placement
@@ -641,6 +646,8 @@ func (g *slot) processControls(ctx context.Context) bool {
 			g.refreshFullStatus()
 			status, err := g.statusSnapshot()
 			request.finish(freshStatusResponse{status: status, err: err})
+		case controlReadBarrier:
+			g.startReadBarrier(action.readBarrier)
 		}
 	}
 	return len(controls) > 0
@@ -814,6 +821,7 @@ func (g *slot) processReady(ctx context.Context, transport Transport) (bool, boo
 	g.ensurePendingProposalCapacity(proposalCount)
 	g.ensurePendingConfigCapacity(configCount)
 	g.trackReadyEntries(ready.Entries)
+	g.observeReadStates(ready.ReadStates)
 
 	if len(ready.Messages) > 0 {
 		g.transportBuf = wrapMessagesIntoForTransport(g.transportBuf[:0], g.id, ready.Messages, transport)
@@ -1290,6 +1298,7 @@ func (g *slot) refreshFullStatus() {
 func (g *slot) refreshDurableAppliedStatus() {
 	g.mu.Lock()
 	g.status.AppliedIndex = g.durableAppliedIndex
+	g.resolveReadBarriersLocked()
 	applyEvent := g.applyStateEventLocked(g.status.CommitIndex, g.durableAppliedIndex)
 	g.mu.Unlock()
 	applyEvent.emit()
@@ -1307,6 +1316,7 @@ func (g *slot) applyBasicStatusLocked(st raft.BasicStatus) (leaderChangeEvent, a
 	g.status.CommitIndex = st.Commit
 	g.status.AppliedIndex = g.durableAppliedIndex
 	g.status.Role = nextRole
+	g.resolveReadBarriersLocked()
 	applyEvent := g.applyStateEventLocked(st.Commit, g.durableAppliedIndex)
 	var completions []futureCompletion
 	if prevRole == RoleLeader && g.status.Role != RoleLeader {
@@ -2051,6 +2061,7 @@ func (g *slot) failPending(err error) {
 }
 
 func (g *slot) failPendingLocked(err error) []futureCompletion {
+	g.failReadBarriersLocked(err)
 	completions := make([]futureCompletion, 0, len(g.submittedProposals)+len(g.submittedConfigs)+len(g.pendingProposals)+len(g.pendingConfigs))
 	for i := range g.controls {
 		if g.controls[i].strictTransfer != nil {
@@ -2061,6 +2072,9 @@ func (g *slot) failPendingLocked(err error) []futureCompletion {
 		}
 		if g.controls[i].freshStatus != nil {
 			g.controls[i].freshStatus.finish(freshStatusResponse{err: err})
+		}
+		if g.controls[i].readBarrier != nil {
+			g.controls[i].readBarrier.finish(readBarrierResponse{err: err})
 		}
 	}
 	for _, fut := range g.submittedProposals {

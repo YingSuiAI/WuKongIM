@@ -10,6 +10,7 @@ import (
 	clusterchannels "github.com/WuKongIM/WuKongIM/pkg/cluster/channels"
 	clusternet "github.com/WuKongIM/WuKongIM/pkg/cluster/net"
 	metadb "github.com/WuKongIM/WuKongIM/pkg/db/meta"
+	"github.com/WuKongIM/WuKongIM/pkg/messagepayload"
 	"github.com/WuKongIM/WuKongIM/pkg/transport"
 )
 
@@ -91,6 +92,29 @@ func (s *ConversationStore) HydrateConversationHeads(ctx context.Context, uid st
 	if len(heads) != len(memberships) {
 		return nil, channelruntime.ErrInvalidConfig
 	}
+	var bodyIndexes []int
+	var bodies []channelruntime.Message
+	for index, item := range heads {
+		if item.Err == nil && item.Head.Found {
+			bodyIndexes = append(bodyIndexes, index)
+			bodies = append(bodies, item.Head.Message)
+		}
+	}
+	current, bodyErr := currentMessagePayloads(ctx, s.node, bodies)
+	for index, headIndex := range bodyIndexes {
+		if bodyErr != nil {
+			// Preserve the existing item-scoped hydration boundary. A purged or
+			// unavailable Channel must not invalidate unrelated current heads.
+			one, err := currentMessagePayloads(ctx, s.node, bodies[index:index+1])
+			if err != nil {
+				heads[headIndex].Err = err
+			} else {
+				heads[headIndex].Head.Message = one[0]
+			}
+		} else {
+			heads[headIndex].Head.Message = current[index]
+		}
+	}
 	for index, item := range heads {
 		if item.Err != nil {
 			switch {
@@ -148,7 +172,8 @@ func (s *ConversationStore) ActivateUserChannelMembership(ctx context.Context, u
 }
 
 func retryableConversationHeadError(err error) bool {
-	return errors.Is(err, channelruntime.ErrNotReady) ||
+	return errors.Is(err, messagepayload.ErrUnavailable) || errors.Is(err, messagepayload.ErrNotFound) ||
+		errors.Is(err, channelruntime.ErrNotReady) ||
 		errors.Is(err, channelruntime.ErrNotLeader) ||
 		errors.Is(err, channelruntime.ErrStaleMeta) ||
 		errors.Is(err, channelruntime.ErrBackpressured) ||

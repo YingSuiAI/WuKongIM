@@ -6,6 +6,7 @@ import (
 
 	channelusecase "github.com/WuKongIM/WuKongIM/internal/usecase/channel"
 	ch "github.com/WuKongIM/WuKongIM/pkg/channel"
+	"github.com/WuKongIM/WuKongIM/pkg/messagepayload"
 )
 
 // ReadCommittedMessage maps one exact service proof to the routed cluster facade.
@@ -26,11 +27,12 @@ func (s *ChannelMetadataStore) ReadCommittedMessage(ctx context.Context, key cha
 	if err != nil || !found {
 		return channelusecase.CommittedMessage{}, found, err
 	}
-	return channelusecase.CommittedMessage{
-		MessageID: message.MessageID, MessageSeq: message.MessageSeq,
-		ChannelID: message.ChannelID, ChannelType: message.ChannelType, Setting: message.Setting,
-		FromUID: message.FromUID, ClientMsgNo: message.ClientMsgNo,
-		ServerTimestampMS: message.ServerTimestampMS, SyncOnce: message.SyncOnce,
-		Payload: append([]byte(nil), message.Payload...),
-	}, true, nil
+	current, err := currentMessagePayloads(ctx, s.node, []ch.Message{message})
+	if errors.Is(err, messagepayload.ErrNotFound) {
+		return channelusecase.CommittedMessage{}, false, nil
+	}
+	if err != nil {
+		return channelusecase.CommittedMessage{}, false, err
+	}
+	return committedMessageFromCurrent(current[0]), true, nil
 }

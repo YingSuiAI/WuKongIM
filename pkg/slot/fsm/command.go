@@ -54,6 +54,7 @@ const (
 	cmdTypeAdmitPersonDirectoryTaskBatch       uint8 = 63
 	cmdTypeEnsureUserChannelMembershipBatch    uint8 = 64
 	cmdTypeCompletePersonDirectoryTaskBatch    uint8 = 65
+	cmdTypeCreateMessagePayloadCorrection      uint8 = 66
 	cmdTypeBindPluginUser                      uint8 = 42
 	cmdTypeUnbindPluginUser                    uint8 = 43
 
@@ -241,6 +242,7 @@ var commandDecoders = map[uint8]commandDecoder{
 	cmdTypeAdmitPersonDirectoryTaskBatch:       decodeAdmitPersonDirectoryTaskBatch,
 	cmdTypeEnsureUserChannelMembershipBatch:    decodeEnsureUserChannelMembershipBatch,
 	cmdTypeCompletePersonDirectoryTaskBatch:    decodeCompletePersonDirectoryTaskBatch,
+	cmdTypeCreateMessagePayloadCorrection:      decodeCreateMessagePayloadCorrection,
 	cmdTypeBindPluginUser:                      decodeBindPluginUser,
 	cmdTypeUnbindPluginUser:                    decodeUnbindPluginUser,
 	cmdTypeApplyDelta:                          decodeApplyDelta,
@@ -306,10 +308,13 @@ func (c *createUserCmd) apply(wb *metadb.WriteBatch, hashSlot uint16) error {
 
 type upsertDeviceCmd struct {
 	device metadb.Device
+	result *metadb.DeviceCredentialUpsertResult
 }
 
 func (c *upsertDeviceCmd) apply(wb *metadb.WriteBatch, hashSlot uint16) error {
-	return wb.UpsertDevice(hashSlot, c.device)
+	var err error
+	c.result, err = wb.UpsertDevice(hashSlot, c.device)
+	return err
 }
 
 // --- UpsertChannel ---

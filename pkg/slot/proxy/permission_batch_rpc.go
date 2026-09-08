@@ -204,6 +204,9 @@ func (s *Store) handlePermissionBatchRPC(ctx context.Context, body []byte) ([]by
 }
 
 func (s *Store) readPermissionMetadataLocal(ctx context.Context, slotID multiraft.SlotID, reads []PermissionMetadataRead) ([]PermissionMetadataReadResult, error) {
+	if err := s.confirmCurrentSlotRead(ctx, slotID); err != nil {
+		return nil, err
+	}
 	results := make([]PermissionMetadataReadResult, len(reads))
 	for i, read := range reads {
 		if err := ctx.Err(); err != nil {

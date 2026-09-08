@@ -63,6 +63,9 @@ func (s *Store) ListUserChannelMembershipPage(ctx context.Context, uid string, a
 	slotID := s.cluster.SlotForKey(uid)
 	hashSlot := hashSlotForKey(s.cluster, uid)
 	if s.shouldServeSlotLocally(slotID) {
+		if err := s.confirmCurrentSlotRead(ctx, slotID); err != nil {
+			return nil, metadb.UserChannelMembershipCursor{}, false, err
+		}
 		return s.db.MetaDB().HashSlot(metadb.HashSlot(hashSlot)).ListUserChannelMembershipPage(ctx, uid, after, limit)
 	}
 	resp, err := s.callMembershipRPC(ctx, slotID, membershipRPCRequest{
@@ -81,6 +84,9 @@ func (s *Store) GetUserChannelMembership(ctx context.Context, uid, channelID str
 	slotID := s.cluster.SlotForKey(uid)
 	hashSlot := hashSlotForKey(s.cluster, uid)
 	if s.shouldServeSlotLocally(slotID) {
+		if err := s.confirmCurrentSlotRead(ctx, slotID); err != nil {
+			return metadb.UserChannelMembership{}, false, err
+		}
 		return s.db.MetaDB().HashSlot(metadb.HashSlot(hashSlot)).GetUserChannelMembership(ctx, uid, channelID, channelType)
 	}
 	resp, err := s.callMembershipRPC(ctx, slotID, membershipRPCRequest{
@@ -138,6 +144,11 @@ func (s *Store) handleMembershipRPC(ctx context.Context, body []byte) ([]byte, e
 		return statusBody, err
 	}
 	hashSlot := hashSlotForKey(s.cluster, req.UID)
+	if req.Op == membershipRPCListOrdinary || req.Op == membershipRPCGetOrdinary {
+		if err := s.confirmCurrentSlotRead(ctx, slotID); err != nil {
+			return nil, err
+		}
+	}
 	switch req.Op {
 	case membershipRPCListOrdinary:
 		rows, cursor, done, err := s.db.MetaDB().HashSlot(metadb.HashSlot(hashSlot)).ListUserChannelMembershipPage(ctx, req.UID, req.OrdinaryCursor, req.Limit)

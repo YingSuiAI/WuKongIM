@@ -152,7 +152,11 @@ func (n *Node) defaultSlotTransport() multiraft.Transport {
 	if n == nil || n.transportClient == nil {
 		return noopSlotTransport{}
 	}
-	return networkSlotTransport{sender: n.transportClient}
+	var transport multiraft.Transport = networkSlotTransport{sender: n.transportClient}
+	if n.slotTransportDecorator != nil {
+		transport = n.slotTransportDecorator(transport)
+	}
+	return transport
 }
 
 func (n *Node) registerDefaultSlotHandlers(runtime *multiraft.Runtime, slotProposer defaultSlotProposer) {
@@ -165,6 +169,7 @@ func (n *Node) registerDefaultSlotHandlers(runtime *multiraft.Runtime, slotPropo
 	n.transportServer.Register(clusternet.RPCSlotStatus, slotStatusHandler{runtime: runtime})
 	n.transportServer.Register(clusternet.RPCChannelMigrationMeta, channelMigrationMetaHandler{node: n})
 	n.transportServer.Register(clusternet.RPCMessageEventAppend, messageEventAppendRPCHandler{node: n})
+	n.transportServer.Register(clusternet.RPCMessagePayloadCorrection, messagePayloadCorrectionRPCHandler{node: n})
 }
 
 // noopSlotTransport is sufficient for the default single-node Slot runtime.

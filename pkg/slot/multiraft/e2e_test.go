@@ -25,6 +25,7 @@ type asyncNetworkConfig struct {
 	TickInterval  time.Duration
 	ElectionTick  int
 	HeartbeatTick int
+	WrapTransport func(NodeID, Transport) Transport
 }
 
 type asyncTestNetwork struct {
@@ -75,11 +76,15 @@ func newAsyncTestClusterWithObserver(t testing.TB, nodeIDs []NodeID, cfg asyncNe
 
 	for _, nodeID := range nodeIDs {
 		transport := &clusterTransport{network: network, from: nodeID}
+		var runtimeTransport Transport = transport
+		if cfg.WrapTransport != nil {
+			runtimeTransport = cfg.WrapTransport(nodeID, transport)
+		}
 		rt, err := New(Options{
 			NodeID:       nodeID,
 			TickInterval: cfg.TickInterval,
 			Workers:      1,
-			Transport:    transport,
+			Transport:    runtimeTransport,
 			Observer:     observer,
 			Raft: RaftOptions{
 				ElectionTick:  cfg.ElectionTick,

@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/WuKongIM/WuKongIM/pkg/db/internal/dberrors"
+	"github.com/WuKongIM/WuKongIM/pkg/db/internal/engine"
 	"github.com/WuKongIM/WuKongIM/pkg/db/internal/schema"
 )
 
@@ -66,6 +67,68 @@ var DeviceTable = deviceTable.Schema()
 // UpsertDevice stores a device regardless of prior existence.
 func (s *Shard) UpsertDevice(ctx context.Context, device Device) error {
 	return deviceTable.Upsert(ctx, s, device)
+}
+
+// DeviceCredentialUpsertResult is owned by one logical device command. Its
+// status is authoritative only after the owning batch commits successfully.
+type DeviceCredentialUpsertResult struct {
+	// Stale reports a committed no-op that preserved the newer stored credential.
+	Stale bool
+}
+
+// stageDeviceCredentialUpsert orders the credential check with its write under
+// the metadata commit lock. The table overlay includes earlier commands in the
+// same Raft batch, so an old incarnation cannot overwrite a newly staged one.
+// Expected rejection is command-local data, never a shared physical Build error.
+func stageDeviceCredentialUpsert(b *Batch, hashSlot HashSlot, device Device) (*DeviceCredentialUpsertResult, error) {
+	if err := b.ensureOpen(); err != nil {
+		return nil, err
+	}
+	if err := validateDevice(device); err != nil {
+		return nil, err
+	}
+	pk, err := deviceTable.primaryKey(device)
+	if err != nil {
+		return nil, err
+	}
+	primaryKey, err := deviceTable.primaryRowKey(hashSlot, pk)
+	if err != nil {
+		return nil, err
+	}
+	value, err := deviceTable.encodeValue(primaryKey, device)
+	if err != nil {
+		return nil, err
+	}
+	result := &DeviceCredentialUpsertResult{}
+	b.addOp(hashSlot, func(_ context.Context, state *batchCommitState, batch *engine.Batch) error {
+		existing, found, err := deviceTable.loadBatchRow(state, hashSlot, pk, primaryKey)
+		if err != nil {
+			return err
+		}
+		if found && deviceCredentialNewer(existing, device) {
+			result.Stale = true
+			return nil
+		}
+		if err := batch.Set(primaryKey, value); err != nil {
+			return err
+		}
+		state.tableRows[string(primaryKey)] = tableRowOverlay{value: value, exists: true}
+		return nil
+	})
+	return result, nil
+}
+
+// deviceCredentialNewer preserves the issued credential's lexicographic
+// generation order. Equal incarnations still support token update and quit;
+// zero-generation rows remain writable until a newer incarnation is issued.
+func deviceCredentialNewer(existing, incoming Device) bool {
+	if existing.InstallationGeneration != incoming.InstallationGeneration {
+		return existing.InstallationGeneration > incoming.InstallationGeneration
+	}
+	if existing.SessionGeneration != incoming.SessionGeneration {
+		return existing.SessionGeneration > incoming.SessionGeneration
+	}
+	return existing.AuthorizationFence > incoming.AuthorizationFence
 }
 
 // GetDevice returns one device by UID and device flag.

@@ -22,7 +22,8 @@ It does not own HTTP, gateway frames, concrete storage, or cluster transport.
 ## Main Flows
 
 1. Token update validates identity and device fields, creates missing UID
-   metadata, upserts per-device token state, and schedules owner-local
+   metadata, atomically upserts per-device token state through the Slot FSM,
+   propagates stale-incarnation rejection, and schedules owner-local
    same-device close for master-device replacement.
 2. Device quit clears the selected stored token and schedules owner-local
    matching-device close; online status prefers authority routes when configured.
@@ -38,6 +39,8 @@ It does not own HTTP, gateway frames, concrete storage, or cluster transport.
 - Cache reload replaces the complete set rather than incrementally merging
   restored and pre-restore state.
 - Ordinary operations never bypass foreground storage fencing.
+- Credential generation ordering belongs to the atomic metadata write, not a
+  pre-read. Same-incarnation token updates and device quit remain valid.
 
 ## Read First
 

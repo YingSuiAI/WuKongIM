@@ -184,6 +184,11 @@ func (s *Shard) UpsertChannelRuntimeMeta(ctx context.Context, meta ChannelRuntim
 	if err := batch.Set(key, value); err != nil {
 		return 0, err
 	}
+	if next.RetentionThroughSeq > existing.RetentionThroughSeq {
+		if err := stagePurgePayloadCorrections(batch, s.hashSlot, meta.ChannelID, meta.ChannelType, next.RetentionThroughSeq); err != nil {
+			return 0, err
+		}
+	}
 	if err := batch.Commit(true); err != nil {
 		return 0, err
 	}
@@ -221,6 +226,9 @@ func (s *Shard) DeleteChannelRuntimeMeta(ctx context.Context, channelID string, 
 	batch := s.db.engine.NewBatch()
 	defer batch.Close()
 	if err := batch.Delete(key); err != nil {
+		return err
+	}
+	if err := stagePurgePayloadCorrections(batch, s.hashSlot, channelID, channelType, ^uint64(0)); err != nil {
 		return err
 	}
 	return batch.Commit(true)
@@ -297,6 +305,9 @@ func (s *Shard) AdvanceChannelRetentionThroughSeq(ctx context.Context, req Chann
 		return err
 	}
 	if err := batch.Set(key, value); err != nil {
+		return err
+	}
+	if err := stagePurgePayloadCorrections(batch, s.hashSlot, req.ChannelID, req.ChannelType, next.RetentionThroughSeq); err != nil {
 		return err
 	}
 	return batch.Commit(true)

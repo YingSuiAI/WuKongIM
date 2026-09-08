@@ -99,6 +99,13 @@ func InspectScan(ctx context.Context, db *MetaDB, req InspectScanRequest) (Inspe
 		return inspectScanTable(ctx, db, req, slots, personDirectoryTaskTable, inspectPersonDirectoryTaskRow)
 	case "channel_latest":
 		return inspectScanTable(ctx, db, req, slots, channelLatestTable, inspectChannelLatestRow)
+	case "message_payload_correction":
+		return inspectScanTable(ctx, db, req, slots, messagePayloadCorrectionTable, func(c MessagePayloadCorrection) InspectRow {
+			return InspectRow{"channel_id": c.ChannelID, "channel_type": c.ChannelType, "message_seq": c.MessageSeq,
+				"message_id": c.MessageID, "from_uid": c.FromUID, "client_msg_no": c.ClientMsgNo,
+				"operation_id": c.OperationID, "original_payload_sha256": c.OriginalPayloadSHA256,
+				"corrected_payload_sha256": c.CorrectedPayloadSHA256, "corrected_payload": append([]byte(nil), c.CorrectedPayload...)}
+		})
 	case "message_event_state":
 		return inspectScanTable(ctx, db, req, slots, messageEventStateTable, inspectMessageEventStateRow)
 	case "message_event_cursor":

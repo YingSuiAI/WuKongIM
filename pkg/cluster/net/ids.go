@@ -129,6 +129,8 @@ const (
 	RPCChannelCommittedMessage
 	// RPCChannelCommittedMessages reads one fenced committed-message recovery page.
 	RPCChannelCommittedMessages
+	// RPCMessagePayloadCorrection carries explicit corrections, proof reads and committed claim lookup.
+	RPCMessagePayloadCorrection
 )
 
 func transportServiceAlias(serviceID uint8) string {
@@ -253,6 +255,8 @@ func transportServiceAlias(serviceID uint8) string {
 		return "channel migration meta"
 	case RPCMessageEventAppend:
 		return "message event append"
+	case RPCMessagePayloadCorrection:
+		return "message payload correction"
 	case RPCDeliveryEventPush:
 		return "delivery event push"
 	default:

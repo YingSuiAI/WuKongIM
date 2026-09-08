@@ -217,15 +217,6 @@ func TestQuorumLogRetriesSameImmutableRangeAfterLostDurabilityResponses(t *testi
 	if _, err := log.Commit(context.Background(), proposal); err == nil {
 		t.Fatal("Commit() error = nil after every durability response was lost")
 	}
-	writesAfterLostResponse := harness.syncCalls
-	other := proposal
-	other.CommandID[30] = 1
-	if _, err := log.Commit(context.Background(), other); !errors.Is(err, ch.ErrBackpressured) {
-		t.Fatalf("Commit(other while proposal ambiguous) error = %v, want %v", err, ch.ErrBackpressured)
-	}
-	if harness.syncCalls != writesAfterLostResponse {
-		t.Fatalf("other command issued %d writes while exact proposal was pending", harness.syncCalls-writesAfterLostResponse)
-	}
 	receipt, err := log.Commit(context.Background(), proposal)
 	if err != nil {
 		t.Fatalf("Commit(exact retry) error = %v", err)
@@ -333,19 +324,72 @@ func TestQuorumLogDoesNotBindUnsafeOrDifferentLogicalRetry(t *testing.T) {
 			if _, err := log.Commit(context.Background(), original); err == nil {
 				t.Fatal("Commit() error = nil after every durability response was lost")
 			}
-			before := harness.syncCalls
 			retry := original
 			retry.CommandID = ch.CommandID{31: 52}
 			retry.Records = cloneRecords(original.Records)
 			retry.Records[0].ID++
 			testCase.mutate(&retry)
-			if _, err := log.Commit(context.Background(), retry); !errors.Is(err, ch.ErrBackpressured) {
-				t.Fatalf("Commit(unsafe retry) error = %v, want %v", err, ch.ErrBackpressured)
+			receipt, err := log.Commit(context.Background(), retry)
+			if err != nil {
+				t.Fatalf("Commit(independent proposal after resolving pending) error = %v", err)
 			}
-			if harness.syncCalls != before {
-				t.Fatalf("unsafe retry issued %d durable writes, want zero", harness.syncCalls-before)
+			// The memory store tests quorum identity, not the MessageDB business
+			// duplicate index. These records may never adopt the old receipt.
+			if receipt.RetryBinding != nil || receipt.CommandID != retry.CommandID || receipt.First != 2 || receipt.Last != 2 {
+				t.Fatalf("different proposal was rebound to old identity: %+v", receipt)
 			}
 		})
+	}
+}
+
+func TestQuorumLogNewWaiterRetainsUnknownProposalThroughFailedRecoveryAndCancellation(t *testing.T) {
+	harness := newReplicaHarness(t, 1, 2, 3)
+	log, err := newQuorumLog(quorumLogConfig{
+		Local: 1, Store: harness.stores[1], Recovery: harness, Durability: harness,
+		RecoveryTimeout: time.Minute, RecoveryPageBytes: 64 << 10,
+		MaxChannels: 8, MaxVoters: 3, MaxProposalRecords: 256, MaxProposalBytes: 64 << 10, MaxRetainedCommands: 16,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	authority := Authority{Key: "2:pending-recovery", ChannelID: ch.ChannelID{ID: "pending-recovery", Type: 2},
+		ID: AuthorityID{ChannelEpoch: 1, LeaderTerm: 1, FenceVersion: 1}, Leader: 1, Voters: []ch.NodeID{1, 2, 3}, WriteQuorum: 2}
+	if _, err := log.Install(context.Background(), authority); err != nil {
+		t.Fatal(err)
+	}
+	original := Proposal{Key: authority.Key, Expected: authority.ID, CommandID: ch.CommandID{31: 81}, ServerAllocatedMessageIDs: true,
+		Records: []ch.Record{{ID: 801, Epoch: 1, FromUID: "sender", ClientMsgNo: "old", Payload: []byte("old"), SizeBytes: 3, ServerTimestampMS: 801}}}
+	harness.loseResponses = 3
+	if _, err := log.Commit(context.Background(), original); err == nil {
+		t.Fatal("wanted ambiguous original proposal")
+	}
+	pending := log.channels[authority.Key].pending
+	next := original
+	next.CommandID = ch.CommandID{31: 82}
+	next.Records = []ch.Record{{ID: 802, Epoch: 1, FromUID: "sender", ClientMsgNo: "new", Payload: []byte("new"), SizeBytes: 3, ServerTimestampMS: 802}}
+	harness.loseResponses = 3
+	if _, err := log.Commit(context.Background(), next); err == nil {
+		t.Fatal("wanted unresolved predecessor recovery")
+	}
+	if log.channels[authority.Key].pending != pending {
+		t.Fatal("failed recovery replaced the immutable pending proposal")
+	}
+	before := harness.syncCalls
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := log.Commit(canceled, next); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled new caller: %v", err)
+	}
+	if log.channels[authority.Key].pending != pending || harness.syncCalls != before {
+		t.Fatal("canceled waiter mutated pending proposal")
+	}
+	receipt, err := log.Commit(context.Background(), next)
+	if err != nil || receipt.First != 2 || receipt.Last != 2 {
+		t.Fatalf("new proposal after recovery: %+v, %v", receipt, err)
+	}
+	old, err := log.Commit(context.Background(), original)
+	if err != nil || old.First != 1 || old.Last != 1 || old.CommandID != original.CommandID {
+		t.Fatalf("original exact receipt changed: %+v, %v", old, err)
 	}
 }
 

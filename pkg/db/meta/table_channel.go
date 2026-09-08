@@ -222,6 +222,9 @@ func (b *Batch) DeleteChannel(hashSlot HashSlot, channelID string, channelType i
 		if err := engineBatch.Delete(primaryKey); err != nil {
 			return err
 		}
+		if err := stagePurgePayloadCorrections(engineBatch, hashSlot, channelID, channelType, ^uint64(0)); err != nil {
+			return err
+		}
 		delete(state.channelPublishes, string(primaryKey))
 		state.channelDeletes[string(primaryKey)] = struct{}{}
 		if len(directoryTaskKey) != 0 {
@@ -283,6 +286,9 @@ func (s *Shard) stageChannel(batch *engine.Batch, primaryKey []byte, channel Cha
 	}
 	if err := channelTable.stagePutIndexEntries(batch, s.hashSlot, channel, pk, value); err != nil {
 		return err
+	}
+	if channel.Disband != 0 {
+		return stagePurgePayloadCorrections(batch, s.hashSlot, channel.ChannelID, channel.ChannelType, ^uint64(0))
 	}
 	return nil
 }

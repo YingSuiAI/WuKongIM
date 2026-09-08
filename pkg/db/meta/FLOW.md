@@ -1,91 +1,55 @@
+---
+scope: package
+summary: Stores hash-slot metadata with typed tables, atomic batches, codecs, caches, inspection, and portable metadata snapshots.
+---
+
 # pkg/db/meta Flow
 
-`pkg/db/meta` owns hash-slot-scoped metadata storage on shared
-`pkg/db/internal` primitives. Storage code here must not import Pebble
-directly.
+## Responsibility
 
-## Core flow
+This package owns node-local hash-slot metadata storage. Typed tables cover
+identities, Channels, memberships, runtime metadata, tasks, event state, and
+payload-correction records.
 
-1. `MetaDB` exposes stable `Shard` handles per physical hash slot.
-2. Table specifications define rows and indexes; the registry drives
-   `Tables()`, inspect scans, snapshots, and shared primary/index behavior.
-3. Multi-hash-slot batches lock shards in sorted order, stage typed operations,
-   commit once, and publish cache invalidations only after commit.
-4. Channel-owned rows include Channel policy, subscribers, latest-message
-   metadata, runtime routing metadata, and migration state.
-5. UID-owned rows include users, devices, ordinary channel memberships, CMD
-   channel memberships, plugin bindings, and message-event state.
-6. Read-only inspect APIs expose stable bounded scans without mutating storage.
-7. Hash-slot snapshot, backup, restore, and deletion operate on registered row,
-   index, and system spans and clear affected caches after mutation. Portable
-   imports require the exact registry traversal order and strictly increasing
-   keys within each span; backup streams reject runtime-only and migration
-   spans before mutating the restore target.
-8. Channel runtime metadata create-only batches check existence and insert under
-   the same hash-slot lock and commit. An existing row returns `created=false`
-   without being overwritten; ordinary monotonic upsert remains the migration
-   and repair path.
+## Boundaries
 
-## Membership-backed conversation directory
+- Slot FSM and cluster/proxy layers own replicated ordering and distributed
+  read authority.
+- MetaDB supplies local shards, table operations, batches, and pinned views;
+  a local read alone is not a cluster-authority claim.
+- Engine internals stay behind the storage abstraction.
+- Table and codec changes follow the shared schema-compatibility document.
 
-There is no registered conversation table. Table IDs 6 and 7 remain reserved
-for the removed development-era ordinary and CMD conversation tables and must
-not be reused.
+## Main Flows
 
-`user_channel_membership` is UID-owned and keyed by:
+1. Obtain a stable shard for a hash slot.
+2. Validate typed values and encode primary rows, families, and indexes.
+3. Stage related changes in an ordered hash-slot batch and publish them only
+   after the owning durable commit.
+4. Read local values or pinned snapshots and maintain applicable caches.
+5. Export/import metadata row, index, and system spans; expose diagnostics
+   through registered table descriptors.
 
-```text
-(uid, channel_id, channel_type)
-```
+## Invariants and Failure Semantics
 
-It stores `join_seq`, monotonic badge `read_seq`, monotonic
-`deleted_to_seq`, explicit `activated_at`, tombstone metadata,
-`source_version`, and `updated_at`. Its directory index is:
+- Durable table, key, column, and codec identities are compatibility-sensitive.
+- Batch overlays preserve same-batch visibility and expected result semantics.
+- Credential stale no-ops are per-command results; they must not fail another
+  Slot's request sharing the physical commit. Hash-slot locks last through fsync.
+- Correction bodies remain separate from original Channel message logs.
+- Retention and terminal cleanup remove their owned correction rows.
+- Corrupt data, missing rows, expected conflicts, and storage failures retain
+  their distinct meanings.
 
-```text
-(uid, activated_at desc, channel_id, channel_type)
-```
+## Read First
 
-Point writes remove an obsolete activation-index key and install the new one in
-the same batch. Directory pages scan one UID hash slot and return the complete
-index cursor plus `done`; the limit bounds scanned rows. Ordinary message SEND
-does not touch this table.
+- [MetaDB and shard ownership](db.go)
+- [Batch behavior](batch.go)
+- [Registered schemas](schema.go)
+- [Metadata snapshots](snapshot.go)
+- [Schema compatibility](../SCHEMA_COMPATIBILITY.md)
 
-The membership reducer uses channel subscriber mutation `source_version` as a
-stale cross-Slot write fence. Later live upserts preserve personal state,
-rejoin after a later tombstone resets visibility from one captured Channel
-tail, and same-version live state wins reset conflicts. Explicit read, hide,
-and activation mutations reject tombstones and preserve `source_version`.
+## Update Triggers
 
-`user_cmd_channel_membership` is a separate UID-owned table keyed by:
-
-```text
-(uid, command_channel_id, channel_type)
-```
-
-It stores `start_seq`, monotonic `ack_seq`, tombstone metadata, and
-`updated_at`. Bind/unbind and sync acknowledgement mutate this table; command
-message SEND does not. CMD rows have no ordinary activation, read, or delete
-fields.
-
-## Other important tables
-
-- Subscriber mutations sort and deduplicate UIDs and update the Channel's
-  subscriber count and mutation version atomically with subscriber rows.
-- Channel runtime metadata keeps routing, leadership, retention, terminal
-  state, and write fences monotonic. Person-directory projection is a
-  generation-fenced `none -> pending -> ready` state backed by durable tasks;
-  a stale completion from a deleted/recreated Channel cannot mark the new
-  generation ready.
-- Channel latest rows are channel-owned projections whose sequence only
-  advances; they are not a per-user conversation directory.
-- Message-event state, cursor, and applied-event tables preserve idempotent
-  event reduction without raw replay rows. Platform authority sequences are
-  strictly increasing per run but may contain gaps consumed by non-public
-  ledger entries; the message-event transport sequence remains contiguous.
-- Migration tasks keep guarded runtime-meta updates and read-your-writes
-  overlays inside the same deterministic batch.
-
-Restore installs portable metadata into an isolated target, replays strictly
-ordered Slot FSM commands, and uses canonical snapshot digests as replication
-and final-verification fences.
+Update this guide when table ownership, codecs, batch visibility, indexes,
+caches, correction retention, inspection, or snapshot behavior changes.

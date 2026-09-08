@@ -218,7 +218,7 @@ func mapMultiraftProposeError(err error) error {
 func mapSlotApplyResult(command []byte, result []byte) error {
 	switch string(result) {
 	case metafsm.ApplyResultStaleMeta:
-		if !metafsm.IsChannelMigrationCommand(command) {
+		if !metafsm.IsChannelMigrationCommand(command) && !metafsm.IsDeviceCredentialCommand(command) {
 			return nil
 		}
 		return metadb.ErrStaleMeta

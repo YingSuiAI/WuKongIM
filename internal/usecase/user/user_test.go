@@ -34,12 +34,12 @@ func TestUpdateTokenCreatesMissingUserAndUpsertsDevice(t *testing.T) {
 	}
 }
 
-func TestUpdateTokenRejectsOlderCredentialGeneration(t *testing.T) {
+func TestUpdateTokenPropagatesAtomicCredentialRejection(t *testing.T) {
 	existing := metadb.Device{
 		UID: "u1", DeviceFlag: int64(frame.APP), DeviceID: "device-1", AppInstanceID: "app-1",
 		InstallationGeneration: 2, SessionGeneration: 2, AuthorizationFence: 2, Token: "new",
 	}
-	devices := &fakeDeviceStore{devices: map[deviceKey]metadb.Device{
+	devices := &fakeDeviceStore{upsertErr: metadb.ErrStaleMeta, devices: map[deviceKey]metadb.Device{
 		{uid: "u1", flag: int64(frame.APP), deviceID: "device-1"}: existing,
 	}}
 	app := New(Options{Users: &fakeUserStore{}, Devices: devices, DeviceReader: devices})
@@ -53,6 +53,9 @@ func TestUpdateTokenRejectsOlderCredentialGeneration(t *testing.T) {
 	}
 	if len(devices.upserted) != 0 {
 		t.Fatalf("stale credential upserts=%+v", devices.upserted)
+	}
+	if devices.upsertCalls != 1 {
+		t.Fatalf("authoritative credential attempts=%d, want one atomic write", devices.upsertCalls)
 	}
 }
 
@@ -253,12 +256,14 @@ func (f *fakeUserStore) CreateUser(_ context.Context, user metadb.User) error {
 }
 
 type fakeDeviceStore struct {
-	upsertErr error
-	upserted  []metadb.Device
-	devices   map[deviceKey]metadb.Device
+	upsertCalls int
+	upsertErr   error
+	upserted    []metadb.Device
+	devices     map[deviceKey]metadb.Device
 }
 
 func (f *fakeDeviceStore) UpsertDevice(_ context.Context, device metadb.Device) error {
+	f.upsertCalls++
 	if f.upsertErr != nil {
 		return f.upsertErr
 	}

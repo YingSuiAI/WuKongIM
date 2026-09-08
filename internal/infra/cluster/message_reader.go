@@ -74,6 +74,10 @@ func (r *ChannelMessageReader) SyncMessages(ctx context.Context, query message.C
 	if results[0].Err != nil {
 		return message.ChannelMessagePage{}, mapAppendError(results[0].Err)
 	}
+	results[0].Read.Messages, err = currentMessagePayloads(ctx, r.node, results[0].Read.Messages)
+	if err != nil {
+		return message.ChannelMessagePage{}, err
+	}
 	return channelMessagePageFromRead(query, limit, results[0].Read), nil
 }
 
@@ -111,6 +115,11 @@ func (r *ChannelMessageReader) SyncMessagesBatch(ctx context.Context, queries []
 	for index, readResult := range readResults {
 		if readResult.Err != nil {
 			results[index].Err = mapAppendError(readResult.Err)
+			continue
+		}
+		readResult.Read.Messages, err = currentMessagePayloads(ctx, r.node, readResult.Read.Messages)
+		if err != nil {
+			results[index].Err = err
 			continue
 		}
 		results[index].Page = channelMessagePageFromRead(queries[index], limits[index], readResult.Read)
@@ -170,15 +179,16 @@ func syncedMessagesFromChannel(in []channelruntime.Message) []message.SyncedMess
 			continue
 		}
 		out = append(out, message.SyncedMessage{
-			MessageID:   msg.MessageID,
-			MessageSeq:  msg.MessageSeq,
-			ChannelID:   msg.ChannelID,
-			ChannelType: msg.ChannelType,
-			Setting:     msg.Setting,
-			FromUID:     msg.FromUID,
-			ClientMsgNo: msg.ClientMsgNo,
-			Timestamp:   int32(msg.ServerTimestampMS / 1000),
-			Payload:     append([]byte(nil), msg.Payload...),
+			MessageID:         msg.MessageID,
+			MessageSeq:        msg.MessageSeq,
+			ChannelID:         msg.ChannelID,
+			ChannelType:       msg.ChannelType,
+			Setting:           msg.Setting,
+			FromUID:           msg.FromUID,
+			ClientMsgNo:       msg.ClientMsgNo,
+			Timestamp:         int32(msg.ServerTimestampMS / 1000),
+			Payload:           append([]byte(nil), msg.Payload...),
+			PayloadCorrection: msg.PayloadCorrection.Clone(),
 		})
 	}
 	return out

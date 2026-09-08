@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"strings"
+
+	"github.com/WuKongIM/WuKongIM/pkg/messagepayload"
 )
 
 var (
@@ -31,6 +33,7 @@ type CommittedMessage struct {
 	ServerTimestampMS int64
 	SyncOnce          bool
 	Payload           []byte
+	PayloadCorrection *messagepayload.Proof
 }
 
 // CommittedMessageReader performs one exact service-only proof read.
@@ -52,5 +55,6 @@ func (a *App) ReadCommittedMessage(ctx context.Context, key ChannelKey, identity
 	}
 	message, found, err := reader.ReadCommittedMessage(ctx, key, identity)
 	message.Payload = append([]byte(nil), message.Payload...)
+	message.PayloadCorrection = message.PayloadCorrection.Clone()
 	return message, found, err
 }

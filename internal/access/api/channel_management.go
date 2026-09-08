@@ -59,6 +59,8 @@ func (s *Server) registerChannelRoutes() {
 	s.engine.POST("/channel/committed-head", s.requireServiceToken, s.handleChannelCommittedHead)
 	s.engine.POST("/channel/committed-message", s.requireServiceToken, s.handleChannelCommittedMessage)
 	s.engine.POST("/channel/committed-messages", s.requireServiceToken, s.handleChannelCommittedMessages)
+	s.engine.POST("/channel/message-payload-correction", s.requireServiceToken, s.handleMessagePayloadCorrection)
+	s.engine.POST("/channel/committed-message-claim", s.requireServiceToken, s.handleCommittedMessageClaim)
 	s.engine.POST("/channel/info", s.handleChannelInfo)
 	s.engine.POST("/channel/delete", s.handleChannelDelete)
 	s.engine.POST("/channel/subscriber_add", s.handleChannelSubscriberAdd)

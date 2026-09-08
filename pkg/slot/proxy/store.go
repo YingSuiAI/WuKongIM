@@ -133,6 +133,9 @@ func (s *Store) GetChannelForPermission(ctx context.Context, channelID string, c
 	slotID := s.cluster.SlotForKey(channelID)
 	hashSlot := hashSlotForKey(s.cluster, channelID)
 	if s.shouldServeSlotLocally(slotID) {
+		if err := s.confirmCurrentSlotRead(ctx, slotID); err != nil {
+			return metadb.Channel{}, err
+		}
 		return s.db.ForHashSlot(hashSlot).GetChannel(ctx, channelID, channelType)
 	}
 	return s.getChannelForPermissionAuthoritative(ctx, slotID, hashSlot, channelID, channelType)

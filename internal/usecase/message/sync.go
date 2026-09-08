@@ -9,6 +9,7 @@ import (
 
 	channelmembers "github.com/WuKongIM/WuKongIM/internal/contracts/channelmembers"
 	metadb "github.com/WuKongIM/WuKongIM/pkg/db/meta"
+	"github.com/WuKongIM/WuKongIM/pkg/messagepayload"
 	runtimechannelid "github.com/WuKongIM/WuKongIM/pkg/protocol/channelid"
 )
 
@@ -64,6 +65,8 @@ type SyncedMessage struct {
 	Timestamp int32
 	// Payload is the immutable message payload.
 	Payload []byte
+	// PayloadCorrection proves a current body without changing its base identity.
+	PayloadCorrection *messagepayload.Proof
 	// EventMeta is the compact event lane summary for compatible clients.
 	EventMeta *MessageEventMeta
 }
@@ -76,7 +79,8 @@ type SyncChannelMessagesQuery struct {
 	ChannelID string
 	// ChannelType is the client-facing channel type.
 	ChannelType uint8
-	// StartMessageSeq is the inclusive starting sequence boundary.
+	// StartMessageSeq is the inclusive starting sequence boundary. Together
+	// with EndMessageSeq=0, zero selects the latest visible page.
 	StartMessageSeq uint64
 	// EndMessageSeq is the exclusive ending sequence boundary.
 	EndMessageSeq uint64
@@ -100,7 +104,8 @@ type SyncChannelMessagesResult struct {
 type ChannelMessageQuery struct {
 	// ChannelID identifies the normalized channel to scan.
 	ChannelID ChannelID
-	// StartSeq is the inclusive starting sequence boundary.
+	// StartSeq is the inclusive starting sequence boundary. Zero with EndSeq=0
+	// preserves the latest-page sentinel independently of MinSeq.
 	StartSeq uint64
 	// EndSeq is the exclusive ending sequence boundary.
 	EndSeq uint64
@@ -295,7 +300,8 @@ func (a *App) prepareSyncChannelMessages(ctx context.Context, query SyncChannelM
 		}
 	}
 	startSeq := query.StartMessageSeq
-	if query.PullMode == PullModeUp && visibilityMinSeq > startSeq {
+	latestPage := query.StartMessageSeq == 0 && query.EndMessageSeq == 0
+	if !latestPage && query.PullMode == PullModeUp && visibilityMinSeq > startSeq {
 		startSeq = visibilityMinSeq
 	}
 	return preparedSyncChannelMessages{query: ChannelMessageQuery{
@@ -373,6 +379,7 @@ func cloneSyncedMessages(in []SyncedMessage) []SyncedMessage {
 	copy(out, in)
 	for i := range out {
 		out[i].Payload = cloneBytes(out[i].Payload)
+		out[i].PayloadCorrection = out[i].PayloadCorrection.Clone()
 		out[i].EventMeta = cloneMessageEventMeta(out[i].EventMeta)
 	}
 	return out

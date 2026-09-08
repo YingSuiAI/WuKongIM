@@ -38,6 +38,26 @@ func (s *Store) shouldServeSlotLocally(slotID multiraft.SlotID) bool {
 	return s.cluster.IsLocalSlotLeader(slotID)
 }
 
+// confirmCurrentSlotRead is required by permission and ordinary membership
+// consumers before reading local metadata. A cached local leader role cannot
+// establish current values during partitions or a partially applied election.
+func (s *Store) confirmCurrentSlotRead(ctx context.Context, slotID multiraft.SlotID) error {
+	reader, ok := s.cluster.(interface {
+		SlotReadBarrier(context.Context, multiraft.SlotID) (multiraft.ReadBarrierResult, error)
+	})
+	if !ok {
+		return fmt.Errorf("metastore: authoritative read barrier unavailable")
+	}
+	proof, err := reader.SlotReadBarrier(ctx, slotID)
+	if err != nil {
+		return err
+	}
+	if proof.Index == 0 || proof.Term == 0 || !s.cluster.IsLocal(proof.LeaderID) {
+		return multiraft.ErrNotLeader
+	}
+	return nil
+}
+
 func callAuthoritativeRPC[T authoritativeRPCResponse](
 	ctx context.Context,
 	s *Store,
