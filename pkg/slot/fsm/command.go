@@ -308,10 +308,13 @@ func (c *createUserCmd) apply(wb *metadb.WriteBatch, hashSlot uint16) error {
 
 type upsertDeviceCmd struct {
 	device metadb.Device
+	result *metadb.DeviceCredentialUpsertResult
 }
 
 func (c *upsertDeviceCmd) apply(wb *metadb.WriteBatch, hashSlot uint16) error {
-	return wb.UpsertDevice(hashSlot, c.device)
+	var err error
+	c.result, err = wb.UpsertDevice(hashSlot, c.device)
+	return err
 }
 
 // --- UpsertChannel ---

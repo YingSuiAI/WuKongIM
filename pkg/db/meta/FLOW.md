@@ -34,6 +34,8 @@ payload-correction records.
 
 - Durable table, key, column, and codec identities are compatibility-sensitive.
 - Batch overlays preserve same-batch visibility and expected result semantics.
+- Credential stale no-ops are per-command results; they must not fail another
+  Slot's request sharing the physical commit. Hash-slot locks last through fsync.
 - Correction bodies remain separate from original Channel message logs.
 - Retention and terminal cleanup remove their owned correction rows.
 - Corrupt data, missing rows, expected conflicts, and storage failures retain

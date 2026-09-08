@@ -984,10 +984,11 @@ func (b *WriteBatch) UpsertUser(hashSlot uint16, user User) error {
 }
 
 // UpsertDevice stages a token mutation with commit-time credential ordering.
-// Older incarnations fail with ErrStaleMeta without changing the stored row.
-func (b *WriteBatch) UpsertDevice(hashSlot uint16, device Device) error {
+// Older incarnations return a command-local stale result after a successful
+// commit, without failing unrelated requests in the same physical commit group.
+func (b *WriteBatch) UpsertDevice(hashSlot uint16, device Device) (*DeviceCredentialUpsertResult, error) {
 	if err := b.ensure(); err != nil {
-		return err
+		return nil, err
 	}
 	return stageDeviceCredentialUpsert(b.batch, HashSlot(hashSlot), device)
 }

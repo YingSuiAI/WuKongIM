@@ -69,32 +69,53 @@ func (s *Shard) UpsertDevice(ctx context.Context, device Device) error {
 	return deviceTable.Upsert(ctx, s, device)
 }
 
+// DeviceCredentialUpsertResult is owned by one logical device command. Its
+// status is authoritative only after the owning batch commits successfully.
+type DeviceCredentialUpsertResult struct {
+	// Stale reports a committed no-op that preserved the newer stored credential.
+	Stale bool
+}
+
 // stageDeviceCredentialUpsert orders the credential check with its write under
 // the metadata commit lock. The table overlay includes earlier commands in the
 // same Raft batch, so an old incarnation cannot overwrite a newly staged one.
-func stageDeviceCredentialUpsert(b *Batch, hashSlot HashSlot, device Device) error {
+// Expected rejection is command-local data, never a shared physical Build error.
+func stageDeviceCredentialUpsert(b *Batch, hashSlot HashSlot, device Device) (*DeviceCredentialUpsertResult, error) {
 	if err := b.ensureOpen(); err != nil {
-		return err
+		return nil, err
+	}
+	if err := validateDevice(device); err != nil {
+		return nil, err
 	}
 	pk, err := deviceTable.primaryKey(device)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	primaryKey, err := deviceTable.primaryRowKey(hashSlot, pk)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	b.addOp(hashSlot, func(_ context.Context, state *batchCommitState, _ *engine.Batch) error {
+	value, err := deviceTable.encodeValue(primaryKey, device)
+	if err != nil {
+		return nil, err
+	}
+	result := &DeviceCredentialUpsertResult{}
+	b.addOp(hashSlot, func(_ context.Context, state *batchCommitState, batch *engine.Batch) error {
 		existing, found, err := deviceTable.loadBatchRow(state, hashSlot, pk, primaryKey)
 		if err != nil {
 			return err
 		}
 		if found && deviceCredentialNewer(existing, device) {
-			return ErrStaleMeta
+			result.Stale = true
+			return nil
 		}
+		if err := batch.Set(primaryKey, value); err != nil {
+			return err
+		}
+		state.tableRows[string(primaryKey)] = tableRowOverlay{value: value, exists: true}
 		return nil
 	})
-	return deviceTable.StageUpsert(b, hashSlot, device)
+	return result, nil
 }
 
 // deviceCredentialNewer preserves the issued credential's lexicographic
