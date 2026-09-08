@@ -9,6 +9,7 @@ import (
 
 	channelmembers "github.com/WuKongIM/WuKongIM/internal/contracts/channelmembers"
 	metadb "github.com/WuKongIM/WuKongIM/pkg/db/meta"
+	"github.com/WuKongIM/WuKongIM/pkg/messagepayload"
 	runtimechannelid "github.com/WuKongIM/WuKongIM/pkg/protocol/channelid"
 )
 
@@ -64,6 +65,8 @@ type SyncedMessage struct {
 	Timestamp int32
 	// Payload is the immutable message payload.
 	Payload []byte
+	// PayloadCorrection proves a current body without changing its base identity.
+	PayloadCorrection *messagepayload.Proof
 	// EventMeta is the compact event lane summary for compatible clients.
 	EventMeta *MessageEventMeta
 }
@@ -373,6 +376,7 @@ func cloneSyncedMessages(in []SyncedMessage) []SyncedMessage {
 	copy(out, in)
 	for i := range out {
 		out[i].Payload = cloneBytes(out[i].Payload)
+		out[i].PayloadCorrection = out[i].PayloadCorrection.Clone()
 		out[i].EventMeta = cloneMessageEventMeta(out[i].EventMeta)
 	}
 	return out

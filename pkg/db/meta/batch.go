@@ -214,6 +214,11 @@ func (b *Batch) UpsertChannelRuntimeMeta(hashSlot HashSlot, meta ChannelRuntimeM
 		if err := batch.Set(key, value); err != nil {
 			return err
 		}
+		if next.RetentionThroughSeq > existing.RetentionThroughSeq {
+			if err := stagePurgePayloadCorrections(batch, hashSlot, meta.ChannelID, meta.ChannelType, next.RetentionThroughSeq); err != nil {
+				return err
+			}
+		}
 		state.runtimeMeta[string(key)] = runtimeMetaOverlay{meta: next, exists: true}
 		return nil
 	})

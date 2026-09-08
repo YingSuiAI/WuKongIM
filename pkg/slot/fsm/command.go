@@ -54,6 +54,7 @@ const (
 	cmdTypeAdmitPersonDirectoryTaskBatch       uint8 = 63
 	cmdTypeEnsureUserChannelMembershipBatch    uint8 = 64
 	cmdTypeCompletePersonDirectoryTaskBatch    uint8 = 65
+	cmdTypeCreateMessagePayloadCorrection      uint8 = 66
 	cmdTypeBindPluginUser                      uint8 = 42
 	cmdTypeUnbindPluginUser                    uint8 = 43
 
@@ -241,6 +242,7 @@ var commandDecoders = map[uint8]commandDecoder{
 	cmdTypeAdmitPersonDirectoryTaskBatch:       decodeAdmitPersonDirectoryTaskBatch,
 	cmdTypeEnsureUserChannelMembershipBatch:    decodeEnsureUserChannelMembershipBatch,
 	cmdTypeCompletePersonDirectoryTaskBatch:    decodeCompletePersonDirectoryTaskBatch,
+	cmdTypeCreateMessagePayloadCorrection:      decodeCreateMessagePayloadCorrection,
 	cmdTypeBindPluginUser:                      decodeBindPluginUser,
 	cmdTypeUnbindPluginUser:                    decodeUnbindPluginUser,
 	cmdTypeApplyDelta:                          decodeApplyDelta,

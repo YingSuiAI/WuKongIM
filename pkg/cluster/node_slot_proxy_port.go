@@ -32,6 +32,18 @@ func (n *Node) SlotIDs() []multiraft.SlotID {
 	return out
 }
 
+// SlotReadBarrier exposes safe quorum/durable-apply read authority to metadata
+// consumers. It neither trusts a cached leader role nor appends a command.
+func (n *Node) SlotReadBarrier(ctx context.Context, slotID multiraft.SlotID) (multiraft.ReadBarrierResult, error) {
+	if err := n.ensureForeground(); err != nil {
+		return multiraft.ReadBarrierResult{}, err
+	}
+	if n.defaultSlotRuntime == nil {
+		return multiraft.ReadBarrierResult{}, ErrNotStarted
+	}
+	return n.defaultSlotRuntime.ReadBarrier(ctx, slotID)
+}
+
 // SlotForKey maps key to its current physical Slot.
 func (n *Node) SlotForKey(key string) multiraft.SlotID {
 	route, err := n.RouteKey(key)

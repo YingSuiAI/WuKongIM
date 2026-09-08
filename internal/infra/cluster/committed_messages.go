@@ -27,19 +27,17 @@ func (s *ChannelMetadataStore) ReadCommittedMessages(ctx context.Context, key ch
 	if err != nil || !found {
 		return channelusecase.CommittedMessagesPage{}, found, err
 	}
+	result.Messages, err = currentMessagePayloads(ctx, s.node, result.Messages)
+	if err != nil {
+		return channelusecase.CommittedMessagesPage{}, false, err
+	}
 	page := channelusecase.CommittedMessagesPage{
 		Messages: make([]channelusecase.CommittedMessage, len(result.Messages)),
 		ScanHead: result.ScanHead, FirstAvailableMessageSeq: result.FirstAvailableMessageSeq,
 		NextAfterMessageSeq: result.NextAfterMessageSeq, RetentionGap: result.RetentionGap, HasMore: result.HasMore,
 	}
 	for index, message := range result.Messages {
-		page.Messages[index] = channelusecase.CommittedMessage{
-			MessageID: message.MessageID, MessageSeq: message.MessageSeq,
-			ChannelID: message.ChannelID, ChannelType: message.ChannelType, Setting: message.Setting,
-			FromUID: message.FromUID, ClientMsgNo: message.ClientMsgNo,
-			ServerTimestampMS: message.ServerTimestampMS, SyncOnce: message.SyncOnce,
-			Payload: append([]byte(nil), message.Payload...),
-		}
+		page.Messages[index] = committedMessageFromCurrent(message)
 	}
 	return page, true, nil
 }

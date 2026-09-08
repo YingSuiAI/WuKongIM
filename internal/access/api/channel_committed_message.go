@@ -55,5 +55,6 @@ func committedMessageLegacyResponse(message channelusecase.CommittedMessage) leg
 		ClientMsgNo: message.ClientMsgNo, MessageSeq: message.MessageSeq,
 		FromUID: message.FromUID, ChannelID: message.ChannelID, ChannelType: message.ChannelType,
 		Timestamp: int32(message.ServerTimestampMS / 1000), Payload: append([]byte(nil), message.Payload...),
+		PayloadCorrection: message.PayloadCorrection.Clone(),
 	}
 }

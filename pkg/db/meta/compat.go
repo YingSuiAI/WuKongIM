@@ -1097,6 +1097,9 @@ func (b *WriteBatch) DeleteChannelRuntimeMeta(hashSlot uint16, channelID string,
 	key := encodeChannelRuntimeMetaRowKey(HashSlot(hashSlot), channelID, channelType, channelRuntimeMetaPrimaryFamilyID)
 	b.batch.addOp(HashSlot(hashSlot), func(ctx context.Context, state *batchCommitState, batch *engine.Batch) error {
 		state.runtimeMeta[string(key)] = runtimeMetaOverlay{exists: false}
+		if err := stagePurgePayloadCorrections(batch, HashSlot(hashSlot), channelID, channelType, ^uint64(0)); err != nil {
+			return err
+		}
 		return batch.Delete(key)
 	})
 	return nil
@@ -1133,6 +1136,9 @@ func (b *WriteBatch) AdvanceChannelRetentionThroughSeq(hashSlot uint16, req Chan
 			return err
 		}
 		if err := batch.Set(key, value); err != nil {
+			return err
+		}
+		if err := stagePurgePayloadCorrections(batch, HashSlot(hashSlot), req.ChannelID, req.ChannelType, next.RetentionThroughSeq); err != nil {
 			return err
 		}
 		state.runtimeMeta[string(key)] = runtimeMetaOverlay{meta: next, exists: true}

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"github.com/WuKongIM/WuKongIM/pkg/messagepayload"
 	"strconv"
 
 	messageusecase "github.com/WuKongIM/WuKongIM/internal/usecase/message"
@@ -15,11 +16,12 @@ type legacyMessageHeader struct {
 }
 
 type legacyMessageResp struct {
-	Header       legacyMessageHeader `json:"header"`
-	Setting      uint8               `json:"setting"`
-	MessageID    int64               `json:"message_id"`
-	MessageIDStr string              `json:"message_idstr"`
-	ClientMsgNo  string              `json:"client_msg_no"`
+	PayloadCorrection *messagepayload.Proof `json:"payload_correction,omitempty"`
+	Header            legacyMessageHeader   `json:"header"`
+	Setting           uint8                 `json:"setting"`
+	MessageID         int64                 `json:"message_id"`
+	MessageIDStr      string                `json:"message_idstr"`
+	ClientMsgNo       string                `json:"client_msg_no"`
 
 	EventMeta *legacyMessageEventMeta `json:"event_meta,omitempty"`
 
@@ -40,19 +42,20 @@ func newLegacyMessageResp(uid string, msg messageusecase.SyncedMessage) legacyMe
 			RedDot:    boolToInt(msg.Flags.RedDot),
 			SyncOnce:  boolToInt(msg.Flags.SyncOnce),
 		},
-		Setting:      msg.Setting,
-		MessageID:    int64(msg.MessageID),
-		MessageIDStr: strconv.FormatUint(msg.MessageID, 10),
-		ClientMsgNo:  msg.ClientMsgNo,
-		MessageSeq:   msg.MessageSeq,
-		FromUID:      msg.FromUID,
-		ChannelID:    legacyMessageChannelID(uid, msg.ChannelID, msg.ChannelType),
-		ChannelType:  msg.ChannelType,
-		Topic:        msg.Topic,
-		Expire:       msg.Expire,
-		Timestamp:    msg.Timestamp,
-		Payload:      append([]byte(nil), msg.Payload...),
-		EventMeta:    newLegacyMessageEventMeta(msg.EventMeta),
+		Setting:           msg.Setting,
+		MessageID:         int64(msg.MessageID),
+		MessageIDStr:      strconv.FormatUint(msg.MessageID, 10),
+		ClientMsgNo:       msg.ClientMsgNo,
+		MessageSeq:        msg.MessageSeq,
+		FromUID:           msg.FromUID,
+		ChannelID:         legacyMessageChannelID(uid, msg.ChannelID, msg.ChannelType),
+		ChannelType:       msg.ChannelType,
+		Topic:             msg.Topic,
+		Expire:            msg.Expire,
+		Timestamp:         msg.Timestamp,
+		Payload:           append([]byte(nil), msg.Payload...),
+		PayloadCorrection: msg.PayloadCorrection.Clone(),
+		EventMeta:         newLegacyMessageEventMeta(msg.EventMeta),
 	}
 }
 

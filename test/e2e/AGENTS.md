@@ -49,6 +49,7 @@ black-box e2e coverage for `cmd/wukongim` and internal behavior only.
 
 | Domain | Scenario path | Purpose | Run |
 | --- | --- | --- | --- |
+| `message` | `test/e2e/message/payload_correction` | Prove real three-node create-only corrections, exact original claims, current read projections, leader transfer, restart and unchanged SEND receipts. | `GOWORK=off go test -tags=e2e ./test/e2e/message/payload_correction -count=1 -timeout=3m -p=1` |
 | `issue_agent` | `test/e2e/issue_agent/issue_<number>` | Issue-linked, Agent-generated frozen regression scenarios; run only for the corresponding authorized Issue and Draft PR. | `GOWORK=off go test -tags=e2e ./test/e2e/issue_agent/issue_<number> -count=1` |
 | `message` | `test/e2e/message/single_node_send` | Prove `cmd/wukongim` can complete a single-node cluster WKProto `SEND -> SENDACK` closure, establish both person memberships, and avoid repeat membership writes after `directory_ready`. | `GOWORK=off go test -tags=e2e ./test/e2e/message/single_node_send -count=1` |
 | `message` | `test/e2e/message/javascript_web_quickstart` | Prove the published localhost-BFF JavaScript quickstart completes bidirectional durable messaging, SENDACK/receive, disconnect, reconnect, and offline sync in Chromium against a real 256-Hash-Slot single-node cluster. Failure evidence is bounded to three PNGs of at most 2 MiB each. | `WK_E2E_DOCS_JAVASCRIPT_WEB=1 GOWORK=off go test -tags=e2e ./test/e2e/message/javascript_web_quickstart -count=1 -timeout 10m -p=1 -v` |

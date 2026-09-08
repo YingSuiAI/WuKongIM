@@ -17,6 +17,7 @@ import (
 	"github.com/WuKongIM/WuKongIM/pkg/cluster/control"
 	metadb "github.com/WuKongIM/WuKongIM/pkg/db/meta"
 	goruntimeregistry "github.com/WuKongIM/WuKongIM/pkg/goroutine"
+	"github.com/WuKongIM/WuKongIM/pkg/messagepayload"
 )
 
 // ManagementMessageReader adapts cluster committed message reads to manager message pages.
@@ -120,7 +121,14 @@ launch:
 	if groupErr != nil {
 		return managementusecase.LatestMessageQueryPage{}, latestMessagesUnavailable(groupErr)
 	}
-	return mergeLatestMessagePages(pages, req.Limit)
+	page, err := mergeLatestMessagePages(pages, req.Limit)
+	if err != nil {
+		return page, err
+	}
+	// Compare replicas as immutable raw records first. A correction may commit
+	// while fan-out is in flight and is applied only once after raw de-duplication.
+	page.Items, err = r.currentManagementMessages(ctx, page.Items)
+	return page, err
 }
 
 func latestMessagesUnavailable(err error) error {
@@ -216,6 +224,10 @@ func (r *ManagementMessageReader) QueryMessages(ctx context.Context, req managem
 	if err != nil {
 		return managementusecase.MessageQueryPage{}, mapAppendError(err)
 	}
+	read.Messages, err = currentMessagePayloads(ctx, r.node, read.Messages)
+	if err != nil {
+		return managementusecase.MessageQueryPage{}, latestMessagesUnavailable(err)
+	}
 	messages := filterManagementMessages(req, managementMessagesFromChannel(read.Messages))
 	hasMore := len(messages) > req.Limit
 	if hasMore {
@@ -229,6 +241,45 @@ func (r *ManagementMessageReader) QueryMessages(ctx context.Context, req managem
 		page.NextBeforeSeq = messages[len(messages)-1].MessageSeq
 	}
 	return page, nil
+}
+
+func (r *ManagementMessageReader) currentManagementMessages(ctx context.Context, items []managementusecase.Message) ([]managementusecase.Message, error) {
+	raw := make([]channelruntime.Message, len(items))
+	for index, item := range items {
+		if item.ChannelType < 1 || item.ChannelType > 255 {
+			return nil, managementusecase.ErrLatestMessagesUnavailable
+		}
+		raw[index] = channelruntime.Message{MessageID: item.MessageID, MessageSeq: item.MessageSeq,
+			ChannelID: item.ChannelID, ChannelType: uint8(item.ChannelType), FromUID: item.FromUID,
+			ClientMsgNo: item.ClientMsgNo, Payload: item.Payload}
+	}
+	current, err := currentMessagePayloads(ctx, r.node, raw)
+	if errors.Is(err, messagepayload.ErrNotFound) {
+		// The global raw index can retain rows after logical Channel deletion.
+		// Isolate known absence without serving stale bytes or blocking other
+		// Channels; the raw page cursor still advances over the skipped rows.
+		out := make([]managementusecase.Message, 0, len(items))
+		for index, item := range items {
+			one, readErr := currentMessagePayloads(ctx, r.node, raw[index:index+1])
+			if errors.Is(readErr, messagepayload.ErrNotFound) {
+				continue
+			}
+			if readErr != nil {
+				return nil, latestMessagesUnavailable(readErr)
+			}
+			item.Payload = one[0].Payload
+			out = append(out, item)
+		}
+		return out, nil
+	}
+	if err != nil {
+		return nil, latestMessagesUnavailable(err)
+	}
+	out := append([]managementusecase.Message(nil), items...)
+	for index := range out {
+		out[index].Payload = current[index].Payload
+	}
+	return out, nil
 }
 
 // MaxMessageSeqForMeta returns the highest committed message sequence for one runtime metadata row.

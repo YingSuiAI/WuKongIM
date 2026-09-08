@@ -250,6 +250,18 @@ func (r *Runtime) Step(ctx context.Context, msg Envelope) error {
 }
 
 func (r *Runtime) Propose(ctx context.Context, slotID SlotID, data []byte) (Future, error) {
+	return r.proposeObserved(ctx, slotID, data, nil)
+}
+
+// ProposeObserved attaches the one bounded terminal observer before admission.
+// Caller cancellation only stops Wait; resources owned by the accepted command
+// remain with its runtime lifecycle until the observer is called. An enqueue
+// error leaves those resources with the caller and does not invoke the observer.
+func (r *Runtime) ProposeObserved(ctx context.Context, slotID SlotID, data []byte, observer FutureCompletionObserver) (Future, error) {
+	return r.proposeObserved(ctx, slotID, data, observer)
+}
+
+func (r *Runtime) proposeObserved(ctx context.Context, slotID SlotID, data []byte, observer FutureCompletionObserver) (Future, error) {
 	r.mu.RLock()
 	if r.closed {
 		r.mu.RUnlock()
@@ -262,6 +274,9 @@ func (r *Runtime) Propose(ctx context.Context, slotID SlotID, data []byte) (Futu
 	}
 
 	fut := newFuture(proposalStageObserversFromContext(ctx))
+	if observer != nil {
+		fut.ObserveCompletion(observer)
+	}
 	if err := g.enqueueControl(controlAction{
 		kind:          controlPropose,
 		data:          append([]byte(nil), data...),

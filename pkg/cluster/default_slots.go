@@ -165,6 +165,7 @@ func (n *Node) registerDefaultSlotHandlers(runtime *multiraft.Runtime, slotPropo
 	n.transportServer.Register(clusternet.RPCSlotStatus, slotStatusHandler{runtime: runtime})
 	n.transportServer.Register(clusternet.RPCChannelMigrationMeta, channelMigrationMetaHandler{node: n})
 	n.transportServer.Register(clusternet.RPCMessageEventAppend, messageEventAppendRPCHandler{node: n})
+	n.transportServer.Register(clusternet.RPCMessagePayloadCorrection, messagePayloadCorrectionRPCHandler{node: n})
 }
 
 // noopSlotTransport is sufficient for the default single-node Slot runtime.

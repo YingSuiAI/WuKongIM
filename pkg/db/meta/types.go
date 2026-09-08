@@ -207,6 +207,8 @@ const (
 	TableIDUserCMDChannelMembership uint32 = 16
 	// TableIDPersonDirectoryTask stores durable person-channel directory projection work.
 	TableIDPersonDirectoryTask uint32 = 17
+	// TableIDMessagePayloadCorrection stores explicit current-body corrections without changing the original log.
+	TableIDMessagePayloadCorrection uint32 = 18
 )
 
 const (
