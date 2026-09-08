@@ -20,6 +20,15 @@ remain on a correction-aware binary. A backup restored to a pre-correction point
 in time naturally contains the pre-correction body and must not be mistaken for
 the accepted post-repair state.
 
+Device-credential ordering also changes the apply semantics of an existing Slot
+command: old replicas overwrite an older incarnation where new replicas return a
+committed stale no-op. Unchanged schema does not make that mixed cohort safe.
+Fence old writes, drain accepted work and prove the old replicas' applied frontiers
+agree, stop the complete old cohort, then start the complete new cohort. Never
+overlap old/new applicators. Rollback likewise drains the new cohort before
+restoring the recorded complete previous cohort and its storage identity; it
+must not discard unresolved Raft work by hand or re-enable an unaware body reader.
+
 ## Create and exact replay
 
 `POST /channel/message-payload-correction` requires `operation_id`, `channel_id`,

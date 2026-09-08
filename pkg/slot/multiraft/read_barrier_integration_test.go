@@ -4,6 +4,7 @@ package multiraft
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -180,4 +181,50 @@ func TestReadBarrierClosedOwnerCannotRegisterNewPendingRead(t *testing.T) {
 	response := <-request.resp
 	require.ErrorIs(t, response.err, ErrSlotClosed)
 	require.Empty(t, owner.pendingReads)
+}
+
+type committedProposalApplyGate struct {
+	started, proceed chan struct{}
+	once             sync.Once
+}
+
+func (g *committedProposalApplyGate) ObserveProposalStage(stage, _ string, _ time.Duration) {
+	if stage == "meta_create_slot_raft_commit_wait" {
+		g.once.Do(func() { close(g.started); <-g.proceed })
+	}
+}
+
+func TestReadBarrierObservedCommittedProposalSurvivesLeaderTransfer(t *testing.T) {
+	cluster := newAsyncTestCluster(t, []NodeID{1, 2, 3}, asyncNetworkConfig{Seed: 276})
+	id := SlotID(276)
+	cluster.bootstrapSlot(t, id, []NodeID{1, 2, 3})
+	leader := cluster.waitForLeader(t, id)
+	gate := &committedProposalApplyGate{started: make(chan struct{}), proceed: make(chan struct{})}
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(gate.proceed) }) }
+	t.Cleanup(release)
+	ctx, cancel := context.WithTimeout(WithProposalStageObserver(context.Background(), gate), 5*time.Second)
+	defer cancel()
+	completed := make(chan struct{})
+	future, err := cluster.runtime(leader).ProposeObserved(ctx, id, proposalString("committed-before-transfer"), barrierCompletionObserver{completed: completed})
+	require.NoError(t, err)
+	select {
+	case <-gate.started:
+	case <-ctx.Done():
+		t.Fatal("proposal did not reach committed/pre-apply gate")
+	}
+	target := cluster.pickFollower(leader)
+	require.NoError(t, cluster.runtime(leader).TransferLeadership(ctx, id, target))
+	cluster.waitForLeaderAmong(t, id, cluster.otherNodes(leader))
+	oldStatus, err := cluster.runtime(leader).FreshStatus(ctx, id)
+	require.NoError(t, err)
+	require.Equal(t, RoleFollower, oldStatus.Role)
+	select {
+	case <-completed:
+		t.Error("leadership loss completed an already committed proposal before durable application")
+	default:
+	}
+	release()
+	_, err = future.Wait(ctx)
+	require.NoError(t, err, "known committed proposals still belong to FSM apply after step-down")
 }
