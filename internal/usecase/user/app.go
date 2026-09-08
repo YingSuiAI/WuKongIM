@@ -30,15 +30,6 @@ func (a *App) UpdateToken(ctx context.Context, cmd UpdateTokenCommand) error {
 	} else if err != nil {
 		return err
 	}
-	if a.deviceReader != nil {
-		existing, err := a.deviceReader.GetDevice(ctx, cmd.UID, int64(cmd.DeviceFlag), cmd.DeviceID, cmd.AppInstanceID)
-		if err == nil && deviceCredentialNewer(existing, cmd) {
-			return metadb.ErrStaleMeta
-		}
-		if err != nil && !errors.Is(err, metadb.ErrNotFound) {
-			return err
-		}
-	}
 	if err := a.devices.UpsertDevice(ctx, metadb.Device{
 		UID:                    cmd.UID,
 		DeviceFlag:             int64(cmd.DeviceFlag),
@@ -58,16 +49,6 @@ func (a *App) UpdateToken(ctx context.Context, cmd UpdateTokenCommand) error {
 		a.kickLocalInstallation(cmd.UID, cmd.DeviceFlag, cmd.DeviceID, cmd.SessionGeneration, updateTokenCloseDelay, updateTokenKickReason)
 	}
 	return nil
-}
-
-func deviceCredentialNewer(existing metadb.Device, incoming UpdateTokenCommand) bool {
-	if existing.InstallationGeneration != incoming.InstallationGeneration {
-		return existing.InstallationGeneration > incoming.InstallationGeneration
-	}
-	if existing.SessionGeneration != incoming.SessionGeneration {
-		return existing.SessionGeneration > incoming.SessionGeneration
-	}
-	return existing.AuthorizationFence > incoming.AuthorizationFence
 }
 
 // DeviceQuit clears stored device tokens and closes matching owner-local sessions.

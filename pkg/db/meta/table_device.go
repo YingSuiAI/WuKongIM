@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/WuKongIM/WuKongIM/pkg/db/internal/dberrors"
+	"github.com/WuKongIM/WuKongIM/pkg/db/internal/engine"
 	"github.com/WuKongIM/WuKongIM/pkg/db/internal/schema"
 )
 
@@ -66,6 +67,47 @@ var DeviceTable = deviceTable.Schema()
 // UpsertDevice stores a device regardless of prior existence.
 func (s *Shard) UpsertDevice(ctx context.Context, device Device) error {
 	return deviceTable.Upsert(ctx, s, device)
+}
+
+// stageDeviceCredentialUpsert orders the credential check with its write under
+// the metadata commit lock. The table overlay includes earlier commands in the
+// same Raft batch, so an old incarnation cannot overwrite a newly staged one.
+func stageDeviceCredentialUpsert(b *Batch, hashSlot HashSlot, device Device) error {
+	if err := b.ensureOpen(); err != nil {
+		return err
+	}
+	pk, err := deviceTable.primaryKey(device)
+	if err != nil {
+		return err
+	}
+	primaryKey, err := deviceTable.primaryRowKey(hashSlot, pk)
+	if err != nil {
+		return err
+	}
+	b.addOp(hashSlot, func(_ context.Context, state *batchCommitState, _ *engine.Batch) error {
+		existing, found, err := deviceTable.loadBatchRow(state, hashSlot, pk, primaryKey)
+		if err != nil {
+			return err
+		}
+		if found && deviceCredentialNewer(existing, device) {
+			return ErrStaleMeta
+		}
+		return nil
+	})
+	return deviceTable.StageUpsert(b, hashSlot, device)
+}
+
+// deviceCredentialNewer preserves the issued credential's lexicographic
+// generation order. Equal incarnations still support token update and quit;
+// zero-generation rows remain writable until a newer incarnation is issued.
+func deviceCredentialNewer(existing, incoming Device) bool {
+	if existing.InstallationGeneration != incoming.InstallationGeneration {
+		return existing.InstallationGeneration > incoming.InstallationGeneration
+	}
+	if existing.SessionGeneration != incoming.SessionGeneration {
+		return existing.SessionGeneration > incoming.SessionGeneration
+	}
+	return existing.AuthorizationFence > incoming.AuthorizationFence
 }
 
 // GetDevice returns one device by UID and device flag.

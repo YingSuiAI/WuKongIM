@@ -983,11 +983,13 @@ func (b *WriteBatch) UpsertUser(hashSlot uint16, user User) error {
 	return b.batch.UpsertUser(HashSlot(hashSlot), user)
 }
 
+// UpsertDevice stages a token mutation with commit-time credential ordering.
+// Older incarnations fail with ErrStaleMeta without changing the stored row.
 func (b *WriteBatch) UpsertDevice(hashSlot uint16, device Device) error {
 	if err := b.ensure(); err != nil {
 		return err
 	}
-	return deviceTable.StageUpsert(b.batch, HashSlot(hashSlot), device)
+	return stageDeviceCredentialUpsert(b.batch, HashSlot(hashSlot), device)
 }
 
 func (b *WriteBatch) UpsertChannel(hashSlot uint16, channel Channel) error {
