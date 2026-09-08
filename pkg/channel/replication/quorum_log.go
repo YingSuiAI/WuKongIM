@@ -264,7 +264,14 @@ func (l *quorumLog) Commit(ctx context.Context, proposal Proposal) (Receipt, err
 		if sameServerAllocatedLogicalProposal(state.pending.proposal, proposal) {
 			return l.retryPendingForNewWaiter(ctx, state, proposal.CommandID, *state.pending)
 		}
-		return Receipt{}, ch.ErrBackpressured
+		// The original proposal may combine independent SENDs whose callers can
+		// never reconstruct that exact batch. Resolve its immutable range before
+		// sequencing unrelated work; neither a new waiter nor its cancellation
+		// may discard an outcome-unknown proposal. This is one bounded retry using
+		// the existing exact durability protocol, not a retry loop or new owner.
+		if _, err := l.retryPending(ctx, state, *state.pending); err != nil {
+			return Receipt{}, err
+		}
 	}
 
 	durable, err := sealBusinessProposal(

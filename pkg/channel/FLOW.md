@@ -61,10 +61,11 @@ It does not own product permission, authority selection, fanout, or SENDACK poli
   Exact manifests and closed durable/already-durable/absent/conflict/unknown
   outcomes make ambiguous commits safely retryable after cancellation or
   restart; caller cancellation cannot revoke admitted durability.
-- A pending logical retry never clears or replaces the unknown proposal. Only
-  server-allocated identities are eligible, and the old immutable proposal is
-  retried to quorum before its exact durable records are rebound to the new
-  waiter; caller-supplied IDs and any logical mismatch remain rejected.
+- Pending proposals remain immutable through cancellation and failed recovery.
+  An exact logical retry may rebind only server-allocated identities after quorum
+  proof; caller-supplied IDs or mismatches cannot adopt its receipt. Unrelated
+  work first makes one bounded exact retry of the old proposal, then sequences
+  its own range. Clients never need to reconstruct a server-coalesced batch.
 - The node-owned replication runtime bounds local mutation batches, per-target
   exchange, recovery probes, and follower repair without per-Channel goroutines.
   Install selects a quorum-identical hash-chain prefix, repairs bounded pages,
