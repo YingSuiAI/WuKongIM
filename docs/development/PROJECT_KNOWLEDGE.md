@@ -2,6 +2,14 @@
 
 ## Internal
 
+- Ordinary message payload corrections are create-only Slot metadata projections,
+  not new SENDs or Agent events; original Channel log/index/HW identity stays
+  unchanged. Read and rollout boundaries are in
+  [the correction runbook](../runbooks/message-payload-correction.md).
+- Correction projections, send-permission facts, ordinary membership/history
+  floors and gateway device credentials require a safe Slot `ReadIndex` plus
+  durable FSM apply before authoritative local reads. A cached leader role is
+  not proof during partitions or the first new-term commit window.
 - `internal` is the promoted send-to-sendack kernel: gateway SEND maps to `usecase/message.SendBatch`, appends through `infra/cluster.ChannelAppender`, and returns SENDACK after `pkg/cluster` / `pkg/channel` append.
 - `internal` single-node deployments must use single-node cluster config. Do not add send or storage paths that bypass cluster semantics.
 - Review Agent invalidation is generation-bound. Fresh PR facts and signed

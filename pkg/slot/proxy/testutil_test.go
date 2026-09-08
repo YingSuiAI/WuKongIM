@@ -444,6 +444,18 @@ func (c *proxyTestCluster) IsLocalSlotLeader(slotID multiraft.SlotID) bool {
 	return err == nil && c.IsLocal(leaderID)
 }
 
+// This synchronous-FSM mapping fixture has no asynchronous Raft queue. Actual
+// quorum/election behavior is covered by cluster and multiraft integration.
+func (c *proxyTestCluster) SlotReadBarrier(ctx context.Context, slotID multiraft.SlotID) (multiraft.ReadBarrierResult, error) {
+	if err := ctx.Err(); err != nil {
+		return multiraft.ReadBarrierResult{}, err
+	}
+	if !c.IsLocalSlotLeader(slotID) {
+		return multiraft.ReadBarrierResult{}, multiraft.ErrNotLeader
+	}
+	return multiraft.ReadBarrierResult{Index: 1, Term: 1, LeaderID: c.nodeID}, nil
+}
+
 func (c *proxyTestCluster) LeaderOf(slotID multiraft.SlotID) (multiraft.NodeID, error) {
 	if c == nil {
 		return 0, ErrSlotNotFound

@@ -94,6 +94,9 @@ func (s *Store) HasChannelSubscribers(ctx context.Context, channelID string, cha
 func (s *Store) containsChannelSubscriberAuthoritative(ctx context.Context, slotID multiraft.SlotID, channelID string, channelType int64, uid string) (bool, error) {
 	hashSlot := hashSlotForKey(s.cluster, channelID)
 	if s.shouldServeSlotLocally(slotID) {
+		if err := s.confirmCurrentSlotRead(ctx, slotID); err != nil {
+			return false, err
+		}
 		return s.db.ForHashSlot(hashSlot).ContainsSubscriber(ctx, channelID, channelType, uid)
 	}
 
@@ -113,6 +116,9 @@ func (s *Store) containsChannelSubscriberAuthoritative(ctx context.Context, slot
 func (s *Store) hasChannelSubscribersAuthoritative(ctx context.Context, slotID multiraft.SlotID, channelID string, channelType int64) (bool, error) {
 	hashSlot := hashSlotForKey(s.cluster, channelID)
 	if s.shouldServeSlotLocally(slotID) {
+		if err := s.confirmCurrentSlotRead(ctx, slotID); err != nil {
+			return false, err
+		}
 		return s.db.ForHashSlot(hashSlot).HasSubscribers(ctx, channelID, channelType)
 	}
 
@@ -158,6 +164,9 @@ func (s *Store) handleSubscriberRPC(ctx context.Context, body []byte) ([]byte, e
 		hashSlot = hashSlotForKey(s.cluster, req.ChannelID)
 	}
 	if req.ContainsUID != "" {
+		if err := s.confirmCurrentSlotRead(ctx, slotID); err != nil {
+			return nil, err
+		}
 		ok, err := s.db.ForHashSlot(hashSlot).ContainsSubscriber(ctx, req.ChannelID, req.ChannelType, req.ContainsUID)
 		if err != nil {
 			return nil, err
@@ -168,6 +177,9 @@ func (s *Store) handleSubscriberRPC(ctx context.Context, body []byte) ([]byte, e
 		})
 	}
 	if req.HasAny {
+		if err := s.confirmCurrentSlotRead(ctx, slotID); err != nil {
+			return nil, err
+		}
 		ok, err := s.db.ForHashSlot(hashSlot).HasSubscribers(ctx, req.ChannelID, req.ChannelType)
 		if err != nil {
 			return nil, err

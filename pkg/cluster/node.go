@@ -211,6 +211,9 @@ type Node struct {
 	// ordinary Slot proposal enqueue, including forwarded requests.
 	maintenanceAdmissionMu sync.RWMutex
 	maintenance            atomic.Bool
+	// slotTransportDecorator decorates only the Slot Raft transport boundary;
+	// when nil, the default TCP transport is used unchanged.
+	slotTransportDecorator func(multiraft.Transport) multiraft.Transport
 }
 
 // preferredLeaderIntentGeneration linearizes snapshot invalidation against

@@ -152,7 +152,11 @@ func (n *Node) defaultSlotTransport() multiraft.Transport {
 	if n == nil || n.transportClient == nil {
 		return noopSlotTransport{}
 	}
-	return networkSlotTransport{sender: n.transportClient}
+	var transport multiraft.Transport = networkSlotTransport{sender: n.transportClient}
+	if n.slotTransportDecorator != nil {
+		transport = n.slotTransportDecorator(transport)
+	}
+	return transport
 }
 
 func (n *Node) registerDefaultSlotHandlers(runtime *multiraft.Runtime, slotProposer defaultSlotProposer) {

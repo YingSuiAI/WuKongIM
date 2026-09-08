@@ -114,6 +114,9 @@ func (s *Store) handleChannelRPC(ctx context.Context, body []byte) ([]byte, erro
 
 	switch channelRPCOpOrDefault(req.Op) {
 	case channelRPCGetForPermission:
+		if err := s.confirmCurrentSlotRead(ctx, slotID); err != nil {
+			return nil, err
+		}
 		hashSlot := req.HashSlot
 		if hashSlot == 0 {
 			hashSlot = hashSlotForKey(s.cluster, req.ChannelID)

@@ -55,10 +55,23 @@ Raw replication, SEND idempotency, Agent anchor validation and backup logs retai
 the original bytes. Retention and terminal Channel deletion remove corrected
 content in their owning metadata commit; snapshots cannot resurrect it.
 
+Correction reads use Raft's quorum `ReadIndex` and wait for durable FSM apply,
+not a cached leader role. Permission facts, ordinary membership/history floors,
+and gateway device-credential reads use the same Slot barrier. A network-isolated
+prior leader returns an error instead of an older acknowledged value. Correction
+metadata, retention and terminal flags are read from one storage snapshot, so a
+concurrent purge cannot be mistaken for a message that was never corrected.
+
+An accepted correction remains owned by the Slot proposal lifecycle after an
+HTTP waiter cancels. Cancellation is not proof of rollback: retry only its exact
+immutable operation. Restore admission cannot pass an accepted correction still
+waiting for FSM apply; ordinary restore's cohort and log-reload rules still apply.
+
 ## Local verification
 
 - `GOWORK=off go test -tags=integration ./pkg/slot/fsm -run '^TestPayloadCorrection' -count=1`
-- `GOWORK=off go test -tags=integration ./pkg/cluster -run '^TestPayloadCorrectionReplicated' -count=1`
+- `GOWORK=off go test -tags=integration ./pkg/cluster -run '^(TestPayloadCorrection|TestAuthoritativeMetadataRead)' -count=1`
+- `GOWORK=off go test -race -tags=integration ./pkg/slot/multiraft -run '^TestReadBarrier' -count=1`
 - `GOWORK=off go test -tags=e2e ./test/e2e/message/payload_correction -count=1 -timeout=3m -p=1`
 
 The process test uses a real three-node cluster with 256 hash slots, public SEND,

@@ -128,6 +128,9 @@ func (n *Node) CorrectMessagePayload(ctx context.Context, correction metadb.Mess
 }
 
 func (n *Node) createPayloadCorrectionLocal(ctx context.Context, correction metadb.MessagePayloadCorrection) (metadb.PayloadCorrectionStatus, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if err := ctxErr(ctx); err != nil {
 		return 0, err
 	}

@@ -69,6 +69,9 @@ func (s *Store) getUserAuthoritative(ctx context.Context, slotID multiraft.SlotI
 
 func (s *Store) getDeviceAuthoritative(ctx context.Context, slotID multiraft.SlotID, hashSlot uint16, uid string, deviceFlag int64, deviceID, appInstanceID string) (metadb.Device, error) {
 	if s.shouldServeSlotLocally(slotID) {
+		if err := s.confirmCurrentSlotRead(ctx, slotID); err != nil {
+			return metadb.Device{}, err
+		}
 		return s.db.ForHashSlot(hashSlot).GetDevice(ctx, uid, deviceFlag, deviceID, appInstanceID)
 	}
 
@@ -146,6 +149,9 @@ func (s *Store) handleIdentityRPC(ctx context.Context, body []byte) ([]byte, err
 			User:   &user,
 		})
 	case identityRPCGetDevice:
+		if err := s.confirmCurrentSlotRead(ctx, slotID); err != nil {
+			return nil, err
+		}
 		hashSlot := hashSlotForKey(s.cluster, req.UID)
 		device, err := s.db.ForHashSlot(hashSlot).GetDevice(ctx, req.UID, req.DeviceFlag, req.DeviceID, req.AppInstanceID)
 		if errors.Is(err, metadb.ErrNotFound) {
