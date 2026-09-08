@@ -79,7 +79,8 @@ type SyncChannelMessagesQuery struct {
 	ChannelID string
 	// ChannelType is the client-facing channel type.
 	ChannelType uint8
-	// StartMessageSeq is the inclusive starting sequence boundary.
+	// StartMessageSeq is the inclusive starting sequence boundary. Together
+	// with EndMessageSeq=0, zero selects the latest visible page.
 	StartMessageSeq uint64
 	// EndMessageSeq is the exclusive ending sequence boundary.
 	EndMessageSeq uint64
@@ -103,7 +104,8 @@ type SyncChannelMessagesResult struct {
 type ChannelMessageQuery struct {
 	// ChannelID identifies the normalized channel to scan.
 	ChannelID ChannelID
-	// StartSeq is the inclusive starting sequence boundary.
+	// StartSeq is the inclusive starting sequence boundary. Zero with EndSeq=0
+	// preserves the latest-page sentinel independently of MinSeq.
 	StartSeq uint64
 	// EndSeq is the exclusive ending sequence boundary.
 	EndSeq uint64
@@ -298,7 +300,8 @@ func (a *App) prepareSyncChannelMessages(ctx context.Context, query SyncChannelM
 		}
 	}
 	startSeq := query.StartMessageSeq
-	if query.PullMode == PullModeUp && visibilityMinSeq > startSeq {
+	latestPage := query.StartMessageSeq == 0 && query.EndMessageSeq == 0
+	if !latestPage && query.PullMode == PullModeUp && visibilityMinSeq > startSeq {
 		startSeq = visibilityMinSeq
 	}
 	return preparedSyncChannelMessages{query: ChannelMessageQuery{
