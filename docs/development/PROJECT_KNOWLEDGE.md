@@ -2,6 +2,14 @@
 
 ## Internal
 
+- Optional `message.admission_url` enables mandatory pre-commit application
+  canonicalization. The server-authenticated origin and logical SEND key bind a
+  stable admitted payload; native storage/quorum hashes remain unchanged.
+  Protocol v7 carries committed application identity in SENDACK, while canonical
+  content reaches every device, including the source session, through normal RECV.
+  The HTTP SEND entry requires the service token in this mode; device command or
+  transient flags cannot bypass admission. See the root TOML example for the fixed
+  private endpoint, separate HMAC domain, and bounded timeout configuration.
 - Ordinary message payload corrections are create-only Slot metadata projections,
   not new SENDs or Agent events; original Channel log/index/HW identity stays
   unchanged. Read and rollout boundaries are in

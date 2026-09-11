@@ -32,6 +32,7 @@ func (a *App) wireDelivery() {
 	observer := a.onlineDeliveryObserver()
 	runtime := runtimedelivery.NewRuntime(runtimedelivery.RuntimeOptions{
 		LocalNodeID:               localNodeID,
+		EchoSender:                a.cfg.Message.AdmissionURL != "",
 		Presence:                  deliveryinfra.NewPresenceResolver(a.presence),
 		RemoteOwnerPusher:         remote,
 		RemoteEventPusher:         remoteEvent,

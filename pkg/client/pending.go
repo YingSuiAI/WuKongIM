@@ -121,14 +121,15 @@ func (t *pendingTracker) resolveAt(ack *frame.SendackPacket, observedAt time.Tim
 	}
 
 	result := SendResult{
-		ClientSeq:        ack.ClientSeq,
-		ClientMsgNo:      ack.ClientMsgNo,
-		MessageID:        ack.MessageID,
-		MessageSeq:       ack.MessageSeq,
-		ReasonCode:       ack.ReasonCode,
-		PendingStartedAt: entry.startedAt,
-		WriteStartedAt:   entry.writeStartedAt,
-		ObservedAt:       observedAt,
+		ClientSeq:            ack.ClientSeq,
+		ClientMsgNo:          ack.ClientMsgNo,
+		MessageID:            ack.MessageID,
+		MessageSeq:           ack.MessageSeq,
+		ApplicationMessageID: ack.ApplicationMessageID,
+		ReasonCode:           ack.ReasonCode,
+		PendingStartedAt:     entry.startedAt,
+		WriteStartedAt:       entry.writeStartedAt,
+		ObservedAt:           observedAt,
 	}
 	var err error
 	if ack.ReasonCode != frame.ReasonSuccess {

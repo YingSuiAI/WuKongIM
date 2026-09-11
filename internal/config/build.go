@@ -859,6 +859,17 @@ func buildConfig(values map[string]string) (app.Config, error) {
 		}
 		cfg.Message.PersonWhitelistEnabled = enabled
 	}
+	cfg.Message.AdmissionURL = configValue(values, "WK_MESSAGE_ADMISSION_URL")
+	if raw := configValue(values, "WK_MESSAGE_ADMISSION_TIMEOUT"); raw != "" {
+		timeout, err := parseDuration("WK_MESSAGE_ADMISSION_TIMEOUT", raw)
+		if err != nil {
+			return app.Config{}, err
+		}
+		if timeout < 0 {
+			return app.Config{}, fmt.Errorf("parse WK_MESSAGE_ADMISSION_TIMEOUT: value must be >= 0")
+		}
+		cfg.Message.AdmissionTimeout = timeout
+	}
 	if raw := configValue(values, "WK_MESSAGE_SYSTEM_DEVICE_ID"); raw != "" {
 		cfg.Message.SystemDeviceID = raw
 	}

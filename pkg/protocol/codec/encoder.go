@@ -82,7 +82,10 @@ func (e *Encoder) WriteUint8(i uint8) {
 
 // WriteInt16 WriteInt16
 func (e *Encoder) WriteInt16(i int) {
-	_, _ = e.w.Write([]byte{byte(i >> 8), byte(i & 0xFF)})
+	// Length prefixes are hot for every required ACK string. Avoid a temporary
+	// slice escaping through Writer.Write for these two fixed bytes.
+	_ = e.w.WriteByte(byte(i >> 8))
+	_ = e.w.WriteByte(byte(i & 0xFF))
 }
 
 // WriteUint16 WriteUint16

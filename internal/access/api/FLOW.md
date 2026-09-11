@@ -34,6 +34,12 @@ maintenance operations to dependencies supplied by the composition root.
 ## Invariants and Failure Semantics
 
 - Missing required capabilities fail rather than falling back to direct storage.
+- Application-admission deployments authenticate `/message/send` with the service
+  token before assigning service origin. Body fields cannot claim device-session
+  or admission provenance. Generic deployments retain their existing API policy.
+- HTTP SEND returns committed opaque application identity and the native Unix-
+  second timestamp when available, including exact retry recovery. Consumers do
+  not need a second point read merely to obtain the committed creation time.
 - Payload correction and committed-claim endpoints do not invoke SEND.
 - Corrected bodies carry outer proof metadata; application payloads do not
   acquire provider control fields.

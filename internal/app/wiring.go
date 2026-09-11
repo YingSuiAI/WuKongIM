@@ -694,7 +694,7 @@ func (a *App) wireChannelAppend(nodeID uint64) error {
 				SubscriberScanPageSize: a.cfg.Delivery.FanoutPageSize,
 			}
 			if idempotencyNode, ok := a.cluster.(clusterinfra.ChannelIdempotencyNode); ok {
-				opts.Idempotency = clusterinfra.NewChannelIdempotencyStore(idempotencyNode)
+				opts.Idempotency = clusterinfra.NewChannelIdempotencyStore(idempotencyNode, a.applicationMessageIDReader())
 			}
 			if a.deliveryMeta != nil {
 				opts.Subscribers = a.deliveryMeta
@@ -711,6 +711,7 @@ func (a *App) wireChannelAppend(nodeID uint64) error {
 				opts.RecipientAuthorityResolver = resolver
 			}
 			opts.PersistAfterEnqueuer = composePersistAfterEnqueuers(a.pluginPersistAfter, a.webhookNotify)
+			opts.ApplicationMessageIDReader = a.applicationMessageIDReader()
 			var observer deliveryMessageObserver
 			if _, topEnabled := a.topProvider.(*topCollector); a.cfg.Delivery.Enabled || a.metrics != nil || topEnabled {
 				observer = deliveryMessageObserver{app: a}
@@ -759,6 +760,7 @@ func (a *App) ensureChannelAppendMetadataCache() *clusterinfra.ChannelAppendMeta
 func (a *App) wireMessages() {
 	if a.messages == nil {
 		messageOpts := message.Options{
+			SendAdmission:          a.messageAdmission,
 			Submitter:              a.channelAppendRouter,
 			SystemUIDs:             a.users,
 			PersonWhitelistEnabled: a.cfg.Message.PersonWhitelistEnabled,
@@ -840,6 +842,7 @@ func (a *App) wireAPI() {
 		a.api = accessapi.New(accessapi.Options{
 			ListenAddr:               a.cfg.API.ListenAddr,
 			ServiceToken:             a.cfg.API.ServiceToken,
+			RequireSendServiceToken:  a.messageAdmission != nil,
 			Readyz:                   a.readyzReport,
 			Maintenance:              a.restoreMaintenance.Load,
 			BenchEnabled:             a.cfg.Bench.APIEnabled,

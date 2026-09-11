@@ -7,7 +7,10 @@ ARG TARGETARCH
 WORKDIR /src
 
 COPY go.mod go.sum ./
-RUN go mod download
+# The GitHub-only netrc is available to both Go's HTTPS discovery and Git's
+# HTTPS transport for this instruction only; it never enters an image layer.
+RUN --mount=type=secret,id=wukong_git_netrc,target=/root/.netrc,required=true,mode=0600 \
+    GOPRIVATE=github.com/YingSuiAI/centerim-contracts GOAUTH=netrc go mod download
 
 COPY . .
 

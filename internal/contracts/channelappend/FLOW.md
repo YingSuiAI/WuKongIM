@@ -38,6 +38,10 @@ It does not perform permission checks, durable append, routing, or delivery.
   writes without reinterpreting caller intent.
 - Server-allocated message-ID proof applies to every item and skips only
   existing-ID reads; sender/client idempotency remains mandatory.
+- Application admission and verified device/service origin are internal command
+  provenance, not caller-supplied wire fields. An injected read-only metadata port
+  derives opaque application ACK identity from actual committed payload bytes;
+  no product body schema or alternate storage hash enters this package.
 
 ## Read First
 

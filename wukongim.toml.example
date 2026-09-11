@@ -151,6 +151,16 @@ send_timeout = "5s"
 person_whitelist_enabled = false
 system_device_id = "____device"
 permission_cache_ttl = "0"
+# A fixed application admission endpoint. Empty keeps WuKong's generic opaque-payload mode.
+# When set, every ordinary device/service SEND is admitted before append, source sessions receive
+# canonical RECV, and /message/send requires api.service_token. Device command/transient sends are denied.
+# HTTP is only for the trusted private service network; use HTTPS across network trust boundaries.
+# Requests use webhook.signing_secret with the separate im.message.admission.v1 HMAC domain.
+# Example: "http://platform-api.platform.svc.cluster.local:8080/internal/im/message-admissions"
+admission_url = ""
+# Maximum duration of one synchronous admission request, also bounded by the SEND deadline.
+# No automatic HTTP retries: identical logical SEND retries reconstruct identical canonical bytes.
+admission_timeout = "2s"
 
 [presence]
 activation_timeout = "3s"

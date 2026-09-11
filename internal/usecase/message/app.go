@@ -34,6 +34,8 @@ type Options struct {
 	PersonDirectory PersonDirectoryEnsurer
 	// SendHook optionally mutates or rejects permission-accepted sends before append admission.
 	SendHook SendHook
+	// SendAdmission is mandatory when configured and runs after all payload-mutating plugins.
+	SendAdmission SendAdmission
 	// SystemUIDs identifies internal system senders that bypass business permissions.
 	SystemUIDs SystemUIDChecker
 	// PersonWhitelistEnabled enables receiver-side personal allowlist checks.
@@ -64,6 +66,7 @@ type App struct {
 	permissionAuthority    PermissionStore
 	personDirectory        PersonDirectoryEnsurer
 	sendHook               SendHook
+	sendAdmission          SendAdmission
 	systemUIDs             SystemUIDChecker
 	personWhitelistEnabled bool
 	systemDeviceID         string
@@ -93,6 +96,7 @@ func New(opts Options) *App {
 		permissionAuthority:    opts.PermissionStore,
 		personDirectory:        opts.PersonDirectory,
 		sendHook:               opts.SendHook,
+		sendAdmission:          opts.SendAdmission,
 		systemUIDs:             opts.SystemUIDs,
 		personWhitelistEnabled: opts.PersonWhitelistEnabled,
 		systemDeviceID:         opts.SystemDeviceID,

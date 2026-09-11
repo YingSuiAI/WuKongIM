@@ -36,6 +36,10 @@ configuration and explicit construction options.
 - A single-node cluster uses the same cluster composition boundary.
 - Lifecycle state prevents duplicate start and preserves cleanup errors.
 - Optional runtimes are wired explicitly rather than inferred by entry adapters.
+- Configured application admission wires one authenticated fixed-endpoint client,
+  the same committed-identity reader for new appends and retry hits, sender RECV
+  echo, and service-token protection of HTTP SEND. It remains independent of
+  optional plugins and never changes storage or quorum identity semantics.
 - Restore coordination does not substitute cached pre-restore observations
   for the activated durable state.
 

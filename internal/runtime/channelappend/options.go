@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/WuKongIM/WuKongIM/internal/contracts/authority"
+	contract "github.com/WuKongIM/WuKongIM/internal/contracts/channelappend"
 	"github.com/WuKongIM/WuKongIM/internal/contracts/onlinedelivery"
 )
 
@@ -334,6 +335,8 @@ type Options struct {
 	Authorizer Authorizer
 	// Idempotency recovers successful sends before allocating a new message id.
 	Idempotency IdempotencyStore
+	// ApplicationMessageIDReader reads application ACK identity from actual committed payload bytes.
+	ApplicationMessageIDReader contract.ApplicationMessageIDReader
 	// SenderFence validates sender-scoped fencing before authorization.
 	SenderFence SenderFenceValidator
 	// AuthorityShardCount is the number of channel-key lookup shards. Values <= 0 use one shard.
@@ -455,9 +458,10 @@ func preparePortsFromOptions(opts Options) preparePorts {
 
 func appendPortsFromOptions(opts Options) appendPorts {
 	return appendPorts{
-		appender:    opts.Appender,
-		idempotency: opts.Idempotency,
-		observer:    opts.Observer,
+		appender:              opts.Appender,
+		idempotency:           opts.Idempotency,
+		observer:              opts.Observer,
+		applicationMessageIDs: opts.ApplicationMessageIDReader,
 	}
 }
 

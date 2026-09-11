@@ -42,6 +42,8 @@ It does not provision users or channels, choose benchmark policy, or retry sends
   inflight capacity is busy.
 - Retries may reuse idempotent `ClientMsgNo`, but overlapping attempts require
   distinct nonzero `ClientSeq` so late ACKs cannot resolve another attempt.
+- Protocol v7 preserves the opaque committed application message ID in the
+  public SEND result; this client does not interpret application body schemas.
 - A full inbound queue backpressures the socket; close or replacement releases
   blocked publishers. Discard mode prevents RECV fanout from blocking ACK progress.
   Leased reads keep dequeued handoff ownership visible until the next stage

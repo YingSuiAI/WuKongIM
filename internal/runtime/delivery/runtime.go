@@ -61,6 +61,8 @@ const (
 type RuntimeOptions struct {
 	// LocalNodeID identifies the owner node executed in process.
 	LocalNodeID uint64
+	// EchoSender includes the originating session in the normal durable RECV/RECVACK path.
+	EchoSender bool
 	// Presence resolves exact recipient-authority target groups.
 	Presence PlanPresenceResolver
 	// RemoteOwnerPusher forwards grouped routes to non-local owner nodes.
@@ -106,6 +108,8 @@ type RuntimeOptions struct {
 
 // Runtime owns plan processing, owner-local writes, retry, and pending ACK state.
 type Runtime struct {
+	// echoSender publishes canonical server projection to the originating device as a normal RECV.
+	echoSender bool
 	// localNodeID selects the owner-local execution path.
 	localNodeID uint64
 	// presence resolves already-fenced recipient target groups.
@@ -209,6 +213,7 @@ func NewRuntime(opts RuntimeOptions) *Runtime {
 		acks = NewAckTracker(AckTrackerOptions{})
 	}
 	return &Runtime{
+		echoSender:                opts.EchoSender,
 		localNodeID:               opts.LocalNodeID,
 		presence:                  opts.Presence,
 		remoteOwnerPusher:         opts.RemoteOwnerPusher,
@@ -553,7 +558,7 @@ func (r *Runtime) processPlan(ctx context.Context, plan onlinedelivery.Recipient
 			offline = appendOfflineUIDs(offline, seenOffline, target, resolved[i].Routes)
 		}
 		for _, route := range resolved[i].Routes {
-			if route.OwnerNodeID == 0 || suppressSenderRoute(plan, route) {
+			if route.OwnerNodeID == 0 || (!r.echoSender && suppressSenderRoute(plan, route)) {
 				continue
 			}
 			if _, ok := grouped[route.OwnerNodeID]; !ok {

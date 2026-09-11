@@ -56,6 +56,8 @@ type SendResult struct {
 	MessageID int64
 	// MessageSeq is the channel sequence assigned by the server.
 	MessageSeq uint64
+	// ApplicationMessageID is the server-committed opaque application identity carried by protocol v7.
+	ApplicationMessageID string
 	// ReasonCode is the server SENDACK reason.
 	ReasonCode frame.ReasonCode
 	// PendingStartedAt is the process-local instant when this SEND entered the

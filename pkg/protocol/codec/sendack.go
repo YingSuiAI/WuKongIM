@@ -21,6 +21,26 @@ func decodeSendack(f frame.Frame, data []byte, version uint8) (frame.Frame, erro
 		return nil, errors.Wrap(err, "解码ClientSeq失败！")
 	}
 	sendackPacket.ClientSeq = uint64(clientSeq)
+	if version >= frame.ApplicationMessageIDVersion {
+		if sendackPacket.MessageSeq, err = dec.Uint64(); err != nil {
+			return nil, err
+		}
+		reason, readErr := dec.Uint8()
+		if readErr != nil {
+			return nil, readErr
+		}
+		sendackPacket.ReasonCode = frame.ReasonCode(reason)
+		if sendackPacket.ClientMsgNo, err = dec.String(); err != nil {
+			return nil, err
+		}
+		if sendackPacket.ApplicationMessageID, err = dec.String(); err != nil {
+			return nil, err
+		}
+		if dec.Len() != 0 {
+			return nil, errors.New("sendack v7 has unexpected trailing bytes")
+		}
+		return sendackPacket, nil
+	}
 
 	body, err := dec.BinaryAll()
 	if err != nil {
@@ -48,6 +68,11 @@ func encodeSendack(sendackPacket *frame.SendackPacket, enc *Encoder, version uin
 	}
 	// 原因代码
 	enc.WriteUint8(sendackPacket.ReasonCode.Byte())
+	if version >= frame.ApplicationMessageIDVersion {
+		enc.WriteString(sendackPacket.ClientMsgNo)
+		enc.WriteString(sendackPacket.ApplicationMessageID)
+		return nil
+	}
 	// clientMsgNo 追加到尾部，保持旧客户端按 core 字段顺序解码仍然正确。
 	if sendackPacket.ClientMsgNo != "" {
 		enc.WriteString(sendackPacket.ClientMsgNo)
@@ -60,6 +85,9 @@ func encodeSendackSize(packet *frame.SendackPacket, version uint8) int {
 		frame.ClientSeqByteSize +
 		messageSeqSize(version) +
 		frame.ReasonCodeByteSize
+	if version >= frame.ApplicationMessageIDVersion {
+		return size + 2*frame.StringFixLenByteSize + len(packet.ClientMsgNo) + len(packet.ApplicationMessageID)
+	}
 	if packet.ClientMsgNo != "" {
 		size += len(packet.ClientMsgNo) + frame.StringFixLenByteSize
 	}

@@ -68,6 +68,12 @@ sends terminate successfully before routing.
 - Idempotency recovery observes only batch counts for recovered, unresolved,
   and lookup-error items. Recovered items are not errors; every fresh item that
   fails its bounded retry remains unresolved with its original aligned result.
+- Application-admitted sends retain actual committed result payloads long enough
+  for an injected read-only metadata reader to derive the opaque application ACK
+  identity. Service results also retain the actual committed server timestamp.
+  Prepare hits, append-error recovery, and logical-proposal adoption preserve the
+  old committed identity and clock, never the current attempt's callback value.
+  The runtime does not interpret application body schemas or replace payload hashes.
 - Persistent command messages use their command Channel; transient messages
   write neither Channel logs nor directory membership.
 - Observability is aggregate and low-cardinality: never label Channel, UID,

@@ -17,12 +17,13 @@ type ChannelIdempotencyNode interface {
 
 // ChannelIdempotencyStore adapts cluster committed idempotency lookups to channelappend.
 type ChannelIdempotencyStore struct {
-	node ChannelIdempotencyNode
+	node                  ChannelIdempotencyNode
+	applicationMessageIDs channelappend.ApplicationMessageIDReader
 }
 
 // NewChannelIdempotencyStore creates a ChannelIdempotencyStore.
-func NewChannelIdempotencyStore(node ChannelIdempotencyNode) *ChannelIdempotencyStore {
-	return &ChannelIdempotencyStore{node: node}
+func NewChannelIdempotencyStore(node ChannelIdempotencyNode, applicationMessageIDs channelappend.ApplicationMessageIDReader) *ChannelIdempotencyStore {
+	return &ChannelIdempotencyStore{node: node, applicationMessageIDs: applicationMessageIDs}
 }
 
 // LookupSend returns a prior successful send only when the payload hash matches.
@@ -40,10 +41,28 @@ func (s *ChannelIdempotencyStore) LookupSend(ctx context.Context, query channela
 	if query.PayloadHash != 0 && hit.PayloadHash != query.PayloadHash {
 		return channelappend.SendResult{}, false, nil
 	}
+	var applicationID string
+	if query.ApplicationAdmission {
+		if hit.Message.ServerTimestampMS <= 0 {
+			return channelappend.SendResult{}, false, errors.New("cluster: committed server timestamp missing")
+		}
+		if s.applicationMessageIDs == nil {
+			return channelappend.SendResult{}, false, errors.New("cluster: application message identity reader unavailable")
+		}
+		applicationID, err = s.applicationMessageIDs.ReadApplicationMessageID(hit.Message.Payload)
+		if err != nil {
+			return channelappend.SendResult{}, false, err
+		}
+		if applicationID == "" {
+			return channelappend.SendResult{}, false, errors.New("cluster: committed application message identity missing")
+		}
+	}
 	return channelappend.SendResult{
-		MessageID:  hit.Message.MessageID,
-		MessageSeq: hit.Message.MessageSeq,
-		Reason:     channelappend.ReasonSuccess,
+		MessageID:            hit.Message.MessageID,
+		MessageSeq:           hit.Message.MessageSeq,
+		ApplicationMessageID: applicationID,
+		ServerTimestampMS:    hit.Message.ServerTimestampMS,
+		Reason:               channelappend.ReasonSuccess,
 	}, true, nil
 }
 

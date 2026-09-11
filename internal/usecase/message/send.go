@@ -112,7 +112,7 @@ func (a *App) Send(ctx context.Context, cmd SendCommand) (SendResult, error) {
 	if reason != ReasonSuccess {
 		return SendResult{Reason: reason}, nil
 	}
-	cmd, reason, err = a.beforeSendHook(ctx, cmd)
+	cmd, reason, err = a.prepareAdmittedSend(ctx, cmd)
 	if err != nil {
 		return SendResult{Reason: reason}, err
 	}
@@ -413,7 +413,7 @@ func (a *App) sendBatchEachOne(item SendBatchItem, emit func(int, SendBatchItemR
 	if directoryErr != nil {
 		return errors.Join(emit(0, SendBatchItemResult{Result: SendResult{Reason: ReasonSystemError}, Err: directoryErr}), invariantErr)
 	}
-	cmd, reason, err := a.beforeSendHook(ctx, item.Command)
+	cmd, reason, err := a.prepareAdmittedSend(ctx, item.Command)
 	if err != nil || reason != ReasonSuccess {
 		preAppendResult := sendBatchStageResultOK
 		if err != nil {
@@ -646,7 +646,7 @@ func (a *App) submitSendBatchLane(
 		item := prepared[i]
 		ctx := contexts[i]
 		cmd := item.Command
-		cmd, reason, err := a.beforeSendHook(ctx, cmd)
+		cmd, reason, err := a.prepareAdmittedSend(ctx, cmd)
 		if err != nil {
 			results[i] = SendBatchItemResult{Result: SendResult{Reason: reason}, Err: err}
 			preAppendResult = sendBatchStageResultErr
@@ -942,6 +942,29 @@ func (a *App) ensurePersonDirectory(ctx context.Context, cmd SendCommand) error 
 
 func sendNeedsPersonDirectory(cmd SendCommand) bool {
 	return cmd.ChannelType == channelTypePerson && !cmd.NoPersist && !cmd.SyncOnce && !cmd.RequestScoped
+}
+
+// prepareAdmittedSend keeps mandatory application admission outside plugin skip/fail-open policy.
+func (a *App) prepareAdmittedSend(ctx context.Context, cmd SendCommand) (SendCommand, Reason, error) {
+	cmd, reason, err := a.beforeSendHook(ctx, cmd)
+	if err != nil || reason != ReasonSuccess || a == nil || a.sendAdmission == nil {
+		return cmd, reason, err
+	}
+	if cmd.NoPersist || cmd.SyncOnce {
+		// Device callers cannot escape canonical-message admission using command/transient bits.
+		// Trusted service notifications retain their separate non-message contract.
+		if !cmd.ServiceAuthenticated || cmd.SenderSessionID != 0 {
+			return cmd, ReasonNotAllowSend, nil
+		}
+		return cmd, ReasonSuccess, nil
+	}
+	payload, reason, err := a.sendAdmission.AdmitSend(ctx, cmd)
+	if err != nil || reason != ReasonSuccess {
+		return cmd, reason, err
+	}
+	cmd.Payload = payload
+	cmd.ApplicationAdmission = true
+	return cmd, ReasonSuccess, nil
 }
 
 func (a *App) beforeSendHook(ctx context.Context, cmd SendCommand) (SendCommand, Reason, error) {

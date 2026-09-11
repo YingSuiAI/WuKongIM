@@ -20,11 +20,12 @@ func TestPendingTrackerMatchingSendackResolvesPendingEntry(t *testing.T) {
 	}
 
 	resolved := tracker.resolve(&frame.SendackPacket{
-		ClientSeq:   10,
-		ClientMsgNo: "msg-10",
-		MessageID:   101,
-		MessageSeq:  202,
-		ReasonCode:  frame.ReasonSuccess,
+		ClientSeq:            10,
+		ClientMsgNo:          "msg-10",
+		MessageID:            101,
+		MessageSeq:           202,
+		ApplicationMessageID: "019c0000-0000-7000-8000-000000000001",
+		ReasonCode:           frame.ReasonSuccess,
 	})
 	if !resolved {
 		t.Fatal("resolve() = false, want true")
@@ -45,6 +46,9 @@ func TestPendingTrackerMatchingSendackResolvesPendingEntry(t *testing.T) {
 	}
 	if result.MessageSeq != 202 {
 		t.Fatalf("pending result MessageSeq = %d, want 202", result.MessageSeq)
+	}
+	if result.ApplicationMessageID != "019c0000-0000-7000-8000-000000000001" {
+		t.Fatalf("pending result application identity = %q", result.ApplicationMessageID)
 	}
 	if result.ReasonCode != frame.ReasonSuccess {
 		t.Fatalf("pending result ReasonCode = %s, want %s", result.ReasonCode, frame.ReasonSuccess)

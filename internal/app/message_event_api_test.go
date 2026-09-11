@@ -10,6 +10,7 @@ import (
 	channelusecase "github.com/WuKongIM/WuKongIM/internal/usecase/channel"
 	messageusecase "github.com/WuKongIM/WuKongIM/internal/usecase/message"
 	presenceusecase "github.com/WuKongIM/WuKongIM/internal/usecase/presence"
+	"github.com/WuKongIM/WuKongIM/pkg/protocol/frame"
 )
 
 func TestRealtimeMessageEventCarriesTypedReducerFields(t *testing.T) {
@@ -53,7 +54,7 @@ func TestRealtimeMessageEventCarriesTypedReducerFields(t *testing.T) {
 func TestMessageEventPushChunksOwnerRoutesAt256(t *testing.T) {
 	routes := make([]presenceusecase.Route, 4097)
 	for i := range routes {
-		routes[i] = presenceusecase.Route{UID: "u1", OwnerNodeID: 7, SessionID: uint64(i + 1), ProtocolVersion: 6}
+		routes[i] = presenceusecase.Route{UID: "u1", OwnerNodeID: 7, SessionID: uint64(i + 1), ProtocolVersion: frame.LatestVersion}
 	}
 	delivery := &recordingMessageEventDelivery{}
 	facade := &messageEventAPIFacade{
@@ -106,7 +107,7 @@ func TestMessageEventRealtimeFailureDoesNotFailDurableAppend(t *testing.T) {
 		App:      messageusecase.New(messageusecase.Options{EventStore: store}),
 		delivery: delivery,
 		presence: staticMessageEventPresence{routes: map[string][]presenceusecase.Route{
-			"u1": {{UID: "u1", OwnerNodeID: 7, SessionID: 1, ProtocolVersion: 6}},
+			"u1": {{UID: "u1", OwnerNodeID: 7, SessionID: 1, ProtocolVersion: frame.LatestVersion}},
 		}},
 	}
 	result, err := facade.AppendMessageEvent(context.Background(), validMessageEventAppend())
@@ -125,7 +126,7 @@ func TestMessageEventDurableReplayDoesNotFanoutAgain(t *testing.T) {
 		App:      messageusecase.New(messageusecase.Options{EventStore: store}),
 		delivery: delivery,
 		presence: staticMessageEventPresence{routes: map[string][]presenceusecase.Route{
-			"u1": {{UID: "u1", OwnerNodeID: 7, SessionID: 1, ProtocolVersion: 6}},
+			"u1": {{UID: "u1", OwnerNodeID: 7, SessionID: 1, ProtocolVersion: frame.LatestVersion}},
 		}},
 	}
 	result, err := facade.AppendMessageEvent(context.Background(), validMessageEventAppend())

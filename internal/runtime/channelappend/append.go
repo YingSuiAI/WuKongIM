@@ -6,6 +6,7 @@ import (
 	"errors"
 	"time"
 
+	contract "github.com/WuKongIM/WuKongIM/internal/contracts/channelappend"
 	"github.com/WuKongIM/WuKongIM/pkg/observability/sendtrace"
 )
 
@@ -33,9 +34,10 @@ const (
 )
 
 type appendPorts struct {
-	appender    Appender
-	idempotency IdempotencyStore
-	observer    AppendObserver
+	appender              Appender
+	idempotency           IdempotencyStore
+	observer              AppendObserver
+	applicationMessageIDs contract.ApplicationMessageIDReader
 }
 
 type appendEffect struct {
@@ -114,7 +116,7 @@ func (e appendEffect) run(runtimeCtx context.Context, ports appendPorts) appendC
 		effectResult = appendCompletionsResultClass(completion.items)
 		return completion
 	}
-	completion.items = append(completion.items, batch.expandCompletions(appendResultCompletions(batch.items, res))...)
+	completion.items = append(completion.items, batch.expandCompletions(appendResultCompletions(batch.items, res, ports.applicationMessageIDs))...)
 	effectResult = appendCompletionsResultClass(completion.items)
 	return completion
 }
@@ -283,6 +285,9 @@ func appendRequest(target AuthorityTarget, active []preparedSend, attempt int) A
 	for _, item := range active {
 		req.ServerAllocatedMessageIDs = req.ServerAllocatedMessageIDs && item.serverAllocatedMessageID
 		cmd := item.Command
+		if cmd.ApplicationAdmission {
+			req.OmitResultPayload = false
+		}
 		if req.TraceID == "" && cmd.TraceID != "" {
 			req.TraceID = cmd.TraceID
 		}
@@ -355,7 +360,7 @@ func appendBatchErrorCompletions(items []preparedSend, err error) []appendItemCo
 	return out
 }
 
-func appendResultCompletions(items []preparedSend, res AppendBatchResult) []appendItemCompletion {
+func appendResultCompletions(items []preparedSend, res AppendBatchResult, ids contract.ApplicationMessageIDReader) []appendItemCompletion {
 	out := make([]appendItemCompletion, 0, len(items))
 	for i, item := range items {
 		if i >= len(res.Items) {
@@ -376,12 +381,34 @@ func appendResultCompletions(items []preparedSend, res AppendBatchResult) []appe
 			})
 			continue
 		}
+		var applicationID string
+		if item.Command.ApplicationAdmission {
+			var err error
+			if appended.Message.ServerTimestampMS <= 0 {
+				err = errors.New("channelappend: committed server timestamp missing")
+			} else if ids == nil {
+				err = errors.New("channelappend: application message identity reader unavailable")
+			} else {
+				applicationID, err = ids.ReadApplicationMessageID(appended.Message.Payload)
+				if err == nil && applicationID == "" {
+					err = errors.New("channelappend: committed application message identity missing")
+				}
+			}
+			if err != nil {
+				// The record remains durably committed, but no fabricated success identity may escape.
+				out = append(out, appendItemCompletion{item: item, appended: appended,
+					result: SendBatchItemResult{Result: SendResult{Reason: ReasonSystemError}, Err: err}, traceErr: err})
+				continue
+			}
+		}
 		out = append(out, appendItemCompletion{
 			item: item,
 			result: SendBatchItemResult{Result: SendResult{
-				MessageID:  appended.MessageID,
-				MessageSeq: appended.MessageSeq,
-				Reason:     ReasonSuccess,
+				MessageID:            appended.MessageID,
+				MessageSeq:           appended.MessageSeq,
+				ApplicationMessageID: applicationID,
+				ServerTimestampMS:    appended.Message.ServerTimestampMS,
+				Reason:               ReasonSuccess,
 			}},
 			appended:  appended,
 			committed: true,
@@ -501,7 +528,7 @@ func appendBatchErrorCompletionsOrRecoveriesAndRetry(
 		recovery.UnresolvedItems += retryRecovery.UnresolvedItems
 		recovery.LookupErrorItems += retryRecovery.LookupErrorItems
 	} else {
-		retryCompletions = appendResultCompletions(retryItems, res)
+		retryCompletions = appendResultCompletions(retryItems, res, ports.applicationMessageIDs)
 		// A nil batch error does not prove every retried item committed: the
 		// appender may return an item-local error or a short result vector. Both
 		// are final, unresolved recovery outcomes and must remain visible in the

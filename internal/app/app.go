@@ -82,6 +82,9 @@ type Option func(*App)
 
 // App is the internal composition root for cluster, message, and gateway runtimes.
 type App struct {
+	// messageAdmission is mandatory for configured application deployments, independent of plugins.
+	messageAdmission message.SendAdmission
+
 	cfg     Config
 	cluster ClusterRuntime
 	api     APIRuntime
@@ -277,6 +280,9 @@ func New(cfg Config, opts ...Option) (*App, error) {
 		return nil, err
 	}
 	app.wireDelivery()
+	if err := app.wireMessageAdmission(); err != nil {
+		return nil, err
+	}
 	app.wireManagerPluginRPC()
 	if err := app.wireChannelAppend(clusterCfg.NodeID); err != nil {
 		return nil, err

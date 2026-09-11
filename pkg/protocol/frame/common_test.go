@@ -3,8 +3,8 @@ package frame
 import "testing"
 
 func TestLatestVersionAndFrameTypes(t *testing.T) {
-	if LatestVersion != 6 {
-		t.Fatalf("LatestVersion = %d, want 6", LatestVersion)
+	if LatestVersion != 7 {
+		t.Fatalf("LatestVersion = %d, want 7", LatestVersion)
 	}
 
 	if got := (&PingPacket{}).GetFrameType(); got != PING {

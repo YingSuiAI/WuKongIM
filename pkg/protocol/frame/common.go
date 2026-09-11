@@ -364,6 +364,8 @@ const (
 const (
 	LegacyMessageSeqVersion = 5
 	MessageSeqU64Version    = 6
+	// ApplicationMessageIDVersion adds an opaque application identity to SENDACK.
+	ApplicationMessageIDVersion = 7
 	// LatestVersion 最新版本
-	LatestVersion = MessageSeqU64Version
+	LatestVersion = ApplicationMessageIDVersion
 )

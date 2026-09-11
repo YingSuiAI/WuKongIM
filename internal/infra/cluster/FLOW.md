@@ -41,6 +41,9 @@ delivery/presence integration, and cluster-backed operational capabilities.
 - Batch adapters preserve request/result alignment and item-scoped failures
   where the owning port supports them.
 - Adapters do not allocate replacement committed message identities.
+- Configured application ACK identity is extracted from the durable idempotency
+  hit through an injected metadata reader, without reinterpreting the existing
+  persisted payload hash as an original pre-admission request hash.
 
 ## Read First
 

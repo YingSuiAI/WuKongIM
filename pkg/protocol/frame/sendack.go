@@ -10,6 +10,8 @@ type SendackPacket struct {
 	ClientSeq   uint64     // 客户端序列号 (客户端提供，服务端原样返回)
 	ClientMsgNo string     // 客户端消息编号(目前只有mos协议有效)
 	ReasonCode  ReasonCode // 原因代码
+	// ApplicationMessageID is committed application metadata, never unencrypted message content.
+	ApplicationMessageID string
 }
 
 // GetPacketType 包类型

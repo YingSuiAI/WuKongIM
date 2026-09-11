@@ -24,6 +24,10 @@ without owning gateway frames, cluster transport, or durable storage engines.
 
 1. Validate and authorize SEND items, including terminal Channel checks.
 2. Prepare required person-directory state and invoke any accepted SEND hook.
+   Mandatory application admission, when configured, follows payload-mutating
+   plugins and cannot be skipped by plugin flags or fail-open behavior. Only a
+   verified service entry may bypass content admission for command/transient
+   notifications; device command/transient SEND is rejected in this mode.
 3. Submit admitted items through the append port and return aligned results.
 4. For history, authorize membership and visibility bounds before invoking the
    reader; preserve latest-page and bounded-cursor semantics.
@@ -37,6 +41,10 @@ without owning gateway frames, cluster transport, or durable storage engines.
 - Ordinary and one-shot command messages retain separate semantics.
 - Missing authority and unavailable reads are not valid empty history.
 - Payload-correction metadata remains outside application message content.
+- Admission canonicalizes one logical request to stable bytes before append.
+  Native idempotency, payload hashes, durable quorum, and sequence allocation
+  continue to operate on those exact bytes; no asynchronous projection is needed
+  for client display.
 
 ## Read First
 

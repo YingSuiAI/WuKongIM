@@ -184,6 +184,9 @@ func channelAppendTestTarget() channelappend.AuthorityTarget {
 func channelAppendTestCommand() channelappend.SendCommand {
 	return channelappend.SendCommand{
 		FromUID:                "u1",
+		IMSessionID:            "019c0000-0000-7000-8000-000000000001",
+		ServiceAuthenticated:   true,
+		ApplicationAdmission:   true,
 		DeviceID:               "d1",
 		DeviceFlag:             3,
 		SenderNodeID:           11,

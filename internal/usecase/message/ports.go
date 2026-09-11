@@ -15,6 +15,13 @@ type SendHook interface {
 	BeforeSend(context.Context, SendCommand) (SendCommand, Reason, error)
 }
 
+// SendAdmission validates the final plugin output and returns canonical bytes before durable submission.
+// It cannot mutate sender, channel, transport identity, or durability, and must return identical bytes
+// for every retry of the same logical request. It is separate from optional/fail-open plugin hooks.
+type SendAdmission interface {
+	AdmitSend(context.Context, SendCommand) ([]byte, Reason, error)
+}
+
 // ChannelMessageReader owns compatible channel message sync reads.
 type ChannelMessageReader interface {
 	// SyncMessages returns one authoritative channel message page.

@@ -181,6 +181,8 @@ description: 完整列出公开 TOML 字段、WK_* 环境变量、值类型和�
 | `message.person_whitelist_enabled` | `WK_MESSAGE_PERSON_WHITELIST_ENABLED` | `bool` | — |
 | `message.system_device_id` | `WK_MESSAGE_SYSTEM_DEVICE_ID` | `string` | — |
 | `message.permission_cache_ttl` | `WK_MESSAGE_PERMISSION_CACHE_TTL` | `duration` | — |
+| `message.admission_url` | `WK_MESSAGE_ADMISSION_URL` | `string` | 可选固定内部消息准入端点；启用后普通消息提交前强制准入，使用独立 HMAC 域；HTTP 仅限受信任私网。 |
+| `message.admission_timeout` | `WK_MESSAGE_ADMISSION_TIMEOUT` | `duration` | 单次准入超时，默认 2 秒，不在 HTTP 层重试。 |
 
 ## 在线状态
 

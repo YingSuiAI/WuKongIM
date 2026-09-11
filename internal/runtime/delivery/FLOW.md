@@ -39,6 +39,9 @@ It does not select subscribers, append messages, or build gateway packets.
 - Transient plans never create offline effects.
 - Duplicate recipient rows intentionally produce duplicate writes and retain
   independent ACK attempt state.
+- Application deployments may include the exact originating session in normal
+  canonical RECV delivery. This uses the same owner/session fences, retry, and
+  RECVACK tracker as every recipient, not a separate sender-confirmation queue.
 - RECVACK and session-close remove only matching owner-local identities;
   activity-throttled expiry avoids full tracker scans.
 - `Stop` closes admission, waits for enqueuers, and drains every accepted plan

@@ -147,10 +147,11 @@ type ConnectResult struct {
 }
 
 type SendResult struct {
-	Header     *Header        `json:"header,omitempty"`
-	MessageID  string         `json:"messageId"`
-	MessageSeq uint64         `json:"messageSeq"`
-	ReasonCode ReasonCodeEnum `json:"reasonCode"`
+	Header               *Header        `json:"header,omitempty"`
+	MessageID            string         `json:"messageId"`
+	MessageSeq           uint64         `json:"messageSeq"`
+	ReasonCode           ReasonCodeEnum `json:"reasonCode"`
+	ApplicationMessageID string         `json:"applicationMessageId,omitempty"`
 }
 
 type SubscriptionResult struct {
@@ -383,10 +384,11 @@ func FromProtoSendAck(ack *frame.SendackPacket) *SendResult {
 	}
 	messageID := strconv.FormatInt(ack.MessageID, 10)
 	res := &SendResult{
-		Header:     fromProtoHeader(ack.Framer),
-		MessageID:  messageID,
-		MessageSeq: ack.MessageSeq,
-		ReasonCode: ReasonCodeEnum(ack.ReasonCode),
+		Header:               fromProtoHeader(ack.Framer),
+		MessageID:            messageID,
+		MessageSeq:           ack.MessageSeq,
+		ReasonCode:           ReasonCodeEnum(ack.ReasonCode),
+		ApplicationMessageID: ack.ApplicationMessageID,
 	}
 	return res
 }

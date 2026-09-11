@@ -9,18 +9,18 @@ import (
 	"github.com/WuKongIM/WuKongIM/pkg/protocol/wkprotoenc"
 )
 
-func TestAuthenticatorRejectsProtocolBeforeV6(t *testing.T) {
+func TestAuthenticatorRejectsProtocolBeforeV7(t *testing.T) {
 	auth := gateway.NewWKProtoAuthenticator(gateway.WKProtoAuthOptions{DisableEncryption: true})
 
 	result, err := auth.Authenticate(nil, &frame.ConnectPacket{
-		Version: 5,
+		Version: 6,
 		UID:     "u1",
 	})
 	if err != nil {
 		t.Fatalf("Authenticate() error = %v", err)
 	}
 	if result.Connack.ReasonCode != frame.ReasonAuthFail || result.Connack.ServerVersion != frame.LatestVersion || result.SessionValues != nil {
-		t.Fatalf("Authenticate(v5) = %#v, want explicit v6 rejection", result)
+		t.Fatalf("Authenticate(v6) = %#v, want explicit v7 rejection", result)
 	}
 }
 

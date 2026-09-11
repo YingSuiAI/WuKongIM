@@ -18,7 +18,7 @@ import (
 func TestChannelAppendRPCHandlerSubmitsToLocalAuthority(t *testing.T) {
 	target := channelAppendTestTarget()
 	cmd := channelAppendTestCommand()
-	result := channelappend.SendBatchItemResult{Result: channelappend.SendResult{MessageID: 1001, MessageSeq: 10, Reason: channelappend.ReasonSuccess}}
+	result := channelappend.SendBatchItemResult{Result: channelappend.SendResult{MessageID: 1001, MessageSeq: 10, Reason: channelappend.ReasonSuccess, ApplicationMessageID: "actual-committed-public-id", ServerTimestampMS: 1788364800123}}
 	local := &fakeChannelAppendSubmitter{results: []channelappend.SendBatchItemResult{result}}
 	adapter := NewChannelAppendAdapter(ChannelAppendOptions{ChannelAppend: local})
 	body, err := encodeChannelAppendRequest(channelAppendRequest{

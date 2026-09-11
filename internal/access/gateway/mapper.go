@@ -31,6 +31,7 @@ func mapSendCommandWithPayload(ctx *coregateway.Context, pkt *frame.SendPacket, 
 
 	cmd := message.SendCommand{
 		FromUID:         fromUID,
+		IMSessionID:     stringFromValue(ctx.Session.Value(coregateway.SessionValueIMSessionID)),
 		DeviceID:        deviceIDFromValue(ctx.Session.Value(coregateway.SessionValueDeviceID)),
 		DeviceFlag:      deviceFlagFromValue(ctx.Session.Value(coregateway.SessionValueDeviceFlag)),
 		SenderNodeID:    ownerNodeID,
@@ -80,10 +81,11 @@ func writeSendack(ctx *coregateway.Context, pkt *frame.SendPacket, result messag
 		clientMsgNo = pkt.ClientMsgNo
 	}
 	return ctx.WriteFrame(&frame.SendackPacket{
-		MessageID:   int64(result.MessageID),
-		MessageSeq:  result.MessageSeq,
-		ClientSeq:   clientSeq,
-		ClientMsgNo: clientMsgNo,
-		ReasonCode:  mapReason(result.Reason),
+		MessageID:            int64(result.MessageID),
+		MessageSeq:           result.MessageSeq,
+		ClientSeq:            clientSeq,
+		ClientMsgNo:          clientMsgNo,
+		ReasonCode:           mapReason(result.Reason),
+		ApplicationMessageID: result.ApplicationMessageID,
 	})
 }

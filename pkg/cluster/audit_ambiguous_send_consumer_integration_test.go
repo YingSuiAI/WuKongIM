@@ -31,7 +31,7 @@ func TestAuditThreeNodeSingleSenderRecoversThroughRealSendConsumer(t *testing.T)
 	group := channelappend.New(channelappend.Options{
 		LocalNodeID: leader.NodeID(), MessageID: ids,
 		Appender:    clusterinfra.NewChannelAppender(leader),
-		Idempotency: clusterinfra.NewChannelIdempotencyStore(leader),
+		Idempotency: clusterinfra.NewChannelIdempotencyStore(leader, nil),
 	})
 	if err := group.Start(ctx); err != nil {
 		t.Fatal(err)

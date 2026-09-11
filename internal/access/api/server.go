@@ -217,6 +217,8 @@ type Options struct {
 	BenchToken string
 	// ServiceToken requires an exact bearer capability on privileged service routes.
 	ServiceToken string
+	// RequireSendServiceToken protects /message/send when application admission distinguishes service origin.
+	RequireSendServiceToken bool
 	// BenchMaxBatchSize limits top-level records accepted by one bench mutation request.
 	BenchMaxBatchSize int
 	// BenchMaxPayloadBytes limits bench mutation JSON request bodies in bytes.
@@ -306,6 +308,9 @@ type Server struct {
 	logger               wklog.Logger
 	counts               map[string]int
 	started              bool
+
+	// requireSendServiceToken prevents uncredentialed HTTP callers from claiming application service origin.
+	requireSendServiceToken bool
 }
 
 // New creates a minimal internal API server.
@@ -350,6 +355,7 @@ func New(opts Options) *Server {
 		logger:               opts.Logger,
 		counts:               map[string]int{},
 	}
+	s.requireSendServiceToken = opts.RequireSendServiceToken
 	if s.logger == nil {
 		s.logger = wklog.NewNop()
 	}

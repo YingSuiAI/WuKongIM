@@ -197,6 +197,8 @@ var schemaFields = []fieldSpec{
 	{TOMLPath: "message.person_whitelist_enabled", EnvKey: "WK_MESSAGE_PERSON_WHITELIST_ENABLED", Kind: kindBool, Group: "message", Label: "Person whitelist enabled"},
 	{TOMLPath: "message.system_device_id", EnvKey: "WK_MESSAGE_SYSTEM_DEVICE_ID", Kind: kindString, Group: "message", Label: "System device ID"},
 	{TOMLPath: "message.permission_cache_ttl", EnvKey: "WK_MESSAGE_PERMISSION_CACHE_TTL", Kind: kindDuration, Group: "message", Label: "Permission cache TTL"},
+	{TOMLPath: "message.admission_url", EnvKey: "WK_MESSAGE_ADMISSION_URL", Kind: kindString, Group: "message", Label: "Mandatory application admission endpoint", DiagnosticSensitive: true},
+	{TOMLPath: "message.admission_timeout", EnvKey: "WK_MESSAGE_ADMISSION_TIMEOUT", Kind: kindDuration, Group: "message", Label: "Application admission timeout"},
 
 	{TOMLPath: "presence.activation_timeout", EnvKey: "WK_PRESENCE_ACTIVATION_TIMEOUT", Kind: kindDuration, Group: "presence", Label: "Presence activation timeout"},
 	{TOMLPath: "presence.touch_flush_interval", EnvKey: "WK_PRESENCE_TOUCH_FLUSH_INTERVAL", Kind: kindDuration, Group: "presence", Label: "Presence touch flush interval"},
@@ -372,6 +374,8 @@ func supportedConfigKeysForBuilder() []string {
 		"WK_MESSAGE_PERSON_WHITELIST_ENABLED",
 		"WK_MESSAGE_SYSTEM_DEVICE_ID",
 		"WK_MESSAGE_PERMISSION_CACHE_TTL",
+		"WK_MESSAGE_ADMISSION_URL",
+		"WK_MESSAGE_ADMISSION_TIMEOUT",
 		"WK_PRESENCE_ACTIVATION_TIMEOUT",
 		"WK_PRESENCE_TOUCH_FLUSH_INTERVAL",
 		"WK_PRESENCE_TOUCH_BATCH_SIZE",

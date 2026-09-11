@@ -281,11 +281,12 @@ func lookupIdempotentSend(ctx context.Context, cmd SendCommand, ports preparePor
 		return SendResult{}, false, nil
 	}
 	return ports.idempotency.LookupSend(ctx, IdempotencyQuery{
-		FromUID:     cmd.FromUID,
-		ClientMsgNo: cmd.ClientMsgNo,
-		ChannelID:   cmd.ChannelID,
-		ChannelType: cmd.ChannelType,
-		PayloadHash: idempotencyPayloadHash(cmd.Payload),
+		FromUID:              cmd.FromUID,
+		ClientMsgNo:          cmd.ClientMsgNo,
+		ChannelID:            cmd.ChannelID,
+		ChannelType:          cmd.ChannelType,
+		PayloadHash:          idempotencyPayloadHash(cmd.Payload),
+		ApplicationAdmission: cmd.ApplicationAdmission,
 	})
 }
 

@@ -66,6 +66,28 @@ func TestProductionImageDeclaresOCIProvenanceLabels(t *testing.T) {
 	}
 }
 
+func TestPrivateDependenciesUseOnlyAnEphemeralBuildKitSecret(t *testing.T) {
+	dockerfile := readRootDockerfile(t)
+	if !strings.Contains(dockerfile, "RUN --mount=type=secret,id=wukong_git_netrc,target=/root/.netrc,required=true,mode=0600 \\\n    GOPRIVATE=github.com/YingSuiAI/centerim-contracts GOAUTH=netrc go mod download") {
+		t.Fatal("private module download must use the required ephemeral GitHub netrc mount")
+	}
+	for _, line := range strings.Split(dockerfile, "\n") {
+		upper := strings.ToUpper(strings.TrimSpace(line))
+		if (strings.HasPrefix(upper, "COPY ") || strings.HasPrefix(upper, "ADD ") || strings.HasPrefix(upper, "ARG ") || strings.HasPrefix(upper, "ENV ")) &&
+			(strings.Contains(upper, "NETRC") || strings.Contains(upper, "PASSWORD") || strings.Contains(upper, "TOKEN")) {
+			t.Fatal("dependency credentials must not enter COPY/ADD, build args, or image environment")
+		}
+	}
+	for _, insecure := range []string{"GOINSECURE", "sslVerify=false", "--insecure", "git config --global"} {
+		if strings.Contains(dockerfile, insecure) {
+			t.Fatalf("Dockerfile must not weaken GitHub HTTPS authentication: %s", insecure)
+		}
+	}
+	if strings.Count(dockerfile, ".netrc") != 1 {
+		t.Fatal("netrc must exist only at its ephemeral secret mount")
+	}
+}
+
 func TestDevelopmentComposeUsesExplicitToolsTarget(t *testing.T) {
 	compose, err := os.ReadFile(filepath.Join(dockerRepoRoot(t), "docker-compose.yml"))
 	if err != nil {

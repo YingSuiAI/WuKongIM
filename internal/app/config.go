@@ -279,6 +279,12 @@ func (c *LogConfig) SetExplicitFlags(compressSet, consoleSet bool) {
 
 // MessageConfig contains message usecase settings.
 type MessageConfig struct {
+	// AdmissionURL enables mandatory application admission at one fixed private-service HTTP(S) endpoint.
+	// The webhook signing secret authenticates this separate domain; request payloads are never logged.
+	AdmissionURL string
+	// AdmissionTimeout bounds each synchronous admission call, within the overall SEND deadline.
+	// Zero uses two seconds. Retries belong to the unchanged logical SEND, not this HTTP client.
+	AdmissionTimeout time.Duration
 	// PersonWhitelistEnabled enables receiver-side personal allowlist enforcement for sends.
 	// It is disabled by default to match legacy WhitelistOffOfPerson=true compatibility.
 	PersonWhitelistEnabled bool

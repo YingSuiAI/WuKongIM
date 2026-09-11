@@ -35,16 +35,23 @@ type sendMessageHeaderRequest struct {
 }
 
 type sendMessageResponse struct {
-	MessageID  int64  `json:"message_id"`
-	MessageSeq uint64 `json:"message_seq"`
-	Reason     uint8  `json:"reason"`
+	MessageID            int64  `json:"message_id"`
+	MessageSeq           uint64 `json:"message_seq"`
+	Reason               uint8  `json:"reason"`
+	ApplicationMessageID string `json:"application_message_id,omitempty"`
+	// Timestamp has the same committed Unix-second clock as native RECV and service history.
+	Timestamp int64 `json:"timestamp,omitempty"`
 }
 
 func (s *Server) registerMessageRoutes() {
 	if s == nil || s.engine == nil {
 		return
 	}
-	s.engine.POST("/message/send", s.handleSendMessage)
+	if s.requireSendServiceToken {
+		s.engine.POST("/message/send", s.requireServiceToken, s.handleSendMessage)
+	} else {
+		s.engine.POST("/message/send", s.handleSendMessage)
+	}
 	s.engine.POST("/message/events:append", s.requireServiceToken, s.handleMessageEventAppend)
 	s.engine.POST("/message/sync", s.handleMessageSync)
 	s.engine.POST("/message/syncack", s.handleMessageSyncAck)
@@ -98,6 +105,7 @@ func (s *Server) handleSendMessage(c *gin.Context) {
 	cmd := messageusecase.SendCommand{
 		TraceID:                traceCtx.TraceID,
 		FromUID:                req.FromUID,
+		ServiceAuthenticated:   s.requireSendServiceToken,
 		DeviceID:               req.DeviceID,
 		ChannelID:              req.ChannelID,
 		ChannelType:            req.ChannelType,
@@ -128,9 +136,11 @@ func (s *Server) handleSendMessage(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, sendMessageResponse{
-		MessageID:  int64(result.MessageID),
-		MessageSeq: result.MessageSeq,
-		Reason:     uint8(mapMessageReason(result.Reason)),
+		MessageID:            int64(result.MessageID),
+		MessageSeq:           result.MessageSeq,
+		Reason:               uint8(mapMessageReason(result.Reason)),
+		ApplicationMessageID: result.ApplicationMessageID,
+		Timestamp:            result.ServerTimestampMS / 1000,
 	})
 }
 

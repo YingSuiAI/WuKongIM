@@ -10,8 +10,8 @@ import (
 )
 
 var (
-	channelAppendRequestMagic  = [...]byte{'W', 'K', 'V', 'A', 2}
-	channelAppendResponseMagic = [...]byte{'W', 'K', 'V', 'a', 1}
+	channelAppendRequestMagic  = [...]byte{'W', 'K', 'V', 'A', 3}
+	channelAppendResponseMagic = [...]byte{'W', 'K', 'V', 'a', 2}
 )
 
 const maxChannelAppendCollectionLen = 4096
@@ -231,7 +231,10 @@ func appendChannelAppendSendCommand(dst []byte, cmd channelappend.SendCommand) [
 	dst = append(dst, cmd.ProtocolVersion)
 	dst = appendString(dst, string(cmd.Origin))
 	dst = appendVarint(dst, int64(cmd.HookDepth))
-	return appendChannelAppendBool(dst, cmd.SkipPluginHooks)
+	dst = appendChannelAppendBool(dst, cmd.SkipPluginHooks)
+	dst = appendString(dst, cmd.IMSessionID)
+	dst = appendChannelAppendBool(dst, cmd.ServiceAuthenticated)
+	return appendChannelAppendBool(dst, cmd.ApplicationAdmission)
 }
 
 func readChannelAppendSendCommand(body []byte, offset int) (channelappend.SendCommand, int, error) {
@@ -328,6 +331,15 @@ func readChannelAppendSendCommand(body []byte, offset int) (channelappend.SendCo
 	if cmd.SkipPluginHooks, offset, err = readChannelAppendBool(body, offset, "channel append skip plugin hooks"); err != nil {
 		return channelappend.SendCommand{}, offset, err
 	}
+	if cmd.IMSessionID, offset, err = readString(body, offset); err != nil {
+		return channelappend.SendCommand{}, offset, err
+	}
+	if cmd.ServiceAuthenticated, offset, err = readChannelAppendBool(body, offset, "channel append authenticated service"); err != nil {
+		return channelappend.SendCommand{}, offset, err
+	}
+	if cmd.ApplicationAdmission, offset, err = readChannelAppendBool(body, offset, "channel append application admission"); err != nil {
+		return channelappend.SendCommand{}, offset, err
+	}
 	return cmd, offset, nil
 }
 
@@ -382,7 +394,9 @@ func readChannelAppendResult(body []byte, offset int) (channelappend.SendBatchIt
 func appendChannelAppendSendResult(dst []byte, result channelappend.SendResult) []byte {
 	dst = appendUvarint(dst, result.MessageID)
 	dst = appendUvarint(dst, result.MessageSeq)
-	return append(dst, byte(result.Reason))
+	dst = append(dst, byte(result.Reason))
+	dst = appendString(dst, result.ApplicationMessageID)
+	return appendVarint(dst, result.ServerTimestampMS)
 }
 
 func readChannelAppendSendResult(body []byte, offset int) (channelappend.SendResult, int, error) {
@@ -399,6 +413,12 @@ func readChannelAppendSendResult(body []byte, offset int) (channelappend.SendRes
 		return channelappend.SendResult{}, offset, err
 	}
 	result.Reason = channelappend.Reason(reason)
+	if result.ApplicationMessageID, offset, err = readString(body, offset); err != nil {
+		return channelappend.SendResult{}, offset, err
+	}
+	if result.ServerTimestampMS, offset, err = readVarint(body, offset); err != nil {
+		return channelappend.SendResult{}, offset, err
+	}
 	return result, offset, nil
 }
 

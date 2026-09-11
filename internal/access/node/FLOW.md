@@ -52,6 +52,10 @@ scheduled backup or restore
   explicitly decoded compatibility layout without that pagination metadata.
 - Channel append RPC never resolves routes, creates proxy Channel state,
   appends outside local authority, or runs post-commit effects elsewhere.
+- Channel append request v3 carries verified IM-session/service origin and the
+  internal application-admission proof; response v2 returns the opaque ID and
+  server timestamp selected from actual committed content. Incompatible old
+  layouts are rejected.
 - The Channel append client bounds each remote transport attempt independently
   of the outer SEND deadline. Dial failure, node-not-found, and connection
   refusal prove that submission did not begin and map to the typed append-

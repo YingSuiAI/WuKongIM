@@ -181,6 +181,8 @@ Kinds: `string`, `bool`, integer `int`/`uint*`, `float`, Go-format `duration`, a
 | `message.person_whitelist_enabled` | `WK_MESSAGE_PERSON_WHITELIST_ENABLED` | `bool` | — |
 | `message.system_device_id` | `WK_MESSAGE_SYSTEM_DEVICE_ID` | `string` | — |
 | `message.permission_cache_ttl` | `WK_MESSAGE_PERMISSION_CACHE_TTL` | `duration` | — |
+| `message.admission_url` | `WK_MESSAGE_ADMISSION_URL` | `string` | Optional fixed internal admission endpoint; mandatory before ordinary SEND commit with a separate HMAC domain. HTTP is private-network only. |
+| `message.admission_timeout` | `WK_MESSAGE_ADMISSION_TIMEOUT` | `duration` | Per-admission timeout, default 2 seconds; the HTTP layer never retries. |
 
 ## Presence
 

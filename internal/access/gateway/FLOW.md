@@ -47,6 +47,10 @@ It does not own reusable message, presence, delivery, or storage policy.
 - Send hooks run after permission inside the message usecase, uniformly across
   all entries. Payload ownership remains immutable until lower durable/async
   boundaries copy it.
+- Configured application admission receives the verified IM session identity,
+  never an identity claimed inside SEND content. Protocol v7 SENDACK carries only
+  committed opaque application identity in addition to native metadata; canonical
+  content remains on the encrypted RECV path.
 - Terminal capability, nonce, digest, request, and ACK payloads are never
   exposed or logged. The usecase session identity must equal the authenticated
   gateway session before sealing.

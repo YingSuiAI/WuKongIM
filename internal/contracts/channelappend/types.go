@@ -94,6 +94,13 @@ type AuthorityTarget struct {
 type SendCommand struct {
 	// FromUID is the authenticated sender uid.
 	FromUID string
+	// IMSessionID is the immutable server-verified device credential identity, never a SEND payload claim.
+	IMSessionID string
+	// ServiceAuthenticated proves the entry verified its service credential; no request field can set it.
+	ServiceAuthenticated bool
+	// ApplicationAdmission marks a command whose canonical payload was accepted by the mandatory admission port.
+	// Entry adapters cannot set this proof from client or service request fields.
+	ApplicationAdmission bool
 	// DeviceID is the authenticated gateway device id, used by trusted system-device sends.
 	DeviceID string
 	// DeviceFlag is the authenticated gateway device category used by plugin hooks.
@@ -159,6 +166,11 @@ type SendResult struct {
 	MessageID uint64
 	// MessageSeq is the committed channel sequence; transient realtime sends return zero.
 	MessageSeq uint64
+	// ApplicationMessageID is opaque application identity read from the actual committed payload.
+	ApplicationMessageID string
+	// ServerTimestampMS is the actual committed record's server clock, including recovered sends.
+	// It is returned to trusted service callers, not added to the binary SENDACK layout.
+	ServerTimestampMS int64
 	// Reason is the entry-agnostic result code.
 	Reason Reason
 }
@@ -217,6 +229,15 @@ type IdempotencyQuery struct {
 	ChannelType uint8
 	// PayloadHash is the FNV-64a hash of the raw message payload used to reject conflicting key reuse.
 	PayloadHash uint64
+	// ApplicationAdmission requires recovery of opaque application identity from the committed record.
+	ApplicationAdmission bool
+}
+
+// ApplicationMessageIDReader extracts opaque application metadata without making the append runtime
+// depend on a product payload schema. Implementations must reject missing or malformed identity
+// without mutating the borrowed immutable payload.
+type ApplicationMessageIDReader interface {
+	ReadApplicationMessageID(committedPayload []byte) (string, error)
 }
 
 // Message is the durable append payload used by the channel appender port.
