@@ -7,7 +7,7 @@ toolchain go1.25.12
 require (
 	github.com/WuKongIM/wklog v0.0.0-20250123094253-32484fb54d05
 	github.com/WuKongIM/wkrpc v0.0.0-20250312122115-5e44de72d2c8
-	github.com/YingSuiAI/centerim-contracts/generated/imadmission-go v0.0.0-20260911085514-f9790dfdf6d0
+	github.com/YingSuiAI/centerim-contracts/generated/imadmission-go v0.0.0-20260911101409-12d4517fab85
 	github.com/alibabacloud-go/darabonba-openapi/v2 v2.2.2
 	github.com/alibabacloud-go/ecs-20140526/v7 v7.9.1
 	github.com/alibabacloud-go/ims-20190815/v4 v4.4.1
