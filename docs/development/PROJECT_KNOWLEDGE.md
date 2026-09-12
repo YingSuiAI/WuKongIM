@@ -10,6 +10,10 @@
   The HTTP SEND entry requires the service token in this mode; device command or
   transient flags cannot bypass admission. See the root TOML example for the fixed
   private endpoint, separate HMAC domain, and bounded timeout configuration.
+- Message events authorize against the durable `message.committed` anchor with
+  `message_type=agent_run_ref` and `source_event_type=agent.run.anchor`; its
+  `agent_run_id` and `authorization_fence` bind the event to the admitted Run.
+  The replaced source envelope is not a stored-anchor compatibility format.
 - Ordinary message payload corrections are create-only Slot metadata projections,
   not new SENDs or Agent events; original Channel log/index/HW identity stays
   unchanged. Read and rollout boundaries are in

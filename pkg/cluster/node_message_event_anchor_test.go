@@ -20,34 +20,39 @@ func TestParseAgentRunAnchorIdentity(t *testing.T) {
 		wantErr   bool
 	}{
 		{
-			name:      "standard v1 envelope",
-			payload:   `{"type":"agent.run.anchor","version":1,"payload":{"run_id":" run-1 ","authorization_fence":2}}`,
+			name:      "canonical admitted agent anchor",
+			payload:   `{"type":"message.committed","version":1,"payload":{"message_type":"agent_run_ref","source_event_type":"agent.run.anchor","agent_run_id":" run-1 ","authorization_fence":2}}`,
 			wantRunID: "run-1",
 			wantFence: 2,
 		},
 		{
-			name:    "flat legacy identity",
-			payload: `{"type":"agent.run.anchor","version":1,"run_id":"run-1","authorization_fence":2}`,
+			name:    "retired source envelope",
+			payload: `{"type":"agent.run.anchor","version":1,"payload":{"run_id":"run-1","authorization_fence":2}}`,
 			wantErr: true,
 		},
 		{
-			name:    "wrong type",
-			payload: `{"type":"message","version":1,"payload":{"run_id":"run-1","authorization_fence":2}}`,
+			name:    "wrong message type",
+			payload: `{"type":"message.committed","version":1,"payload":{"message_type":"text","source_event_type":"agent.run.anchor","agent_run_id":"run-1","authorization_fence":2}}`,
+			wantErr: true,
+		},
+		{
+			name:    "non-anchor source",
+			payload: `{"type":"message.committed","version":1,"payload":{"message_type":"agent_run_ref","source_event_type":"human.message","agent_run_id":"run-1","authorization_fence":2}}`,
 			wantErr: true,
 		},
 		{
 			name:    "wrong version",
-			payload: `{"type":"agent.run.anchor","version":2,"payload":{"run_id":"run-1","authorization_fence":2}}`,
+			payload: `{"type":"message.committed","version":2,"payload":{"message_type":"agent_run_ref","source_event_type":"agent.run.anchor","agent_run_id":"run-1","authorization_fence":2}}`,
 			wantErr: true,
 		},
 		{
-			name:    "missing run id",
-			payload: `{"type":"agent.run.anchor","version":1,"payload":{"authorization_fence":2}}`,
+			name:    "missing admitted run id",
+			payload: `{"type":"message.committed","version":1,"payload":{"message_type":"agent_run_ref","source_event_type":"agent.run.anchor","run_id":"run-1","authorization_fence":2}}`,
 			wantErr: true,
 		},
 		{
 			name:    "zero authorization fence",
-			payload: `{"type":"agent.run.anchor","version":1,"payload":{"run_id":"run-1","authorization_fence":0}}`,
+			payload: `{"type":"message.committed","version":1,"payload":{"message_type":"agent_run_ref","source_event_type":"agent.run.anchor","agent_run_id":"run-1","authorization_fence":0}}`,
 			wantErr: true,
 		},
 		{
@@ -103,7 +108,7 @@ func TestLookupMessageEventAnchorColdLoadsEvictedRuntime(t *testing.T) {
 	t.Cleanup(func() { _ = service.Close() })
 
 	const messageID = uint64(2090209378475970560)
-	payload := []byte(`{"type":"agent.run.anchor","version":1,"payload":{"run_id":"run-cold-load","authorization_fence":7}}`)
+	payload := []byte(`{"type":"message.committed","version":1,"payload":{"message_type":"agent_run_ref","source_event_type":"agent.run.anchor","agent_run_id":"run-cold-load","authorization_fence":7}}`)
 	appendResult, err := service.Append(ctx, channelruntime.AppendRequest{
 		ChannelID:            id,
 		CommitMode:           channelruntime.CommitModeLocal,

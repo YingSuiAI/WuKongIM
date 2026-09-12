@@ -573,19 +573,25 @@ func (n *Node) lookupMessageEventAnchorWithMeta(ctx context.Context, meta metadb
 	}, true, nil
 }
 
+// parseAgentRunAnchorIdentity reads the durable admission result. The source
+// agent.run.anchor envelope is replaced before Channel append, so its run_id is
+// no longer the stored identity used to authorize later message events.
 func parseAgentRunAnchorIdentity(payload []byte) (string, uint64, error) {
 	var envelope struct {
 		Type    string `json:"type"`
 		Version uint8  `json:"version"`
 		Payload struct {
-			RunID              string `json:"run_id"`
+			MessageType        string `json:"message_type"`
+			SourceEventType    string `json:"source_event_type"`
+			AgentRunID         string `json:"agent_run_id"`
 			AuthorizationFence uint64 `json:"authorization_fence"`
 		} `json:"payload"`
 	}
-	if err := json.Unmarshal(payload, &envelope); err != nil || envelope.Type != "agent.run.anchor" || envelope.Version != 1 {
+	if err := json.Unmarshal(payload, &envelope); err != nil || envelope.Type != "message.committed" || envelope.Version != 1 ||
+		envelope.Payload.MessageType != "agent_run_ref" || envelope.Payload.SourceEventType != "agent.run.anchor" {
 		return "", 0, metadb.ErrInvalidArgument
 	}
-	runID := strings.TrimSpace(envelope.Payload.RunID)
+	runID := strings.TrimSpace(envelope.Payload.AgentRunID)
 	if runID == "" || envelope.Payload.AuthorizationFence == 0 {
 		return "", 0, metadb.ErrInvalidArgument
 	}

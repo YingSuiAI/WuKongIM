@@ -8,6 +8,8 @@ snapshot recovery after a Slot leader change through public `cmd/wukongim` HTTP 
 - Start real single-node and static three-node clusters through `test/e2e/suite`.
 - Use only public HTTP APIs and public `/metrics` samples.
 - Do not import `internal/*` packages or inspect local storage directly.
+- Persist canonical `message.committed` Agent anchors through HTTP SEND before
+  appending events; cover `open` through `finish` and same-event replay after restart.
 - Use the service-only `/message/events:append` endpoint with typed
   `delta`, `snapshot`, and `finish` payloads.
 - Before `finish`, cache-only events must not advance the Slot FSM cursor; after
