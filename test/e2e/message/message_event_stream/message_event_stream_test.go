@@ -84,6 +84,52 @@ type messageEventSlotLeaderTransferResponse struct {
 	Message      string             `json:"message"`
 }
 
+// canonicalAnchorPayload is the frozen message.committed shape persisted after
+// Platform admits an agent.run.anchor SEND. Event lookup must use this stored
+// identity, because the source envelope is no longer in the Channel log.
+func canonicalAnchorPayload(t *testing.T) string {
+	t.Helper()
+	payload, err := json.Marshal(map[string]any{
+		"type": "message.committed", "version": 1,
+		"id": "019c0000-0000-7000-8000-000000000002", "created_at": "2023-11-14T22:13:20Z",
+		"payload": map[string]any{
+			"message_type": "agent_run_ref", "source_event_type": "agent.run.anchor",
+			"agent_run_id": messageEventRunID, "authorization_fence": messageEventFence,
+			"agent_run_snapshot": map[string]any{"state": "running", "authority_sequence": 1, "complete": false},
+		},
+	})
+	require.NoError(t, err)
+	return base64.StdEncoding.EncodeToString(payload)
+}
+
+func TestCanonicalAdmittedAnchorDeliversOpenDeltaAndFinish(t *testing.T) {
+	node := suite.New(t).StartSingleNodeCluster(suite.WithNodeConfigOverrides(1, map[string]string{"WK_API_SERVICE_TOKEN": messageEventServiceToken}))
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	const channelID, sender, clientMsgNo = "canonical-agent-anchor", "canonical-agent", "agent-anchor.canonical"
+	require.NoError(t, suite.PostChannel(ctx, node.APIAddr(), map[string]any{
+		"channel_id": channelID, "channel_type": frame.ChannelTypeGroup, "reset": 1, "subscribers": []string{sender},
+	}))
+	send, err := suite.PostMessageSend(ctx, node.APIAddr(), map[string]any{
+		"from_uid": sender, "channel_id": channelID, "channel_type": frame.ChannelTypeGroup,
+		"client_msg_no": clientMsgNo, "payload": canonicalAnchorPayload(t),
+	})
+	require.NoError(t, err)
+	require.Equal(t, uint8(frame.ReasonSuccess), send.Reason)
+	anchor := messageEventAnchor{ChannelID: channelID, FromUID: sender, ClientMsgNo: clientMsgNo, MessageID: send.MessageID}
+	opened := postMessageEvent(t, ctx, *node, anchor, "canonical-open", "main", "open", 3, "", "running")
+	require.Equal(t, "open", opened.Data.EventStatus)
+	delta := postMessageEvent(t, ctx, *node, anchor, "canonical-delta", "main", "delta", 4, "answer", "running")
+	require.Greater(t, delta.Data.MsgEventSeq, opened.Data.MsgEventSeq)
+	finished := postMessageEvent(t, ctx, *node, anchor, "canonical-finish", "main", "finish", 5, "answer", "succeeded")
+	require.Equal(t, "closed", finished.Data.EventStatus)
+	restartSingleNodeCluster(t, node)
+	replay := postMessageEvent(t, ctx, *node, anchor, "canonical-finish", "main", "finish", 5, "answer", "succeeded")
+	require.Equal(t, finished.Data.MsgEventSeq, replay.Data.MsgEventSeq)
+	msg := requireStreamMessageEventMetaEventually(t, *node, sender, channelID, clientMsgNo, send.MessageSeq, 10*time.Second)
+	requireEventLane(t, msg.EventMeta, "main", "closed", "answer")
+}
+
 func TestWukongIMMessageEventStreamBuffersUntilFinishAndExposesMetrics(t *testing.T) {
 	node := suite.New(t).StartSingleNodeCluster(suite.WithNodeConfigOverrides(1, map[string]string{"WK_API_SERVICE_TOKEN": messageEventServiceToken}))
 
@@ -107,7 +153,7 @@ func TestWukongIMMessageEventStreamBuffersUntilFinishAndExposesMetrics(t *testin
 		"channel_id":    channelID,
 		"channel_type":  frame.ChannelTypeGroup,
 		"client_msg_no": clientMsgNo,
-		"payload":       base64.StdEncoding.EncodeToString([]byte(`{"type":1,"run_id":"` + messageEventRunID + `","authorization_fence":1}`)),
+		"payload":       canonicalAnchorPayload(t),
 	})
 	require.NoError(t, err, node.DumpDiagnostics())
 	require.Equal(t, uint8(frame.ReasonSuccess), send.Reason, node.DumpDiagnostics())
@@ -197,7 +243,7 @@ func TestWukongIMMessageEventStreamFollowerForwardAndLeaderChangeSnapshotRecover
 		"channel_id":    channelID,
 		"channel_type":  frame.ChannelTypeGroup,
 		"client_msg_no": clientMsgNo,
-		"payload":       base64.StdEncoding.EncodeToString([]byte(`{"type":1,"run_id":"` + messageEventRunID + `","authorization_fence":1}`)),
+		"payload":       canonicalAnchorPayload(t),
 	})
 	require.NoError(t, err, cluster.DumpDiagnostics())
 	require.Equal(t, uint8(frame.ReasonSuccess), send.Reason, cluster.DumpDiagnostics())
