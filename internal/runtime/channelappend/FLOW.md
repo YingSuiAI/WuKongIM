@@ -76,6 +76,8 @@ sends terminate successfully before routing.
   The runtime does not interpret application body schemas or replace payload hashes.
 - Persistent command messages use their command Channel; transient messages
   write neither Channel logs nor directory membership.
+- Recipient page scans pass the resolved subscriber mutation version to the
+  source; group cache hits are valid only for that exact version.
 - Observability is aggregate and low-cardinality: never label Channel, UID,
   Slot, route, or authority identities.
   Pool pressure republishes after the final running count decrement so a

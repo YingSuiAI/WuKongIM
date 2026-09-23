@@ -316,6 +316,44 @@ func TestUserChannelMembershipReducerFencesStaleAndResetsTrueRejoin(t *testing.T
 	}
 }
 
+func TestUserChannelMembershipReducerResetsEpochForSameVersionRemoveAndRejoin(t *testing.T) {
+	store := openTestMetaStore(t)
+	defer store.close(t)
+	ctx := context.Background()
+	shard := store.db.HashSlot(14)
+	initial := UserChannelMembership{
+		UID: "u1", ChannelID: "g1", ChannelType: 2,
+		JoinSeq: 11, ReadSeq: 10, DeletedToSeq: 10, SourceVersion: 2, UpdatedAt: 100,
+	}
+	if err := shard.UpsertUserChannelMembership(ctx, initial); err != nil {
+		t.Fatalf("UpsertUserChannelMembership(initial): %v", err)
+	}
+	removed := initial
+	removed.Tombstone = true
+	removed.TombstoneAt = 200
+	removed.SourceVersion = 3
+	removed.UpdatedAt = 200
+	if err := shard.UpsertUserChannelMembership(ctx, removed); err != nil {
+		t.Fatalf("UpsertUserChannelMembership(removed): %v", err)
+	}
+	// One reset mutation may remove and re-add a subscriber under the same
+	// Channel source version. Its new epoch must hide the previous history.
+	rejoined := UserChannelMembership{
+		UID: "u1", ChannelID: "g1", ChannelType: 2,
+		JoinSeq: 51, ReadSeq: 50, DeletedToSeq: 50, SourceVersion: 3, UpdatedAt: 300,
+	}
+	if err := shard.UpsertUserChannelMembership(ctx, rejoined); err != nil {
+		t.Fatalf("UpsertUserChannelMembership(rejoined): %v", err)
+	}
+	got, ok, err := shard.GetUserChannelMembership(ctx, "u1", "g1", 2)
+	if err != nil || !ok {
+		t.Fatalf("GetUserChannelMembership() = (%+v, %v, %v)", got, ok, err)
+	}
+	if got.Tombstone || got.JoinSeq != 51 || got.ReadSeq != 50 || got.DeletedToSeq != 50 || got.SourceVersion != 3 {
+		t.Fatalf("same-version rejoin kept old epoch: %+v", got)
+	}
+}
+
 func TestUserChannelMembershipPersonalStateIsMonotonicAndTombstoneProtected(t *testing.T) {
 	store := openTestMetaStore(t)
 	defer store.close(t)

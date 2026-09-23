@@ -3,6 +3,9 @@
 This scenario proves membership-backed conversation hydration keeps cluster
 semantics in real static multi-node clusters, including requests accepted by an
 ingress node that is not a replica of the UID-owned Slot.
+It also proves group remove/reinvite across three API ingresses restores WKProto
+RECV, makes service-only subscriber read-back agree on all nodes, and excludes
+the removed epoch from ordinary history.
 
 ## Run
 
@@ -19,7 +22,8 @@ WK_E2E_CONVERSATION_DIRECTORY_PERF=1 GOWORK=off go test -tags=e2e ./test/e2e/mes
 ## Rules
 
 - Keep assertions black-box through public channel-management,
-  `/message/send`, `/message/sync`, `/channel/messagesync`,
+  `/message/send`, `/message/sync`, `/channel/messagesync`, service-only
+  `/channel/subscriber_check`, WKProto SEND/RECV,
   `/conversation/list`, `/conversation/retry`, Manager HTTP, and `/metrics`
   entrypoints.
 - Enable Manager HTTP on all nodes and wait for stable actual Slot leaders

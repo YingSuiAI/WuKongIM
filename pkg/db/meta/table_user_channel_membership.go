@@ -546,11 +546,12 @@ func resolveUserChannelMembership(existing UserChannelMembership, exists bool, n
 			return existing
 		}
 		if existing.Tombstone && !next.Tombstone {
-			existing.Tombstone = false
-			existing.TombstoneAt = 0
-			if next.UpdatedAt > existing.UpdatedAt {
-				existing.UpdatedAt = next.UpdatedAt
+			// A reset can remove and re-add one subscriber under the same
+			// source version. Rejoining starts a new visibility epoch.
+			if next.UpdatedAt < existing.UpdatedAt {
+				next.UpdatedAt = existing.UpdatedAt
 			}
+			return next
 		}
 		return existing
 	}

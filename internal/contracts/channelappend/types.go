@@ -397,6 +397,8 @@ type Recipient struct {
 type SubscriberPageRequest struct {
 	// ChannelID identifies the channel whose subscribers should be scanned.
 	ChannelID ChannelID
+	// SubscriberMutationVersion fences cached subscriber snapshots at the source.
+	SubscriberMutationVersion uint64
 	// Cursor resumes after the previous page.
 	Cursor string
 	// Limit bounds the number of recipients returned in one page.

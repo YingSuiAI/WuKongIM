@@ -42,13 +42,17 @@ configuration and explicit construction options.
   optional plugins and never changes storage or quorum identity semantics.
 - Restore coordination does not substitute cached pre-restore observations
   for the activated durable state.
+- Group fanout subscriber snapshots are keyed by the authoritative Channel
+  mutation version and loaded from the Channel Slot leader across API ingresses.
+  A fresh scan is published only after the Channel Slot still reports that
+  version, so a later join cannot receive an earlier committed message.
 
 ## Read First
 
 - [Composition types and construction](app.go)
 - [Dependency wiring](wiring.go)
+- [Fanout subscriber source](delivery_meta.go)
 - [Lifecycle](lifecycle.go)
-- [Backup composition](backup.go)
 - [Restore coordination](backup_maintenance.go)
 
 ## Update Triggers

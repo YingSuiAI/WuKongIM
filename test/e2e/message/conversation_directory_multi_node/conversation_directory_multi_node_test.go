@@ -7,9 +7,11 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/url"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -79,6 +81,116 @@ type directoryPerformanceEvidence struct {
 	CPUSeconds             float64 `json:"cpu_seconds"`
 	AllocatedBytes         float64 `json:"allocated_bytes"`
 	AggregateHeapBytes     float64 `json:"aggregate_heap_bytes"`
+}
+
+func TestThreeNodeReinviteRestoresRealtimeAndOnlyNewHistory(t *testing.T) {
+	cluster := startStableThreeNodeCluster(t)
+	firstIngress := cluster.MustNode(1)
+	secondIngress := cluster.MustNode(2)
+	thirdIngress := cluster.MustNode(3)
+	const (
+		channelID = "directory-reinvite-group"
+		uid       = "directory-reinvite-user"
+		senderUID = "directory-reinvite-sender"
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
+	defer cancel()
+	require.NoError(t, suite.PostChannel(ctx, firstIngress.APIAddr(), map[string]any{
+		"channel_id": channelID, "channel_type": frame.ChannelTypeGroup,
+		"reset": 1, "subscribers": []string{senderUID, uid},
+	}), cluster.DumpDiagnostics())
+	recipient, err := suite.NewWKProtoClient()
+	require.NoError(t, err)
+	defer func() { _ = recipient.Close() }()
+	require.NoError(t, recipient.Connect(firstIngress.GatewayAddr(), uid, uid+"-device"), cluster.DumpDiagnostics())
+	first := sendDirectoryMessage(t, ctx, cluster, *firstIngress, senderUID, channelID, "reinvite-before-remove")
+	firstRecv, err := recipient.ReadRecv()
+	require.NoError(t, err, "baseline group delivery failed before removal\n%s", cluster.DumpDiagnostics())
+	require.Equal(t, first.MessageSeq, firstRecv.MessageSeq)
+	require.NoError(t, recipient.RecvAck(firstRecv.MessageID, firstRecv.MessageSeq))
+	_, err = suite.PostJSON(ctx, "http://"+secondIngress.APIAddr()+"/channel/subscriber_remove", map[string]any{
+		"channel_id": channelID, "channel_type": frame.ChannelTypeGroup, "subscribers": []string{uid},
+	}, nil)
+	require.NoError(t, err, cluster.DumpDiagnostics())
+	second := sendDirectoryMessage(t, ctx, cluster, *secondIngress, senderUID, channelID, "reinvite-while-removed")
+	removedRecv, err := recipient.ReadRecv()
+	require.ErrorIs(t, err, context.DeadlineExceeded, "removed member received message %+v\n%s", removedRecv, cluster.DumpDiagnostics())
+	var denied directoryMessagePage
+	_, err = suite.PostJSON(ctx, "http://"+thirdIngress.APIAddr()+"/channel/messagesync", map[string]any{
+		"login_uid": uid, "channel_id": channelID, "channel_type": frame.ChannelTypeGroup,
+		"start_message_seq": 1, "limit": 10, "pull_mode": 1,
+	}, &denied)
+	require.Error(t, err, "removed member must not read history: %+v\n%s", denied, cluster.DumpDiagnostics())
+	for _, node := range []*suite.StartedNode{firstIngress, secondIngress, thirdIngress} {
+		ready, missing := checkDirectorySubscriber(t, ctx, node.APIAddr(), channelID, []string{uid})
+		require.Empty(t, ready)
+		require.Equal(t, []string{uid}, missing)
+	}
+	_, err = suite.PostJSON(ctx, "http://"+thirdIngress.APIAddr()+"/channel/subscriber_add", map[string]any{
+		"channel_id": channelID, "channel_type": frame.ChannelTypeGroup, "subscribers": []string{uid},
+	}, nil)
+	require.NoError(t, err, cluster.DumpDiagnostics())
+	for _, node := range []*suite.StartedNode{firstIngress, secondIngress, thirdIngress} {
+		ready, missing := checkDirectorySubscriber(t, ctx, node.APIAddr(), channelID, []string{uid})
+		require.Equal(t, []string{uid}, ready)
+		require.Empty(t, missing)
+	}
+	sender, err := suite.NewWKProtoClient()
+	require.NoError(t, err)
+	defer func() { _ = sender.Close() }()
+	require.NoError(t, sender.Connect(secondIngress.GatewayAddr(), senderUID, senderUID+"-device"), cluster.DumpDiagnostics())
+	require.NoError(t, sender.SendFrame(&frame.SendPacket{
+		ChannelID: channelID, ChannelType: frame.ChannelTypeGroup,
+		ClientSeq: 1, ClientMsgNo: "reinvite-after-add", Payload: []byte("reinvite-after-add"),
+	}), cluster.DumpDiagnostics())
+	third, err := sender.ReadSendAck()
+	require.NoError(t, err, cluster.DumpDiagnostics())
+	require.Equal(t, frame.ReasonSuccess, third.ReasonCode)
+	require.Greater(t, second.MessageSeq, first.MessageSeq)
+	require.Greater(t, third.MessageSeq, second.MessageSeq)
+	var page directoryMessagePage
+	_, err = suite.PostJSON(ctx, "http://"+firstIngress.APIAddr()+"/channel/messagesync", map[string]any{
+		"login_uid": uid, "channel_id": channelID, "channel_type": frame.ChannelTypeGroup,
+		"start_message_seq": 1, "limit": 10, "pull_mode": 1,
+	}, &page)
+	require.NoError(t, err, cluster.DumpDiagnostics())
+	require.Equal(t, []directorySyncedMessage{{ClientMsgNo: "reinvite-after-add"}}, page.Messages,
+		"rejoined member must see only new epoch history")
+	recv, err := recipient.ReadRecv()
+	require.NoError(t, err, cluster.DumpDiagnostics())
+	require.Equal(t, third.MessageSeq, recv.MessageSeq)
+	require.Equal(t, []byte("reinvite-after-add"), recv.Payload)
+	require.NoError(t, recipient.RecvAck(recv.MessageID, recv.MessageSeq))
+	require.NoError(t, recipient.Close())
+	require.NoError(t, recipient.Connect(thirdIngress.GatewayAddr(), uid, uid+"-device"), cluster.DumpDiagnostics())
+	var reconnectedPage directoryMessagePage
+	_, err = suite.PostJSON(ctx, "http://"+secondIngress.APIAddr()+"/channel/messagesync", map[string]any{
+		"login_uid": uid, "channel_id": channelID, "channel_type": frame.ChannelTypeGroup,
+		"start_message_seq": 1, "limit": 10, "pull_mode": 1,
+	}, &reconnectedPage)
+	require.NoError(t, err, cluster.DumpDiagnostics())
+	require.Equal(t, []directorySyncedMessage{{ClientMsgNo: "reinvite-after-add"}}, reconnectedPage.Messages,
+		"reconnected member must recover only the new epoch")
+}
+
+func checkDirectorySubscriber(t *testing.T, ctx context.Context, apiAddr, channelID string, uids []string) ([]string, []string) {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{"channel_id": channelID, "channel_type": frame.ChannelTypeGroup, "subscribers": uids})
+	require.NoError(t, err)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+apiAddr+"/channel/subscriber_check", strings.NewReader(string(body)))
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "Bearer wukongim-e2e-service")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var result struct {
+		Ready   []string `json:"ready"`
+		Missing []string `json:"missing"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
+	return result.Ready, result.Missing
 }
 
 type directoryPerformanceSnapshot struct {

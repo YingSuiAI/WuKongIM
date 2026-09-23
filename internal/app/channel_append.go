@@ -42,9 +42,18 @@ func (s channelAppendSubscriberSource) NextSubscriberPage(ctx context.Context, r
 	if limit <= 0 {
 		limit = 1
 	}
-	uids, cursor, done, err := s.node.ListChannelSubscribersPage(ctx, req.ChannelID.ID, int64(req.ChannelID.Type), req.Cursor, limit)
+	uids, cursor, done, err := s.node.ListChannelSubscribersAuthoritative(ctx, req.ChannelID.ID, int64(req.ChannelID.Type), req.Cursor, limit)
 	if err != nil {
 		return channelappend.SubscriberPage{}, err
+	}
+	if req.SubscriberMutationVersion != 0 {
+		channel, err := s.node.GetChannelMetadataAuthoritative(ctx, req.ChannelID.ID, int64(req.ChannelID.Type))
+		if err != nil {
+			return channelappend.SubscriberPage{}, err
+		}
+		if channel.SubscriberMutationVersion != req.SubscriberMutationVersion {
+			return channelappend.SubscriberPage{}, errSubscriberSnapshotVersionChanged
+		}
 	}
 	recipients := make([]channelappend.Recipient, 0, len(uids))
 	for _, uid := range uids {

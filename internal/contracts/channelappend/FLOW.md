@@ -34,6 +34,8 @@ It does not perform permission checks, durable append, routing, or delivery.
   participant treats them as immutable; concrete durable/async owners copy.
 - Authority target carries complete route generation and observed write-fence
   state. Route generation orders cache projection, not Channel machine state.
+- Subscriber page requests carry the Channel subscriber mutation version so
+  recipient sources can invalidate snapshots after cross-ingress changes.
 - Append requests carry expected authority and leader epochs to reject stale
   writes without reinterpreting caller intent.
 - Server-allocated message-ID proof applies to every item and skips only

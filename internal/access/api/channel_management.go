@@ -64,6 +64,7 @@ func (s *Server) registerChannelRoutes() {
 	s.engine.POST("/channel/info", s.handleChannelInfo)
 	s.engine.POST("/channel/delete", s.handleChannelDelete)
 	s.engine.POST("/channel/subscriber_add", s.handleChannelSubscriberAdd)
+	s.engine.POST("/channel/subscriber_check", s.requireServiceToken, s.handleChannelSubscriberCheck)
 	s.engine.POST("/channel/subscriber_remove", s.handleChannelSubscriberRemove)
 	s.engine.POST("/channel/subscriber_remove_all", s.handleChannelSubscriberRemoveAll)
 	s.engine.POST("/tmpchannel/subscriber_set", s.handleTmpChannelSubscriberSet)

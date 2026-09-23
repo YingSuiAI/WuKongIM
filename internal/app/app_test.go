@@ -3886,6 +3886,55 @@ func TestDeliveryMetaStoreCachesSubscriberSnapshotAcrossPages(t *testing.T) {
 	}
 }
 
+func TestDeliveryMetaStoreRefreshesRemoteSubscriberMutation(t *testing.T) {
+	node := &recordingDeliveryMetaNode{
+		upserted: []metadb.Channel{{ChannelID: "g1", ChannelType: 2, SubscriberMutationVersion: 10}},
+		subscribers: map[string][]string{"g1": {"u1"}},
+	}
+	store := newDeliveryMetaStore(node)
+	req := channelappend.SubscriberPageRequest{ChannelID: channelappend.ChannelID{ID: "g1", Type: frame.ChannelTypeGroup}, SubscriberMutationVersion: 10, Limit: 10}
+	first, err := store.NextSubscriberPage(context.Background(), req)
+	if err != nil || len(first.Recipients) != 1 {
+		t.Fatalf("first page = %#v, err = %v", first, err)
+	}
+	node.mu.Lock()
+	node.subscribers["g1"] = []string{"u1", "u2"}
+	node.upserted = []metadb.Channel{{ChannelID: "g1", ChannelType: 2, SubscriberMutationVersion: 11}}
+	node.mu.Unlock()
+	req.SubscriberMutationVersion = 11 // mutation entered through another API node
+	second, err := store.NextSubscriberPage(context.Background(), req)
+	if err != nil || len(second.Recipients) != 2 || second.Recipients[1].UID != "u2" {
+		t.Fatalf("second page = %#v, err = %v, want rejoined recipient", second, err)
+	}
+	if node.listCalls != 2 {
+		t.Fatalf("subscriber list calls = %d, want authoritative reload", node.listCalls)
+	}
+}
+
+type racingDeliveryMetaNode struct{ *recordingDeliveryMetaNode }
+
+func (n racingDeliveryMetaNode) ListChannelSubscribersAuthoritative(ctx context.Context, channelID string, channelType int64, afterUID string, limit int) ([]string, string, bool, error) {
+	n.recordingDeliveryMetaNode.mu.Lock()
+	n.recordingDeliveryMetaNode.subscribers[channelID] = []string{"u1", "new-member"}
+	n.recordingDeliveryMetaNode.upserted = []metadb.Channel{{ChannelID: channelID, ChannelType: channelType, SubscriberMutationVersion: 11}}
+	n.recordingDeliveryMetaNode.mu.Unlock()
+	return n.recordingDeliveryMetaNode.ListChannelSubscribersPage(ctx, channelID, channelType, afterUID, limit)
+}
+
+func TestDeliveryMetaStoreRejectsSubscriberSnapshotFromNewerEpoch(t *testing.T) {
+	node := racingDeliveryMetaNode{recordingDeliveryMetaNode: &recordingDeliveryMetaNode{
+		upserted:    []metadb.Channel{{ChannelID: "g1", ChannelType: 2, SubscriberMutationVersion: 10}},
+		subscribers: map[string][]string{"g1": {"u1"}},
+	}}
+	store := newDeliveryMetaStore(node)
+	_, err := store.NextSubscriberPage(context.Background(), channelappend.SubscriberPageRequest{
+		ChannelID: channelappend.ChannelID{ID: "g1", Type: 2}, SubscriberMutationVersion: 10, Limit: 10,
+	})
+	if err == nil {
+		t.Fatalf("error = %v, want changed-version fence before old message fanout", err)
+	}
+}
+
 func TestDeliveryMetaStoreInvalidatesSubscriberCacheAfterMutation(t *testing.T) {
 	node := &recordingDeliveryMetaNode{
 		snapshot:    readyFakeClusterSnapshot(1, 16),
@@ -6979,6 +7028,10 @@ func (f *fakePresenceCluster) ListChannelSubscribersPage(_ context.Context, chan
 		return page, "", true, nil
 	}
 	return page, page[len(page)-1], false, nil
+}
+
+func (f *fakePresenceCluster) ListChannelSubscribersAuthoritative(ctx context.Context, channelID string, channelType int64, afterUID string, limit int) ([]string, string, bool, error) {
+	return f.ListChannelSubscribersPage(ctx, channelID, channelType, afterUID, limit)
 }
 
 func (f *fakePresenceCluster) ListUserChannelMembershipPage(_ context.Context, uid string, _ metadb.UserChannelMembershipCursor, _ int) ([]metadb.UserChannelMembership, metadb.UserChannelMembershipCursor, bool, error) {
