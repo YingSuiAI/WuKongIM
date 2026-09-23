@@ -397,7 +397,8 @@ func (s *connState) nextWSResult() (wsTrafficResult, bool) {
 			}, true
 		}
 
-		if consumed == len(s.wsInbound) {
+		lastFrame := consumed == len(s.wsInbound)
+		if lastFrame {
 			s.wsInbound = s.wsInbound[:0]
 		} else {
 			s.wsInbound = s.wsInbound[consumed:]
@@ -462,6 +463,11 @@ func (s *connState) nextWSResult() (wsTrafficResult, bool) {
 					closeNow:   true,
 					closeErr:   err,
 				}, true
+			}
+			if lastFrame && len(frame.payload) > 0 {
+				// The actor queue may still reference this decoded payload. Do not
+				// reuse its backing array for the next gnet read.
+				s.wsInbound = nil
 			}
 			return wsTrafficResult{payload: frame.payload, opcode: frame.opcode}, true
 		case wsOpcodePing:
