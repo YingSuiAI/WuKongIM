@@ -18,8 +18,8 @@ type ChannelAppendAuthorityNode interface {
 	NodeID() uint64
 	// ResolveChannelAppendAuthority resolves the channel append authority.
 	ResolveChannelAppendAuthority(context.Context, channelruntime.ChannelID) (channelruntime.Meta, error)
-	// GetChannelMetadata reads durable channel metadata used by channelappend recipient fanout.
-	GetChannelMetadata(context.Context, string, int64) (metadb.Channel, error)
+	// GetChannelMetadataAuthoritative reads recipient metadata from the Channel Slot leader.
+	GetChannelMetadataAuthoritative(context.Context, string, int64) (metadb.Channel, error)
 }
 
 // channelAppendAuthorityInvalidator invalidates one exact append-authority
@@ -78,12 +78,14 @@ func (c *ChannelAppendClient) ResolveAppendAuthority(ctx context.Context, id cha
 	if target.ChannelID != id {
 		return channelappend.AuthorityTarget{}, channelappend.ErrStaleRoute
 	}
-	if metadata, ok := c.metadata.Lookup(id); ok {
+	// Normal channel subscribers may change through another API ingress. The
+	// local cache cannot establish their current mutation version for fanout.
+	if metadata, ok := c.metadata.Lookup(id); ok && id.Type == 1 {
 		applyChannelAppendMetadata(&target, metadata)
 		return target, nil
 	}
 	cacheGeneration := c.metadata.Generation()
-	channel, err := c.node.GetChannelMetadata(ctx, id.ID, int64(id.Type))
+	channel, err := c.node.GetChannelMetadataAuthoritative(ctx, id.ID, int64(id.Type))
 	if err != nil && !errors.Is(err, metadb.ErrNotFound) {
 		return channelappend.AuthorityTarget{}, mapChannelAppendRouteError(err)
 	}

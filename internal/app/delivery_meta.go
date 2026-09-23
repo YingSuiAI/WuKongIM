@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -16,15 +17,19 @@ const deliveryMetaMutationConcurrency = 32
 const deliveryMetaSubscriberCacheMaxChannels = 4096
 const deliveryMetaSubscriberCacheLoadPageSize = 1024
 
+var errSubscriberSnapshotVersionChanged = errors.New("subscriber snapshot mutation version changed")
+
 type deliveryMetaNode interface {
 	UpsertChannelMetadata(context.Context, metadb.Channel) error
 	AddChannelSubscribers(context.Context, string, int64, []string, uint64) error
 	RemoveChannelSubscribers(context.Context, string, int64, []string, uint64) error
-	ListChannelSubscribersPage(context.Context, string, int64, string, int) ([]string, string, bool, error)
+	GetChannelMetadataAuthoritative(context.Context, string, int64) (metadb.Channel, error)
+	ListChannelSubscribersAuthoritative(context.Context, string, int64, string, int) ([]string, string, bool, error)
 }
 
 type recipientSubscriberNode interface {
-	ListChannelSubscribersPage(context.Context, string, int64, string, int) ([]string, string, bool, error)
+	GetChannelMetadataAuthoritative(context.Context, string, int64) (metadb.Channel, error)
+	ListChannelSubscribersAuthoritative(context.Context, string, int64, string, int) ([]string, string, bool, error)
 }
 
 // deliveryMetaStore adapts cluster Slot metadata to bench setup and channelappend subscriber scans.
@@ -71,8 +76,9 @@ type deliveryMetaSubscriberKey struct {
 }
 
 type deliveryMetaSubscriberCacheEntry struct {
-	version uint64
-	uids    []string
+	version         uint64
+	mutationVersion uint64
+	uids            []string
 }
 
 func (s *deliveryMetaStore) AddSubscribers(ctx context.Context, mutations []accessapi.BenchSubscriberMutation) (int, error) {
@@ -188,36 +194,48 @@ func (s *deliveryMetaStore) NextSubscriberPage(ctx context.Context, req channela
 		limit = 1
 	}
 	key := deliveryMetaSubscriberKey{channelID: req.ChannelID.ID, channelType: req.ChannelID.Type}
-	snapshot, err := s.subscriberSnapshot(ctx, key)
+	snapshot, err := s.subscriberSnapshot(ctx, key, req.SubscriberMutationVersion)
 	if err != nil {
 		return channelappend.SubscriberPage{}, err
 	}
 	return subscriberPageFromSnapshot(snapshot, req.Cursor, limit)
 }
 
-func (s *deliveryMetaStore) subscriberSnapshot(ctx context.Context, key deliveryMetaSubscriberKey) ([]string, error) {
+func (s *deliveryMetaStore) subscriberSnapshot(ctx context.Context, key deliveryMetaSubscriberKey, mutationVersion uint64) ([]string, error) {
 	version := s.version.Load()
-	if uids, ok := s.cachedSubscribers(key, version); ok {
+	if uids, ok := s.cachedSubscribers(key, version, mutationVersion); ok {
 		return uids, nil
 	}
 	uids, err := s.loadSubscriberSnapshot(ctx, key)
 	if err != nil {
 		return nil, err
 	}
-	return s.storeSubscriberSnapshot(key, version, uids), nil
+	// A mutation between append routing and this scan can add a recipient
+	// whose join sequence is after the committed message. Never publish that
+	// newer snapshot under the earlier target version.
+	if mutationVersion != 0 {
+		channel, err := s.node.GetChannelMetadataAuthoritative(ctx, key.channelID, int64(key.channelType))
+		if err != nil {
+			return nil, err
+		}
+		if channel.SubscriberMutationVersion != mutationVersion {
+			return nil, errSubscriberSnapshotVersionChanged
+		}
+	}
+	return s.storeSubscriberSnapshot(key, version, mutationVersion, uids), nil
 }
 
-func (s *deliveryMetaStore) cachedSubscribers(key deliveryMetaSubscriberKey, version uint64) ([]string, bool) {
+func (s *deliveryMetaStore) cachedSubscribers(key deliveryMetaSubscriberKey, version, mutationVersion uint64) ([]string, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	entry, ok := s.subscriberCache[key]
-	if !ok || entry.version != version {
+	if !ok || entry.version != version || entry.mutationVersion != mutationVersion {
 		return nil, false
 	}
 	return entry.uids, true
 }
 
-func (s *deliveryMetaStore) storeSubscriberSnapshot(key deliveryMetaSubscriberKey, version uint64, uids []string) []string {
+func (s *deliveryMetaStore) storeSubscriberSnapshot(key deliveryMetaSubscriberKey, version, mutationVersion uint64, uids []string) []string {
 	snapshot := append([]string(nil), uids...)
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -233,7 +251,10 @@ func (s *deliveryMetaStore) storeSubscriberSnapshot(key deliveryMetaSubscriberKe
 	if _, ok := s.subscriberCache[key]; !ok && len(s.subscriberCache) >= deliveryMetaSubscriberCacheMaxChannels {
 		s.subscriberCache = make(map[deliveryMetaSubscriberKey]deliveryMetaSubscriberCacheEntry)
 	}
-	s.subscriberCache[key] = deliveryMetaSubscriberCacheEntry{version: version, uids: snapshot}
+	if existing, ok := s.subscriberCache[key]; ok && existing.mutationVersion > mutationVersion {
+		return snapshot
+	}
+	s.subscriberCache[key] = deliveryMetaSubscriberCacheEntry{version: version, mutationVersion: mutationVersion, uids: snapshot}
 	return snapshot
 }
 
@@ -254,7 +275,7 @@ func (s *deliveryMetaStore) loadSubscriberSnapshot(ctx context.Context, key deli
 	var out []string
 	cursor := ""
 	for {
-		uids, nextCursor, done, err := s.node.ListChannelSubscribersPage(ctx, key.channelID, int64(key.channelType), cursor, deliveryMetaSubscriberCacheLoadPageSize)
+		uids, nextCursor, done, err := s.node.ListChannelSubscribersAuthoritative(ctx, key.channelID, int64(key.channelType), cursor, deliveryMetaSubscriberCacheLoadPageSize)
 		if err != nil {
 			return nil, err
 		}

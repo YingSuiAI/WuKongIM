@@ -16,7 +16,7 @@ maintenance operations to dependencies supplied by the composition root.
 - Business policy and durable mutation belong to the injected use cases.
 - Gateway protocol handling, cluster routing, and storage are outside this
   package.
-- Service-only committed reads and payload correction use service-token
+- Service-only committed reads, subscriber read-back, and payload correction use service-token
   authentication; optional diagnostic and benchmark routes have their own
   configured admission.
 - Restore maintenance middleware fences product requests before handlers run.
@@ -45,13 +45,15 @@ maintenance operations to dependencies supplied by the composition root.
   acquire provider control fields.
 - Correction and claim failures use stable response categories rather than
   returning internal causes.
+- `/channel/subscriber_check` validates a bounded group UID batch and returns
+  only `ready` and `missing`; unavailable membership authority returns 503.
 
 ## Read First
 
 - [Server composition and middleware](server.go)
-- [Message SEND adapter](message_send.go)
 - [Channel routes](channel_management.go)
 - [History mapping](channel_messagesync.go)
+- [Subscriber read-back](channel_subscriber_check.go)
 - [Correction and claim entrypoints](message_payload_correction.go)
 
 ## Update Triggers

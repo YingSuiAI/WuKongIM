@@ -38,6 +38,8 @@ payload-correction records.
   Slot's request sharing the physical commit. Hash-slot locks last through fsync.
 - Correction bodies remain separate from original Channel message logs.
 - Retention and terminal cleanup remove their owned correction rows.
+- A tombstone-to-live membership transition starts a new history visibility
+  epoch, including remove/re-add within one subscriber source version.
 - Corrupt data, missing rows, expected conflicts, and storage failures retain
   their distinct meanings.
 

@@ -48,7 +48,7 @@ func TestChannelAppendClientMapsResolvedMetaToAuthorityTarget(t *testing.T) {
 	}
 }
 
-func TestChannelAppendClientCachesRecipientMetadata(t *testing.T) {
+func TestChannelAppendClientRefreshesRecipientMetadataAcrossIngress(t *testing.T) {
 	channelID := channelappend.ChannelID{ID: "room", Type: 2}
 	node := &channelAppendNodeForTest{
 		nodeID: 1,
@@ -84,11 +84,11 @@ func TestChannelAppendClientCachesRecipientMetadata(t *testing.T) {
 		t.Fatalf("second ResolveAppendAuthority() error = %v", err)
 	}
 
-	if node.metadataCalls != 1 {
-		t.Fatalf("GetChannelMetadata calls = %d, want 1 cached lookup", node.metadataCalls)
+	if node.metadataCalls != 2 {
+		t.Fatalf("GetChannelMetadata calls = %d, want 2 authoritative lookups", node.metadataCalls)
 	}
-	if !first.Large || first.SubscriberMutationVersion != 19 || !second.Large || second.SubscriberMutationVersion != 19 {
-		t.Fatalf("targets = %#v %#v, want cached recipient metadata", first, second)
+	if !first.Large || first.SubscriberMutationVersion != 19 || second.Large || second.SubscriberMutationVersion != 20 {
+		t.Fatalf("targets = %#v %#v, want fresh recipient metadata", first, second)
 	}
 }
 
@@ -257,7 +257,7 @@ func (n *channelAppendNodeForTest) ResolveChannelAppendAuthority(_ context.Conte
 	return n.meta, nil
 }
 
-func (n *channelAppendNodeForTest) GetChannelMetadata(context.Context, string, int64) (metadb.Channel, error) {
+func (n *channelAppendNodeForTest) GetChannelMetadataAuthoritative(context.Context, string, int64) (metadb.Channel, error) {
 	n.metadataCalls++
 	if n.err != nil {
 		return metadb.Channel{}, n.err

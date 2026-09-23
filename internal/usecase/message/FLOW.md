@@ -31,6 +31,8 @@ without owning gateway frames, cluster transport, or durable storage engines.
 3. Submit admitted items through the append port and return aligned results.
 4. For history, authorize membership and visibility bounds before invoking the
    reader; preserve latest-page and bounded-cursor semantics.
+   Service subscriber read-back uses the same UID-owned and Channel-owned
+   membership facts without reading message content.
 5. Read or append message-event projections through the event store.
 6. Restore reset discards permission-cache state owned by this facade.
 
@@ -55,7 +57,7 @@ without owning gateway frames, cluster transport, or durable storage engines.
 - [SEND orchestration](send.go)
 - [Permission decisions](permission.go)
 - [History synchronization](sync.go)
-- [Message-event handling](event.go)
+- [Subscriber read-back](subscriber_check.go)
 
 ## Update Triggers
 
