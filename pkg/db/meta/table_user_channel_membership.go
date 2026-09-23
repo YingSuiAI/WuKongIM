@@ -9,17 +9,18 @@ import (
 )
 
 const (
-	userChannelMembershipColumnUID         uint16 = 1
-	userChannelMembershipColumnChannelID   uint16 = 2
-	userChannelMembershipColumnChannelType uint16 = 3
-	userChannelMembershipColumnJoinSeq     uint16 = 4
-	userChannelMembershipColumnReadSeq     uint16 = 5
-	userChannelMembershipColumnDeletedSeq  uint16 = 6
-	userChannelMembershipColumnActivatedAt uint16 = 7
-	userChannelMembershipColumnTombstone   uint16 = 8
-	userChannelMembershipColumnTombstoneAt uint16 = 9
-	userChannelMembershipColumnSourceVer   uint16 = 10
-	userChannelMembershipColumnUpdatedAt   uint16 = 11
+	userChannelMembershipColumnUID           uint16 = 1
+	userChannelMembershipColumnChannelID     uint16 = 2
+	userChannelMembershipColumnChannelType   uint16 = 3
+	userChannelMembershipColumnJoinSeq       uint16 = 4
+	userChannelMembershipColumnReadSeq       uint16 = 5
+	userChannelMembershipColumnDeletedSeq    uint16 = 6
+	userChannelMembershipColumnActivatedAt   uint16 = 7
+	userChannelMembershipColumnTombstone     uint16 = 8
+	userChannelMembershipColumnTombstoneAt   uint16 = 9
+	userChannelMembershipColumnSourceVer     uint16 = 10
+	userChannelMembershipColumnUpdatedAt     uint16 = 11
+	userChannelMembershipColumnPlatformEpoch uint16 = 12
 )
 
 // UserChannelMembership stores one UID-owned channel membership row.
@@ -44,9 +45,32 @@ type UserChannelMembership struct {
 	TombstoneAt int64
 	// SourceVersion fences stale cross-Slot subscriber mutations.
 	SourceVersion uint64
+	// PlatformMembershipEpoch fences explicit Platform rejoin visibility resets.
+	PlatformMembershipEpoch uint64
 	// UpdatedAt records the latest membership mutation timestamp.
 	UpdatedAt int64
 }
+
+// PlatformMembershipRejoin is the authoritative history boundary for one
+// confirmed Platform membership generation. JoinedSeq is the last sequence
+// before that generation became active.
+type PlatformMembershipRejoin struct {
+	UID                string
+	ChannelID          string
+	ChannelType        int64
+	MembershipEpoch    uint64
+	JoinedSeq          uint64
+	PreviousRemovedSeq uint64
+	// RepairSameEpoch is only used after Platform confirms this active epoch
+	// already completed; it cannot change the original joined floor.
+	RepairSameEpoch bool
+	SourceVersion   uint64
+	UpdatedAt       int64
+}
+
+// PlatformMembershipRejoinResult is populated by a durable batch commit.
+// A rejected guard is a per-command no-op, never a partially applied write.
+type PlatformMembershipRejoinResult struct{ Accepted bool }
 
 // UserChannelMembershipCursor identifies the last emitted user membership row.
 type UserChannelMembershipCursor struct {
@@ -73,6 +97,7 @@ var userChannelMembershipTable = registerMetaTable(TableSpec[UserChannelMembersh
 		{ID: userChannelMembershipColumnTombstoneAt, Name: "tombstone_at", Type: schema.TypeInt64},
 		{ID: userChannelMembershipColumnSourceVer, Name: "source_version", Type: schema.TypeUint64},
 		{ID: userChannelMembershipColumnUpdatedAt, Name: "updated_at", Type: schema.TypeInt64},
+		{ID: userChannelMembershipColumnPlatformEpoch, Name: "platform_membership_epoch", Type: schema.TypeUint64},
 	},
 	Families: []schema.Family{{ID: userChannelMembershipPrimaryFamilyID, Name: "primary", Columns: []uint16{
 		userChannelMembershipColumnJoinSeq,
@@ -83,6 +108,7 @@ var userChannelMembershipTable = registerMetaTable(TableSpec[UserChannelMembersh
 		userChannelMembershipColumnTombstoneAt,
 		userChannelMembershipColumnSourceVer,
 		userChannelMembershipColumnUpdatedAt,
+		userChannelMembershipColumnPlatformEpoch,
 	}}},
 	Primary: PrimarySpec[UserChannelMembership]{
 		IndexID:  userChannelMembershipPrimaryIndexID,
@@ -355,6 +381,80 @@ func (b *Batch) UpsertUserChannelMembership(hashSlot HashSlot, membership UserCh
 	return nil
 }
 
+// RejoinUserChannelMembership resets one UID-owned visibility boundary only
+// for a newer Platform generation and an observed subscriber source version.
+// Guard failures are recorded in the result so a stale Raft command cannot
+// abort another command in the same committed batch.
+func (b *Batch) RejoinUserChannelMembership(hashSlot HashSlot, rejoin PlatformMembershipRejoin) (*PlatformMembershipRejoinResult, error) {
+	if err := b.ensureOpen(); err != nil {
+		return nil, err
+	}
+	if err := validateUserChannelMembershipIdentity(rejoin.UID, rejoin.ChannelID, rejoin.ChannelType); err != nil {
+		return nil, err
+	}
+	if rejoin.MembershipEpoch == 0 || rejoin.JoinedSeq == ^uint64(0) || rejoin.PreviousRemovedSeq > rejoin.JoinedSeq || rejoin.SourceVersion == 0 || rejoin.UpdatedAt < 0 {
+		return nil, dberrors.ErrInvalidArgument
+	}
+	pk := userChannelMembershipPrimaryKey(rejoin.UID, rejoin.ChannelID, rejoin.ChannelType)
+	primaryKey, err := userChannelMembershipTable.primaryRowKey(hashSlot, pk)
+	if err != nil {
+		return nil, err
+	}
+	result := &PlatformMembershipRejoinResult{}
+	b.addOp(hashSlot, func(_ context.Context, state *batchCommitState, batch *engine.Batch) error {
+		existing, exists, err := userChannelMembershipTable.loadBatchRow(state, hashSlot, pk, primaryKey)
+		if err != nil {
+			return err
+		}
+		if !exists || rejoin.MembershipEpoch < existing.PlatformMembershipEpoch {
+			return nil
+		}
+		joinSeq := rejoin.JoinedSeq + 1
+		if rejoin.MembershipEpoch == existing.PlatformMembershipEpoch {
+			if existing.PlatformMembershipEpoch != 0 && !existing.Tombstone && existing.JoinSeq == joinSeq && existing.DeletedToSeq >= rejoin.JoinedSeq {
+				result.Accepted = true
+				return nil
+			}
+			if !rejoin.RepairSameEpoch || !existing.Tombstone || existing.JoinSeq != joinSeq || rejoin.SourceVersion <= existing.SourceVersion {
+				return nil
+			}
+		}
+		// Platform has already confirmed the removal barrier. A legacy add may
+		// have revived an older live UID row before this service command arrived.
+		// The trusted epoch and floor must still replace that older generation.
+		if rejoin.SourceVersion < existing.SourceVersion ||
+			(rejoin.SourceVersion == existing.SourceVersion && (existing.Tombstone || rejoin.MembershipEpoch == existing.PlatformMembershipEpoch)) {
+			return nil
+		}
+		next := existing
+		next.JoinSeq = joinSeq
+		// Read and hide floors are user-owned. Removal never advances them,
+		// so a higher existing floor represents an explicit user action.
+		// Keep it while establishing the new Platform membership boundary.
+		if next.ReadSeq < rejoin.JoinedSeq {
+			next.ReadSeq = rejoin.JoinedSeq
+		}
+		if next.DeletedToSeq < rejoin.JoinedSeq {
+			next.DeletedToSeq = rejoin.JoinedSeq
+		}
+		next.Tombstone = false
+		next.TombstoneAt = 0
+		next.SourceVersion = rejoin.SourceVersion
+		next.PlatformMembershipEpoch = rejoin.MembershipEpoch
+		if rejoin.UpdatedAt > next.UpdatedAt {
+			next.UpdatedAt = rejoin.UpdatedAt
+		}
+		if err := stageUserChannelMembership(batch, hashSlot, primaryKey, existing, true, next); err != nil {
+			return err
+		}
+		value := encodeUserChannelMembershipValue(next)
+		state.tableRows[string(primaryKey)] = tableRowOverlay{value: append([]byte(nil), value...), exists: true}
+		result.Accepted = true
+		return nil
+	})
+	return result, nil
+}
+
 // EnsureUserChannelMembership stages a create-or-fence-advance projection.
 // A newer directory incarnation replaces all source-derived sequence floors
 // while preserving activation and tombstone state owned by the user-facing
@@ -552,14 +652,19 @@ func resolveUserChannelMembership(existing UserChannelMembership, exists bool, n
 			next.JoinSeq = existing.JoinSeq
 			next.ReadSeq = existing.ReadSeq
 			next.DeletedToSeq = existing.DeletedToSeq
+			next.PlatformMembershipEpoch = existing.PlatformMembershipEpoch
 			return next
 		}
 		if existing.Tombstone && !next.Tombstone {
+			if existing.PlatformMembershipEpoch != 0 {
+				return existing
+			}
 			// A reset can remove and re-add one subscriber under the same
 			// source version. Rejoining starts a new visibility epoch.
 			if next.UpdatedAt < existing.UpdatedAt {
 				next.UpdatedAt = existing.UpdatedAt
 			}
+			next.PlatformMembershipEpoch = existing.PlatformMembershipEpoch
 			return next
 		}
 		return existing
@@ -574,6 +679,10 @@ func resolveUserChannelMembership(existing UserChannelMembership, exists bool, n
 		return existing
 	}
 	if existing.Tombstone {
+		if existing.PlatformMembershipEpoch != 0 {
+			return existing
+		}
+		next.PlatformMembershipEpoch = existing.PlatformMembershipEpoch
 		return next
 	}
 	existing.SourceVersion = next.SourceVersion
@@ -638,7 +747,11 @@ func encodeUserChannelMembershipValue(membership UserChannelMembership) []byte {
 	}
 	value = appendValueInt64(value, membership.TombstoneAt)
 	value = appendValueUint64(value, membership.SourceVersion)
-	return appendValueInt64(value, membership.UpdatedAt)
+	value = appendValueInt64(value, membership.UpdatedAt)
+	if membership.PlatformMembershipEpoch > 0 {
+		value = appendValueUint64(value, membership.PlatformMembershipEpoch)
+	}
+	return value
 }
 
 func decodeUserChannelMembershipValue(uid, channelID string, channelType int64, value []byte) (UserChannelMembership, error) {
@@ -672,20 +785,28 @@ func decodeUserChannelMembershipValue(uid, channelID string, channelType int64, 
 	if err != nil {
 		return UserChannelMembership{}, err
 	}
+	platformEpoch := uint64(0)
+	if len(rest) != 0 {
+		platformEpoch, rest, err = readValueUint64(rest)
+		if err != nil {
+			return UserChannelMembership{}, err
+		}
+	}
 	if len(rest) != 0 {
 		return UserChannelMembership{}, dberrors.ErrCorruptValue
 	}
 	return UserChannelMembership{
-		UID:           uid,
-		ChannelID:     channelID,
-		ChannelType:   channelType,
-		JoinSeq:       joinSeq,
-		ReadSeq:       readSeq,
-		DeletedToSeq:  deletedToSeq,
-		ActivatedAt:   activatedAt,
-		Tombstone:     tombstone,
-		TombstoneAt:   tombstoneAt,
-		SourceVersion: sourceVersion,
-		UpdatedAt:     updatedAt,
+		UID:                     uid,
+		ChannelID:               channelID,
+		ChannelType:             channelType,
+		JoinSeq:                 joinSeq,
+		ReadSeq:                 readSeq,
+		DeletedToSeq:            deletedToSeq,
+		ActivatedAt:             activatedAt,
+		Tombstone:               tombstone,
+		TombstoneAt:             tombstoneAt,
+		SourceVersion:           sourceVersion,
+		PlatformMembershipEpoch: platformEpoch,
+		UpdatedAt:               updatedAt,
 	}, nil
 }

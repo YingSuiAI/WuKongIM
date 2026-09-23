@@ -4,15 +4,52 @@ package app
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
+	clusterinfra "github.com/WuKongIM/WuKongIM/internal/infra/cluster"
 	"github.com/WuKongIM/WuKongIM/internal/runtime/channelappend"
+	channelusecase "github.com/WuKongIM/WuKongIM/internal/usecase/channel"
+	messageusecase "github.com/WuKongIM/WuKongIM/internal/usecase/message"
 	channelruntime "github.com/WuKongIM/WuKongIM/pkg/channel"
 	clusterpkg "github.com/WuKongIM/WuKongIM/pkg/cluster"
 	metadb "github.com/WuKongIM/WuKongIM/pkg/db/meta"
+	coregateway "github.com/WuKongIM/WuKongIM/pkg/gateway"
 	"github.com/WuKongIM/WuKongIM/pkg/protocol/frame"
 )
+
+type failOnceRejoinMembershipIndex struct {
+	*clusterinfra.ChannelMetadataStore
+	fail     bool
+	observed []metadb.PlatformMembershipRejoin
+}
+
+func sendThreeNodeGroupPacketAs(t *testing.T, app *App, uid, channelID, clientMsgNo string, clientSeq uint64) *frame.SendackPacket {
+	t.Helper()
+	writes := &sendackSmokeSessionWrites{}
+	sess := newSendackSmokeSession(writes)
+	sess.SetValue(coregateway.SessionValueUID, uid)
+	sess.SetValue(coregateway.SessionValueProtocolVersion, uint8(frame.LatestVersion))
+	packet := &frame.SendPacket{ClientSeq: clientSeq, ClientMsgNo: clientMsgNo, ChannelID: channelID, ChannelType: frame.ChannelTypeGroup, Payload: []byte(clientMsgNo)}
+	if err := app.Handler().OnFrame(coregateway.Context{Session: sess, RequestContext: context.Background()}, packet); err != nil {
+		t.Fatal(err)
+	}
+	ack := writes.requireOnlySendack(t)
+	if ack.ReasonCode != frame.ReasonSuccess {
+		t.Fatalf("send %s reason=%v", clientMsgNo, ack.ReasonCode)
+	}
+	return ack
+}
+
+func (i *failOnceRejoinMembershipIndex) RejoinUserChannelMembership(ctx context.Context, rejoin metadb.PlatformMembershipRejoin) error {
+	i.observed = append(i.observed, rejoin)
+	if i.fail {
+		i.fail = false
+		return errors.New("injected UID Slot failure")
+	}
+	return i.ChannelMetadataStore.RejoinUserChannelMembership(ctx, rejoin)
+}
 
 func TestStaticMultiNodeClusterStartsControllerVoters(t *testing.T) {
 	addrs := []string{freeSendackSmokeTCPAddr(t), freeSendackSmokeTCPAddr(t), freeSendackSmokeTCPAddr(t)}
@@ -192,6 +229,84 @@ func TestThreeNodeSubscriberChunksInvalidateRemoteFanoutSnapshot(t *testing.T) {
 	}
 	if got := page(apps[1], removed.Version); len(got) != 1 || got[0] != "u2" {
 		t.Fatalf("cached remote fanout after removal = %v", got)
+	}
+}
+
+func TestThreeNodeServiceRejoinFailedUIDCompensatesThenRecovers(t *testing.T) {
+	apps, nodes := startThreeNodeAuthApps(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer cancel()
+	const channelID = "group-service-rejoin-three"
+	const uid = "rejoin-u1"
+	const sender = "rejoin-u2"
+	if err := nodes[0].UpsertChannelMetadata(ctx, metadb.Channel{ChannelID: channelID, ChannelType: 2}); err != nil {
+		t.Fatal(err)
+	}
+	member := channelusecase.SubscriberCommand{ChannelID: channelID, ChannelType: 2, Subscribers: []string{uid}}
+	if err := apps[0].channels.AddSubscribers(ctx, channelusecase.SubscriberCommand{ChannelID: channelID, ChannelType: 2, Subscribers: []string{uid, sender}}); err != nil {
+		t.Fatal(err)
+	}
+	remoteRecipients := func() []string {
+		t.Helper()
+		channel, err := nodes[1].GetChannelMetadata(ctx, channelID, 2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		page, err := apps[1].deliveryMeta.NextSubscriberPage(ctx, channelappend.SubscriberPageRequest{
+			ChannelID:                 channelappend.ChannelID{ID: channelID, Type: frame.ChannelTypeGroup},
+			SubscriberMutationVersion: channel.SubscriberMutationVersion, Limit: 10,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		uids := make([]string, 0, len(page.Recipients))
+		for _, recipient := range page.Recipients {
+			uids = append(uids, recipient.UID)
+		}
+		return uids
+	}
+	if got := remoteRecipients(); len(got) != 2 || got[0] != uid || got[1] != sender {
+		t.Fatalf("initial remote fanout=%v", got)
+	}
+	first := sendThreeNodeGroupPacketAs(t, apps[0], uid, channelID, "before-remove", 1)
+	if err := apps[0].channels.RemoveSubscribers(ctx, member); err != nil {
+		t.Fatal(err)
+	}
+	if got := remoteRecipients(); len(got) != 1 || got[0] != sender {
+		t.Fatalf("removed remote fanout=%v", got)
+	}
+	if _, err := apps[1].Messages().SyncChannelMessages(ctx, messageusecase.SyncChannelMessagesQuery{LoginUID: uid, ChannelID: channelID, ChannelType: 2, StartMessageSeq: 1, PullMode: messageusecase.PullModeUp, Limit: 10}); !errors.Is(err, messageusecase.ErrSyncMembershipRequired) {
+		t.Fatalf("removed member remote history error=%v", err)
+	}
+	interval := sendThreeNodeGroupPacketAs(t, apps[0], sender, channelID, "removed-interval", 2)
+	cmd := channelusecase.ServiceRejoinCommand{ChannelID: channelID, ChannelType: 2, UID: uid, MembershipEpoch: 3, PreviousRemovedMessageSeq: first.MessageSeq, JoinedMessageSeq: interval.MessageSeq, RepairSameEpoch: true}
+	store := clusterinfra.NewChannelMetadataStore(nodes[2], apps[2].ensureChannelAppendMetadataCache(), apps[2].goroutines)
+	faultIndex := &failOnceRejoinMembershipIndex{ChannelMetadataStore: store, fail: true}
+	faulty := channelusecase.New(channelusecase.Options{Store: store, MembershipIndex: faultIndex, CommittedTail: store, SubscriberMutationObserver: channelAppendSubscriberMutationObserver{app: apps[2]}})
+	if _, err := faulty.RejoinSubscriber(ctx, cmd); err == nil {
+		t.Fatal("injected UID failure unexpectedly succeeded")
+	}
+	if got := remoteRecipients(); len(got) != 1 || got[0] != sender {
+		t.Fatalf("failed rejoin left realtime fanout=%v", got)
+	}
+	if row, found, err := nodes[2].GetUserChannelMembership(ctx, uid, channelID, 2); err != nil || !found || !row.Tombstone {
+		t.Fatalf("UID after compensation row=%+v found=%t err=%v", row, found, err)
+	}
+	state, err := faulty.RejoinSubscriber(ctx, cmd)
+	if err != nil || !state.Ready || state.MembershipEpoch != 3 || state.JoinSeq != interval.MessageSeq+1 {
+		t.Fatalf("retry state=%+v err=%v requests=%+v", state, err, faultIndex.observed)
+	}
+	readback, err := apps[1].channels.CheckRejoinSubscriber(ctx, cmd)
+	if err != nil || !readback.Ready || readback.MembershipEpoch != 3 || readback.JoinSeq != interval.MessageSeq+1 {
+		t.Fatalf("remote readback=%+v err=%v", readback, err)
+	}
+	if got := remoteRecipients(); len(got) != 2 || got[0] != uid || got[1] != sender {
+		t.Fatalf("restored remote fanout=%v", got)
+	}
+	after := sendThreeNodeGroupPacketAs(t, apps[0], sender, channelID, "after-rejoin", 3)
+	page, err := apps[1].Messages().SyncChannelMessages(ctx, messageusecase.SyncChannelMessagesQuery{LoginUID: uid, ChannelID: channelID, ChannelType: 2, StartMessageSeq: 1, PullMode: messageusecase.PullModeUp, Limit: 10})
+	if err != nil || len(page.Messages) != 1 || page.Messages[0].MessageSeq != after.MessageSeq {
+		t.Fatalf("remote history after rejoin page=%+v err=%v", page, err)
 	}
 }
 

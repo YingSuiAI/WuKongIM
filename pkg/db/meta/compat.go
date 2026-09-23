@@ -1177,6 +1177,14 @@ func (b *WriteBatch) UpsertUserChannelMembership(hashSlot uint16, membership Use
 	return b.batch.UpsertUserChannelMembership(HashSlot(hashSlot), membership)
 }
 
+// RejoinUserChannelMembership stages a guarded Platform history-epoch reset.
+func (b *WriteBatch) RejoinUserChannelMembership(hashSlot uint16, rejoin PlatformMembershipRejoin) (*PlatformMembershipRejoinResult, error) {
+	if err := b.ensure(); err != nil {
+		return nil, err
+	}
+	return b.batch.RejoinUserChannelMembership(HashSlot(hashSlot), rejoin)
+}
+
 // EnsureUserChannelMembership stages a create-if-absent UID membership.
 func (b *WriteBatch) EnsureUserChannelMembership(hashSlot uint16, membership UserChannelMembership) error {
 	if err := b.ensure(); err != nil {

@@ -57,6 +57,39 @@ func TestChannelSubscriberAddDefaultsCompatibleGroupType(t *testing.T) {
 	}
 }
 
+func TestConfiguredServiceTokenProtectsOrdinaryChannelMembershipMutations(t *testing.T) {
+	channels := &recordingChannelUsecase{}
+	srv := New(Options{Channels: channels, ServiceToken: "secret"})
+	for _, path := range []string{"/channel", "/channel/info", "/channel/delete", "/channel/subscriber_add", "/channel/subscriber_remove", "/channel/subscriber_remove_all", "/tmpchannel/subscriber_set", "/channel/blacklist_remove", "/channel/whitelist_add"} {
+		req := httptest.NewRequest(http.MethodPost, path, bytes.NewBufferString(`{"channel_id":"g1","channel_type":2,"subscribers":["u1"]}`))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("%s without service token status=%d body=%s", path, rec.Code, rec.Body.String())
+		}
+	}
+	if len(channels.upserts) != 0 || len(channels.addSubscribers) != 0 || len(channels.removeSubscribers) != 0 {
+		t.Fatalf("unauthorized mutations reached usecase: %+v", channels)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/channel/subscriber_add", bytes.NewBufferString(`{"channel_id":"g1","channel_type":2,"subscribers":["u1"]}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || len(channels.addSubscribers) != 1 {
+		t.Fatalf("authenticated add status=%d calls=%d", rec.Code, len(channels.addSubscribers))
+	}
+	req = httptest.NewRequest(http.MethodPost, "/channel/blacklist_remove", bytes.NewBufferString(`{"channel_id":"g1","channel_type":2,"uids":["u1"]}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer secret")
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || len(channels.removeDeny) != 1 {
+		t.Fatalf("authenticated blacklist removal status=%d calls=%d", rec.Code, len(channels.removeDeny))
+	}
+}
+
 func TestChannelWhitelistGetReturnsCompatibleMemberArray(t *testing.T) {
 	channels := &recordingChannelUsecase{
 		listAllowResult: channelusecase.MemberListResult{

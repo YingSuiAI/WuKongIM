@@ -21,8 +21,9 @@ const (
 )
 
 var (
-	membershipRPCRequestMagic  = [...]byte{'W', 'K', 'M', 'Q', 1}
-	membershipRPCResponseMagic = [...]byte{'W', 'K', 'M', 'S', 1}
+	membershipRPCRequestMagic    = [...]byte{'W', 'K', 'M', 'Q', 1}
+	membershipRPCResponseMagicV1 = [...]byte{'W', 'K', 'M', 'S', 1}
+	membershipRPCResponseMagic   = [...]byte{'W', 'K', 'M', 'S', 2}
 )
 
 const (
@@ -257,7 +258,8 @@ func encodeMembershipRPCResponse(resp membershipRPCResponse) ([]byte, error) {
 }
 
 func decodeMembershipRPCResponse(body []byte) (membershipRPCResponse, error) {
-	if !runtimeMetaHasMagic(body, membershipRPCResponseMagic[:]) {
+	withEpoch := runtimeMetaHasMagic(body, membershipRPCResponseMagic[:])
+	if !withEpoch && !runtimeMetaHasMagic(body, membershipRPCResponseMagicV1[:]) {
 		return membershipRPCResponse{}, fmt.Errorf("metastore: invalid membership response codec")
 	}
 	offset := len(membershipRPCResponseMagic)
@@ -269,10 +271,10 @@ func decodeMembershipRPCResponse(body []byte) (membershipRPCResponse, error) {
 	if resp.LeaderID, offset, err = runtimeMetaReadUvarint(body, offset); err != nil {
 		return membershipRPCResponse{}, err
 	}
-	if resp.Membership, offset, err = readOrdinaryMembershipPtr(body, offset); err != nil {
+	if resp.Membership, offset, err = readOrdinaryMembershipPtr(body, offset, withEpoch); err != nil {
 		return membershipRPCResponse{}, err
 	}
-	if resp.Memberships, offset, err = readOrdinaryMemberships(body, offset); err != nil {
+	if resp.Memberships, offset, err = readOrdinaryMemberships(body, offset, withEpoch); err != nil {
 		return membershipRPCResponse{}, err
 	}
 	if resp.OrdinaryCursor, offset, err = readOrdinaryMembershipCursor(body, offset); err != nil {
@@ -365,12 +367,12 @@ func appendOrdinaryMembershipPtr(dst []byte, row *metadb.UserChannelMembership) 
 	return appendOrdinaryMembership(dst, *row)
 }
 
-func readOrdinaryMembershipPtr(body []byte, offset int) (*metadb.UserChannelMembership, int, error) {
+func readOrdinaryMembershipPtr(body []byte, offset int, withEpoch bool) (*metadb.UserChannelMembership, int, error) {
 	marker, next, err := runtimeMetaReadMarker(body, offset, "ordinary membership")
 	if err != nil || marker == 0 {
 		return nil, next, err
 	}
-	row, next, err := readOrdinaryMembership(body, next)
+	row, next, err := readOrdinaryMembership(body, next, withEpoch)
 	return &row, next, err
 }
 
@@ -382,7 +384,7 @@ func appendOrdinaryMemberships(dst []byte, rows []metadb.UserChannelMembership) 
 	return dst
 }
 
-func readOrdinaryMemberships(body []byte, offset int) ([]metadb.UserChannelMembership, int, error) {
+func readOrdinaryMemberships(body []byte, offset int, withEpoch bool) ([]metadb.UserChannelMembership, int, error) {
 	count, next, err := runtimeMetaReadUvarint(body, offset)
 	if err != nil {
 		return nil, offset, err
@@ -393,7 +395,7 @@ func readOrdinaryMemberships(body []byte, offset int) ([]metadb.UserChannelMembe
 	rows := make([]metadb.UserChannelMembership, int(count))
 	offset = next
 	for index := range rows {
-		if rows[index], offset, err = readOrdinaryMembership(body, offset); err != nil {
+		if rows[index], offset, err = readOrdinaryMembership(body, offset, withEpoch); err != nil {
 			return nil, offset, err
 		}
 	}
@@ -411,10 +413,11 @@ func appendOrdinaryMembership(dst []byte, row metadb.UserChannelMembership) []by
 	dst = runtimeMetaAppendBool(dst, row.Tombstone)
 	dst = runtimeMetaAppendVarint(dst, row.TombstoneAt)
 	dst = runtimeMetaAppendUvarint(dst, row.SourceVersion)
-	return runtimeMetaAppendVarint(dst, row.UpdatedAt)
+	dst = runtimeMetaAppendVarint(dst, row.UpdatedAt)
+	return runtimeMetaAppendUvarint(dst, row.PlatformMembershipEpoch)
 }
 
-func readOrdinaryMembership(body []byte, offset int) (metadb.UserChannelMembership, int, error) {
+func readOrdinaryMembership(body []byte, offset int, withEpoch bool) (metadb.UserChannelMembership, int, error) {
 	var row metadb.UserChannelMembership
 	var err error
 	if row.UID, offset, err = runtimeMetaReadString(body, offset); err != nil {
@@ -449,6 +452,11 @@ func readOrdinaryMembership(body []byte, offset int) (metadb.UserChannelMembersh
 	}
 	if row.UpdatedAt, offset, err = runtimeMetaReadVarint(body, offset); err != nil {
 		return row, offset, err
+	}
+	if withEpoch {
+		if row.PlatformMembershipEpoch, offset, err = runtimeMetaReadUvarint(body, offset); err != nil {
+			return row, offset, err
+		}
 	}
 	return row, offset, nil
 }

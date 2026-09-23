@@ -41,8 +41,14 @@ payload-correction records.
   Slot's request sharing the physical commit. Hash-slot locks last through fsync.
 - Correction bodies remain separate from original Channel message logs.
 - Retention and terminal cleanup remove their owned correction rows.
-- A tombstone-to-live membership transition starts a new history visibility
-  epoch, including remove/re-add within one subscriber source version.
+- Ordinary tombstone-to-live transitions start a new visibility epoch only for
+  rows without a Platform epoch. Platform-owned tombstones require a trusted
+  service rejoin; the reducer cannot revive them through ordinary add.
+- A trusted Platform rejoin sets the Platform epoch and joined floor after the
+  Channel subscriber write, preserving higher user-owned read/hide floors.
+  Exact same-epoch tombstone repair requires an explicit service flag and the
+  original joined floor. The optional epoch tail is readable by new binaries
+  on old rows; old binaries cannot decode rows after the first epoch write.
 - Corrupt data, missing rows, expected conflicts, and storage failures retain
   their distinct meanings.
 

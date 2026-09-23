@@ -59,6 +59,11 @@ type ChannelMembershipNode interface {
 	TombstoneUserChannelMemberships(context.Context, string, int64, []string, uint64, int64) error
 }
 
+type serviceRejoinMembershipNode interface {
+	GetUserChannelMembership(context.Context, string, string, int64) (metadb.UserChannelMembership, bool, error)
+	RejoinUserChannelMembership(context.Context, metadb.PlatformMembershipRejoin) error
+}
+
 type committedChannelTailNode interface {
 	CommittedChannelTail(context.Context, string, int64) (uint64, error)
 }
@@ -442,6 +447,30 @@ func (s *ChannelMetadataStore) TombstoneChannelMemberships(ctx context.Context, 
 		return metadb.ErrNotFound
 	}
 	return s.membershipNode.TombstoneUserChannelMemberships(ctx, channelID, channelType, append([]string(nil), uids...), sourceVersion, updatedAt)
+}
+
+// GetUserChannelMembership reads one UID row from its authoritative Slot.
+func (s *ChannelMetadataStore) GetUserChannelMembership(ctx context.Context, uid, channelID string, channelType int64) (metadb.UserChannelMembership, bool, error) {
+	if s == nil {
+		return metadb.UserChannelMembership{}, false, clusterpkg.ErrRouteNotReady
+	}
+	node, ok := s.membershipNode.(serviceRejoinMembershipNode)
+	if !ok {
+		return metadb.UserChannelMembership{}, false, clusterpkg.ErrRouteNotReady
+	}
+	return node.GetUserChannelMembership(ctx, uid, channelID, channelType)
+}
+
+// RejoinUserChannelMembership delegates a guarded Platform epoch to the UID Slot.
+func (s *ChannelMetadataStore) RejoinUserChannelMembership(ctx context.Context, rejoin metadb.PlatformMembershipRejoin) error {
+	if s == nil {
+		return clusterpkg.ErrRouteNotReady
+	}
+	node, ok := s.membershipNode.(serviceRejoinMembershipNode)
+	if !ok {
+		return clusterpkg.ErrRouteNotReady
+	}
+	return node.RejoinUserChannelMembership(ctx, rejoin)
 }
 
 // CommittedChannelTail captures the channel boundary used to initialize a

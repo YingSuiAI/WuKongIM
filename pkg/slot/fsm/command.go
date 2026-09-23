@@ -55,6 +55,7 @@ const (
 	cmdTypeEnsureUserChannelMembershipBatch    uint8 = 64
 	cmdTypeCompletePersonDirectoryTaskBatch    uint8 = 65
 	cmdTypeCreateMessagePayloadCorrection      uint8 = 66
+	cmdTypeRejoinUserChannelMembership         uint8 = 67
 	cmdTypeBindPluginUser                      uint8 = 42
 	cmdTypeUnbindPluginUser                    uint8 = 43
 
@@ -175,6 +176,8 @@ const (
 	ApplyResultHashSlotFenced = "hash_slot_fenced"
 	// ApplyResultStaleMeta reports a deterministic stale metadata no-op.
 	ApplyResultStaleMeta = "stale_meta"
+	// ApplyResultMembershipEpochConflict reports a rejected Platform rejoin guard.
+	ApplyResultMembershipEpochConflict = "membership_epoch_conflict"
 
 	// headerSize is version (1) + cmdType (1).
 	headerSize = 2
@@ -241,6 +244,7 @@ var commandDecoders = map[uint8]commandDecoder{
 	cmdTypeCreateChannelRuntimeMeta:            decodeCreateChannelRuntimeMeta,
 	cmdTypeAdmitPersonDirectoryTaskBatch:       decodeAdmitPersonDirectoryTaskBatch,
 	cmdTypeEnsureUserChannelMembershipBatch:    decodeEnsureUserChannelMembershipBatch,
+	cmdTypeRejoinUserChannelMembership:         decodeRejoinUserChannelMembership,
 	cmdTypeCompletePersonDirectoryTaskBatch:    decodeCompletePersonDirectoryTaskBatch,
 	cmdTypeCreateMessagePayloadCorrection:      decodeCreateMessagePayloadCorrection,
 	cmdTypeBindPluginUser:                      decodeBindPluginUser,
