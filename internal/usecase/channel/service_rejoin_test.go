@@ -176,6 +176,22 @@ func TestServiceRejoinRequiresExplicitSameEpochRepair(t *testing.T) {
 	}
 }
 
+func TestServiceRejoinRepairsMissingChannelMemberWithLiveUIDEpoch(t *testing.T) {
+	store := &serviceRejoinTestStore{recordingStore: &recordingStore{channels: map[string]metadb.Channel{
+		recordingChannelKey("g1", 2): {ChannelID: "g1", ChannelType: 2, SubscriberMutationVersion: 8},
+	}}}
+	index := &serviceRejoinTestIndex{recordingMembershipIndex: &recordingMembershipIndex{}, row: metadb.UserChannelMembership{
+		UID: "u1", ChannelID: "g1", ChannelType: 2, PlatformMembershipEpoch: 3,
+		JoinSeq: 51, DeletedToSeq: 90, SourceVersion: 8,
+	}}
+	app := New(Options{Store: store, MembershipIndex: index, CommittedTail: &recordingCommittedTailReader{tail: 100}})
+	cmd := ServiceRejoinCommand{ChannelID: "g1", ChannelType: 2, UID: "u1", MembershipEpoch: 3, PreviousRemovedMessageSeq: 30, JoinedMessageSeq: 50, RepairSameEpoch: true}
+	state, err := app.RejoinSubscriber(context.Background(), cmd)
+	if err != nil || !state.Ready || state.JoinSeq != 51 || state.DeletedToSeq != 90 || !store.member {
+		t.Fatalf("live UID repair state=%+v err=%v member=%t", state, err, store.member)
+	}
+}
+
 func TestServiceRejoinRefreshesLargeGroupFlagAndMutationObserver(t *testing.T) {
 	store := &serviceRejoinTestStore{recordingStore: &recordingStore{channels: map[string]metadb.Channel{
 		recordingChannelKey("g1", 2): {ChannelID: "g1", ChannelType: 2, SubscriberCount: 1, SubscriberMutationVersion: 8},

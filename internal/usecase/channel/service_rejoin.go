@@ -122,7 +122,12 @@ func (a *App) RejoinSubscriber(ctx context.Context, cmd ServiceRejoinCommand) (S
 			}
 			return state, nil
 		}
-		return ServiceRejoinState{}, ErrServiceRejoinConflict
+		if !cmd.RepairSameEpoch || row.JoinSeq != cmd.JoinedMessageSeq+1 || row.DeletedToSeq < cmd.JoinedMessageSeq {
+			return ServiceRejoinState{}, ErrServiceRejoinConflict
+		}
+		// A completed epoch may keep its UID row while the Channel-owned
+		// subscriber set is lost. Re-add the Channel member below, then check
+		// both facts again without lowering the original history floor.
 	}
 	if row.PlatformMembershipEpoch > cmd.MembershipEpoch ||
 		(row.PlatformMembershipEpoch == cmd.MembershipEpoch && (!cmd.RepairSameEpoch || row.JoinSeq != cmd.JoinedMessageSeq+1)) {
