@@ -50,7 +50,7 @@ func TestHandleWSTrafficCopiesInboundBufferOnlyOnce(t *testing.T) {
 	}
 }
 
-func TestHandleWSTrafficAvoidsInboundBufferCopyForSingleFrame(t *testing.T) {
+func TestHandleWSTrafficAvoidsExtraPayloadCopyForSingleFrame(t *testing.T) {
 	encoded := encodeMaskedTestWSFrame(t, true, wsOpcodeText, [4]byte{1, 2, 3, 4}, []byte("hello websocket"))
 	conn := &allocTestGnetConn{next: encoded}
 	state := &connState{
@@ -66,8 +66,8 @@ func TestHandleWSTrafficAvoidsInboundBufferCopyForSingleFrame(t *testing.T) {
 		conn.next = encoded
 		group.handleWSTraffic(conn, state)
 	})
-	if allocs != 0 {
-		t.Fatalf("allocs = %.0f, want 0 for single complete websocket frame", allocs)
+	if allocs > 1 {
+		t.Fatalf("allocs = %.0f, want <= 1 owned inbound buffer without an extra payload copy", allocs)
 	}
 }
 

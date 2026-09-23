@@ -65,6 +65,9 @@ It does not own message, presence, Channel, or Controller business policy.
   It does not prove append, delivery, transport flush, or client receipt.
 - Async SEND owns retained payload bytes unless the protocol explicitly proves
   decoded-frame ownership. Result order within a session is preserved.
+- Gnet's WebSocket actor queue may retain decoded payloads from `wsInbound`.
+  Once the last data frame consumes that buffer, later socket reads must use a
+  new backing array until the queued payload has been released.
 - Only inbound activity refreshes the idle deadline. Drain rejects new sessions
   and does not silently terminate existing ones.
 - Session writes serialize encode and close interaction; business code must not

@@ -212,6 +212,142 @@ func TestChannelMessageReaderBatchPreservesMissingChannelRuntimeError(t *testing
 	}
 }
 
+func TestChannelMessageReaderContinuesPastHiddenRawPages(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		query message.ChannelMessageQuery
+		want  uint64
+	}{
+		{name: "forward", query: message.ChannelMessageQuery{StartSeq: 1, Limit: 1, PullMode: message.PullModeUp}, want: 4},
+		{name: "latest", query: message.ChannelMessageQuery{Limit: 1, PullMode: message.PullModeDown}, want: 4},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rows := []channelruntime.Message{
+				{MessageSeq: 1, SyncOnce: tc.name == "forward"},
+				{MessageSeq: 2, SyncOnce: tc.name == "forward"},
+				{MessageSeq: 3, SyncOnce: tc.name == "forward"},
+				{MessageSeq: 4},
+				{MessageSeq: 5, SyncOnce: tc.name == "latest"},
+				{MessageSeq: 6, SyncOnce: tc.name == "latest"},
+				{MessageSeq: 7, SyncOnce: tc.name == "latest"},
+			}
+			node := &historyReadNode{rows: rows, correctPayloads: true}
+			reader := NewChannelMessageReader(node)
+			page, err := reader.SyncMessages(context.Background(), tc.query)
+			if err != nil {
+				t.Fatalf("SyncMessages() error = %v", err)
+			}
+			if len(page.Messages) != 1 || page.Messages[0].MessageSeq != tc.want || !page.HasMore || string(page.Messages[0].Payload) != "corrected" {
+				t.Fatalf("page = %+v, want visible seq %d and more", page, tc.want)
+			}
+			if node.calls < 2 {
+				t.Fatalf("read calls = %d, want continuation past hidden raw page", node.calls)
+			}
+		})
+	}
+}
+
+func TestChannelMessageReaderBatchContinuesOnlyPendingItems(t *testing.T) {
+	node := &historyReadNode{rows: []channelruntime.Message{
+		{MessageSeq: 1, SyncOnce: true}, {MessageSeq: 2, SyncOnce: true},
+		{MessageSeq: 3, SyncOnce: true}, {MessageSeq: 4}, {MessageSeq: 5}, {MessageSeq: 6},
+	}}
+	results, err := NewChannelMessageReader(node).SyncMessagesBatch(context.Background(), []message.ChannelMessageQuery{
+		{ChannelID: message.ChannelID{ID: "controls", Type: 2}, StartSeq: 1, Limit: 1, PullMode: message.PullModeUp},
+		{ChannelID: message.ChannelID{ID: "ordinary", Type: 2}, StartSeq: 4, Limit: 1, PullMode: message.PullModeUp},
+	})
+	if err != nil || len(results) != 2 || results[0].Err != nil || results[1].Err != nil {
+		t.Fatalf("SyncMessagesBatch() results = %+v, err = %v", results, err)
+	}
+	for i, result := range results {
+		if len(result.Page.Messages) != 1 || result.Page.Messages[0].MessageSeq != 4 || !result.Page.HasMore {
+			t.Fatalf("result %d = %+v, want seq 4 with more", i, result)
+		}
+	}
+	if node.calls < 2 || node.readCounts[0] != 2 || node.readCounts[1] != 1 {
+		t.Fatalf("read waves = %v, want first two items and then pending item only", node.readCounts)
+	}
+}
+
+func TestChannelMessageReaderHiddenRowsRespectExclusiveAndVisibilityBounds(t *testing.T) {
+	node := &historyReadNode{rows: []channelruntime.Message{
+		{MessageSeq: 1}, {MessageSeq: 2}, {MessageSeq: 3},
+		{MessageSeq: 4, SyncOnce: true}, {MessageSeq: 5, SyncOnce: true}, {MessageSeq: 6, SyncOnce: true},
+		{MessageSeq: 7},
+	}}
+	for _, query := range []message.ChannelMessageQuery{
+		{StartSeq: 4, EndSeq: 7, MinSeq: 4, Limit: 1, PullMode: message.PullModeUp},
+		{StartSeq: 6, EndSeq: 3, MinSeq: 4, Limit: 1, PullMode: message.PullModeDown},
+	} {
+		page, err := NewChannelMessageReader(node).SyncMessages(context.Background(), query)
+		if err != nil || len(page.Messages) != 0 || page.HasMore {
+			t.Fatalf("query = %+v, page = %+v, err = %v; want empty bounded page", query, page, err)
+		}
+	}
+}
+
+func TestChannelMessageReaderScanBudgetFailsInsteadOfReturningFalseEnd(t *testing.T) {
+	node := &historyReadNode{endlessControls: true}
+	page, err := NewChannelMessageReader(node).SyncMessages(context.Background(), message.ChannelMessageQuery{StartSeq: 1, Limit: 1, PullMode: message.PullModeUp})
+	if !errors.Is(err, errMessagePageScanBudget) || len(page.Messages) != 0 || node.calls != messagePageScanWaves {
+		t.Fatalf("page = %+v, err = %v, calls = %d; want bounded error after %d waves", page, err, node.calls, messagePageScanWaves)
+	}
+}
+
+// historyReadNode models committed storage where hidden rows count toward a raw read limit.
+type historyReadNode struct {
+	rows            []channelruntime.Message
+	calls           int
+	readCounts      []int
+	endlessControls bool
+	correctPayloads bool
+}
+
+func (n *historyReadNode) ApplyMessagePayloadCorrections(_ context.Context, messages []channelruntime.Message) ([]channelruntime.Message, error) {
+	if n.correctPayloads {
+		for i := range messages {
+			messages[i].Payload = []byte("corrected")
+		}
+	}
+	return messages, nil
+}
+
+func (n *historyReadNode) ReadChannelCommitted(context.Context, channelruntime.ChannelID, channelstore.ReadCommittedRequest) (channelstore.ReadCommittedResult, error) {
+	return channelstore.ReadCommittedResult{}, nil
+}
+
+func (n *historyReadNode) ReadChannelCommittedBatch(_ context.Context, reads []clusterchannels.CommittedRead) ([]clusterchannels.CommittedReadResult, error) {
+	n.calls++
+	n.readCounts = append(n.readCounts, len(reads))
+	results := make([]clusterchannels.CommittedReadResult, len(reads))
+	for i, read := range reads {
+		req := read.Request
+		if n.endlessControls {
+			results[i].Read.Messages = make([]channelruntime.Message, req.Limit)
+			for j := range results[i].Read.Messages {
+				results[i].Read.Messages[j] = channelruntime.Message{MessageSeq: req.FromSeq + uint64(j), SyncOnce: true}
+			}
+			continue
+		}
+		appendRow := func(row channelruntime.Message) {
+			if len(results[i].Read.Messages) >= req.Limit || row.MessageSeq < req.MinSeq || (req.MaxSeq > 0 && row.MessageSeq > req.MaxSeq) || (req.Reverse && row.MessageSeq > req.FromSeq) || (!req.Reverse && row.MessageSeq < req.FromSeq) {
+				return
+			}
+			results[i].Read.Messages = append(results[i].Read.Messages, row)
+		}
+		if req.Reverse {
+			for j := len(n.rows) - 1; j >= 0; j-- {
+				appendRow(n.rows[j])
+			}
+		} else {
+			for _, row := range n.rows {
+				appendRow(row)
+			}
+		}
+	}
+	return results, nil
+}
+
 type recordingReadNode struct {
 	lastID       channelruntime.ChannelID
 	lastReq      channelstore.ReadCommittedRequest

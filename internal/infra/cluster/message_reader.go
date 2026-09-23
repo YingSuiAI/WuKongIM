@@ -2,12 +2,25 @@ package cluster
 
 import (
 	"context"
+	"errors"
+	"time"
 
 	"github.com/WuKongIM/WuKongIM/internal/usecase/message"
 	channelruntime "github.com/WuKongIM/WuKongIM/pkg/channel"
 	channelstore "github.com/WuKongIM/WuKongIM/pkg/channel/store"
 	clusterchannels "github.com/WuKongIM/WuKongIM/pkg/cluster/channels"
 	metadb "github.com/WuKongIM/WuKongIM/pkg/db/meta"
+)
+
+const (
+	messagePageScanChunk   = 1024
+	messagePageScanWaves   = 64
+	messagePageScanTimeout = 5 * time.Second
+)
+
+var (
+	errMessagePageScanBudget  = errors.New("message page scan budget exhausted")
+	errMessagePageScanInvalid = errors.New("invalid committed message page")
 )
 
 // ChannelMessageReadNode is the cluster committed message read surface used by internal.
@@ -50,39 +63,18 @@ func NewChannelMessageReader(node ChannelMessageReadNode) *ChannelMessageReader 
 
 // SyncMessages returns one compatible channel message page.
 func (r *ChannelMessageReader) SyncMessages(ctx context.Context, query message.ChannelMessageQuery) (message.ChannelMessagePage, error) {
-	if r == nil || r.node == nil {
-		return message.ChannelMessagePage{}, message.ErrMessageReaderRequired
-	}
-	batchNode, ok := r.node.(channelMessageBatchReadNode)
-	if !ok {
-		return message.ChannelMessagePage{}, message.ErrSyncBatchReaderRequired
-	}
-	limit := query.Limit
-	if limit <= 0 {
-		limit = 1
-	}
-	results, err := batchNode.ReadChannelCommittedBatch(ctx, []clusterchannels.CommittedRead{{
-		ChannelID: channelruntime.ChannelID{ID: query.ChannelID.ID, Type: query.ChannelID.Type},
-		Request:   readCommittedRequest(query, limit),
-	}})
-	if err != nil {
-		return message.ChannelMessagePage{}, mapAppendError(err)
-	}
-	if len(results) != 1 {
-		return message.ChannelMessagePage{}, message.ErrSyncBatchResultMismatch
-	}
-	if results[0].Err != nil {
-		return message.ChannelMessagePage{}, mapAppendError(results[0].Err)
-	}
-	results[0].Read.Messages, err = currentMessagePayloads(ctx, r.node, results[0].Read.Messages)
+	results, err := r.SyncMessagesBatch(ctx, []message.ChannelMessageQuery{query})
 	if err != nil {
 		return message.ChannelMessagePage{}, err
 	}
-	return channelMessagePageFromRead(query, limit, results[0].Read), nil
+	if results[0].Err != nil {
+		return message.ChannelMessagePage{}, results[0].Err
+	}
+	return results[0].Page, nil
 }
 
-// SyncMessagesBatch performs one Channel-Leader-grouped cluster read and
-// preserves one item-scoped result for every query.
+// SyncMessagesBatch runs bounded, aligned cluster read waves and preserves
+// one item-scoped result for every query.
 func (r *ChannelMessageReader) SyncMessagesBatch(ctx context.Context, queries []message.ChannelMessageQuery) ([]message.ChannelMessageReadResult, error) {
 	if r == nil || r.node == nil {
 		return nil, message.ErrMessageReaderRequired
@@ -91,40 +83,128 @@ func (r *ChannelMessageReader) SyncMessagesBatch(ctx context.Context, queries []
 	if !ok {
 		return nil, message.ErrSyncBatchReaderRequired
 	}
-	reads := make([]clusterchannels.CommittedRead, len(queries))
-	limits := make([]int, len(queries))
+	ctx, cancel := context.WithTimeout(ctx, messagePageScanTimeout)
+	defer cancel()
+	states := make([]messagePageScan, len(queries))
+	pending := make([]int, len(queries))
 	for index, query := range queries {
 		limit := query.Limit
 		if limit <= 0 {
 			limit = 1
 		}
-		limits[index] = limit
-		reads[index] = clusterchannels.CommittedRead{
+		if limit == maxInt() {
+			limit-- // keep the initial limit+1 read from overflowing
+		}
+		states[index] = messagePageScan{query: query, limit: limit, read: clusterchannels.CommittedRead{
 			ChannelID: channelruntime.ChannelID{ID: query.ChannelID.ID, Type: query.ChannelID.Type},
 			Request:   readCommittedRequest(query, limit),
+		}}
+		if states[index].read.Request.Limit > messagePageScanChunk {
+			states[index].read.Request.Limit = messagePageScanChunk
 		}
-	}
-	readResults, err := batchNode.ReadChannelCommittedBatch(ctx, reads)
-	if err != nil {
-		return nil, mapAppendError(err)
-	}
-	if len(readResults) != len(queries) {
-		return nil, message.ErrSyncBatchResultMismatch
+		pending[index] = index
 	}
 	results := make([]message.ChannelMessageReadResult, len(queries))
-	for index, readResult := range readResults {
-		if readResult.Err != nil {
-			results[index].Err = mapAppendError(readResult.Err)
-			continue
+	for wave := 0; len(pending) > 0 && wave < messagePageScanWaves; wave++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
-		readResult.Read.Messages, err = currentMessagePayloads(ctx, r.node, readResult.Read.Messages)
+		reads := make([]clusterchannels.CommittedRead, len(pending))
+		for i, index := range pending {
+			reads[i] = states[index].read
+		}
+		readResults, err := batchNode.ReadChannelCommittedBatch(ctx, reads)
 		if err != nil {
-			results[index].Err = err
-			continue
+			return nil, mapAppendError(err)
 		}
-		results[index].Page = channelMessagePageFromRead(queries[index], limits[index], readResult.Read)
+		if len(readResults) != len(reads) {
+			return nil, message.ErrSyncBatchResultMismatch
+		}
+		remaining := pending[:0]
+		for i, index := range pending {
+			if readResults[i].Err != nil {
+				results[index].Err = mapAppendError(readResults[i].Err)
+				continue
+			}
+			state := &states[index]
+			done, err := state.consume(readResults[i].Read.Messages)
+			if err != nil {
+				results[index].Err = err
+				continue
+			}
+			if !done {
+				remaining = append(remaining, index)
+				continue
+			}
+			current, err := currentMessagePayloads(ctx, r.node, state.kept)
+			if err != nil {
+				results[index].Err = err
+				continue
+			}
+			results[index].Page = channelMessagePageFromRead(state.query, state.limit, channelstore.ReadCommittedResult{Messages: current})
+		}
+		pending = remaining
+	}
+	for _, index := range pending {
+		results[index].Err = errMessagePageScanBudget
 	}
 	return results, nil
+}
+
+// messagePageScan keeps a bounded visible page while raw control rows advance the cursor.
+type messagePageScan struct {
+	query message.ChannelMessageQuery
+	limit int
+	read  clusterchannels.CommittedRead
+	kept  []channelruntime.Message
+}
+
+func (s *messagePageScan) consume(rows []channelruntime.Message) (bool, error) {
+	req := s.read.Request
+	if len(rows) > req.Limit {
+		return false, errMessagePageScanInvalid
+	}
+	if len(rows) == 0 {
+		return true, nil
+	}
+	var previous uint64
+	for i, row := range rows {
+		seq := row.MessageSeq
+		if seq == 0 || seq < req.MinSeq || (req.MaxSeq > 0 && seq > req.MaxSeq) ||
+			(req.Reverse && (seq > req.FromSeq || (i > 0 && seq >= previous))) ||
+			(!req.Reverse && (seq < req.FromSeq || (i > 0 && seq <= previous))) {
+			return false, errMessagePageScanInvalid
+		}
+		previous = seq
+		if (s.query.PullMode == message.PullModeDown && s.query.EndSeq > 0 && seq <= s.query.EndSeq) ||
+			(s.query.PullMode == message.PullModeUp && s.query.EndSeq > 0 && seq >= s.query.EndSeq) {
+			return true, nil
+		}
+		if !row.SyncOnce {
+			s.kept = append(s.kept, row)
+		}
+		if len(s.kept) > s.limit {
+			return true, nil
+		}
+	}
+	if len(rows) < req.Limit {
+		return true, nil
+	}
+	last := rows[len(rows)-1].MessageSeq
+	if req.Reverse {
+		if last <= 1 || last <= req.MinSeq || (s.query.EndSeq > 0 && last-1 <= s.query.EndSeq) {
+			return true, nil
+		}
+		s.read.Request.FromSeq = last - 1
+		s.read.Request.MaxSeq = last - 1
+	} else {
+		if last == maxUint64() || (req.MaxSeq > 0 && last >= req.MaxSeq) {
+			return true, nil
+		}
+		s.read.Request.FromSeq = last + 1
+	}
+	s.read.Request.Limit = messagePageScanChunk
+	return false, nil
 }
 
 func channelMessagePageFromRead(query message.ChannelMessageQuery, limit int, read channelstore.ReadCommittedResult) message.ChannelMessagePage {

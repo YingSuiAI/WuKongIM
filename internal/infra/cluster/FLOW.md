@@ -26,11 +26,14 @@ delivery/presence integration, and cluster-backed operational capabilities.
 1. Translate an internal request into the narrow cluster or Channel operation.
 2. Delegate append, metadata, and operational mutations through their existing
    authority paths.
-3. Obtain raw committed messages before applying the shared current-payload
-   projection for published body readers.
-4. Map current messages, immutable references, correction proof, and aligned
+3. For ordinary history, continue bounded routed committed reads past
+   `SyncOnce` controls until a visible `limit+1` page or the requested bounds;
+   preserve batch alignment and fail on scan budget exhaustion.
+4. Apply the shared current-payload projection to visible messages before
+   publishing bodies.
+5. Map current messages, immutable references, correction proof, and aligned
    item outcomes back to the use case.
-5. Operational adapters delegate retention, topology, diagnostics, and lifecycle
+6. Operational adapters delegate retention, topology, diagnostics, and lifecycle
    work to their owning cluster capabilities.
 
 ## Invariants and Failure Semantics
@@ -40,10 +43,16 @@ delivery/presence integration, and cluster-backed operational capabilities.
 - Original append and idempotency semantics remain below the projection seam.
 - Batch adapters preserve request/result alignment and item-scoped failures
   where the owning port supports them.
+- Hidden control rows advance the raw history cursor but do not consume the
+  visible page limit or prove `more=false`.
 - Adapters do not allocate replacement committed message identities.
-- Configured application ACK identity is extracted from the durable idempotency
-  hit through an injected metadata reader, without reinterpreting the existing
-  persisted payload hash as an original pre-admission request hash.
+- A durable idempotency index hit is only a candidate: SENDACK recovery uses a
+  bounded point read through the current Channel Leader and requires the exact
+  committed sequence, message id, sender, client key, and payload. Read errors
+  cannot authorize success.
+- Configured application ACK identity and server timestamp come from that
+  verified committed row through an injected metadata reader, without
+  reinterpreting the persisted payload hash as an original pre-admission hash.
 
 ## Read First
 
