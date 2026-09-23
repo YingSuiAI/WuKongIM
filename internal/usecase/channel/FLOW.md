@@ -38,8 +38,8 @@ It does not own entry protocols, concrete storage, cluster transport, or caches.
 
 1. Metadata commands create, patch, upsert, or delete through conditional
    exact-store operations while preserving fields outside the requested patch.
-2. Ordinary subscriber mutation updates durable membership, projects the same
-   logical version into the UID membership index, refreshes the large-group
+2. Ordinary subscriber mutation updates durable membership, projects each
+   Slot commit's exact assigned version into the UID membership index, refreshes the large-group
    flag, then notifies the observer with cloned final state.
 3. Allowlist, denylist, and temporary members use stable derived channel IDs
    that preserve the legacy internal namespace; counted mutations require the
@@ -70,8 +70,8 @@ It does not own entry protocols, concrete storage, cluster transport, or caches.
 
 - Only ordinary subscribers create user-channel membership projection rows and
   observer events.
-- Reset removes the old snapshot and adds the replacement under one mutation
-  version.
+- Reset removes the old snapshot and adds the replacement across bounded Slot
+  commits with strictly increasing versions, invalidating remote fanout snapshots.
 - Observer notification occurs only after durable mutation, projection, and
   large-group refresh succeed.
 - First allowlist or denylist add may create its derived channel; removal from

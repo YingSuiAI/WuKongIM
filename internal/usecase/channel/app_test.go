@@ -3,6 +3,7 @@ package channel
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
 	"testing"
 
@@ -32,7 +33,7 @@ func TestUpsertResetsSubscribersBeforeAddingReplacement(t *testing.T) {
 	if got, want := store.removeSubscribers, []subscriberCall{{channelID: "g1", channelType: 2, uids: []string{"old1", "old2"}, version: 1}}; !equalSubscriberCalls(got, want) {
 		t.Fatalf("removed subscribers = %#v, want %#v", got, want)
 	}
-	if got, want := store.addSubscribers, []subscriberCall{{channelID: "g1", channelType: 2, uids: []string{"u1", "u2"}, version: 1}}; !equalSubscriberCalls(got, want) {
+	if got, want := store.addSubscribers, []subscriberCall{{channelID: "g1", channelType: 2, uids: []string{"u1", "u2"}, version: 2}}; !equalSubscriberCalls(got, want) {
 		t.Fatalf("added subscribers = %#v, want %#v", got, want)
 	}
 }
@@ -67,7 +68,7 @@ func TestUpdateInfoPreservesSubscriberMetadata(t *testing.T) {
 	}
 }
 
-func TestSubscriberMutationsShareLogicalVersionsAcrossChunks(t *testing.T) {
+func TestSubscriberMutationsAdvanceVersionsAcrossChunks(t *testing.T) {
 	store := &recordingStore{
 		channels: map[string]metadb.Channel{
 			recordingChannelKey("g1", 2): {ChannelID: "g1", ChannelType: 2, SubscriberMutationVersion: 7},
@@ -90,11 +91,51 @@ func TestSubscriberMutationsShareLogicalVersionsAcrossChunks(t *testing.T) {
 		t.Fatalf("RemoveSubscribers() error = %v", err)
 	}
 
-	if got, want := subscriberCallVersions(store.addSubscribers), []uint64{8, 8}; !equalUint64s(got, want) {
+	if got, want := subscriberCallVersions(store.addSubscribers), []uint64{8, 9}; !equalUint64s(got, want) {
 		t.Fatalf("add versions = %#v, want %#v", got, want)
 	}
-	if got, want := subscriberCallVersions(store.removeSubscribers), []uint64{9, 9}; !equalUint64s(got, want) {
+	if got, want := subscriberCallVersions(store.removeSubscribers), []uint64{10, 11}; !equalUint64s(got, want) {
 		t.Fatalf("remove versions = %#v, want %#v", got, want)
+	}
+}
+
+func TestSubscriberMutationsKeep100kGroupBoundedByChunks(t *testing.T) {
+	store := &recordingStore{}
+	app := New(Options{Store: store})
+	uids := make([]string, 100_000)
+	for i := range uids {
+		uids[i] = fmt.Sprintf("u%06d", i)
+	}
+	if err := app.AddSubscribers(context.Background(), SubscriberCommand{
+		ChannelID: "large-group", ChannelType: 2, Subscribers: uids,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.addSubscribers) != 100 {
+		t.Fatalf("Slot commands = %d, want 100 bounded chunks", len(store.addSubscribers))
+	}
+	for i, call := range store.addSubscribers {
+		if len(call.uids) != 1000 || call.version != uint64(i+1) {
+			t.Fatalf("chunk %d count=%d version=%d", i, len(call.uids), call.version)
+		}
+	}
+	channel, err := store.GetChannel(context.Background(), "large-group", 2)
+	if err != nil || channel.SubscriberCount != 100_000 || channel.SubscriberMutationVersion != 100 || channel.Large != 1 {
+		t.Fatalf("large group metadata = %+v, err=%v", channel, err)
+	}
+}
+
+func TestOrdinarySubscriberMutationFailsClosedOnLegacyApplyResult(t *testing.T) {
+	store := &legacyCountedStore{recordingStore: &recordingStore{channels: map[string]metadb.Channel{
+		recordingChannelKey("g1", 2): {ChannelID: "g1", ChannelType: 2},
+	}}}
+	memberships := &recordingMembershipIndex{}
+	app := New(Options{Store: store, MembershipIndex: memberships})
+	if err := app.AddSubscribers(context.Background(), SubscriberCommand{ChannelID: "g1", ChannelType: 2, Subscribers: []string{"u1"}}); !errors.Is(err, metadb.ErrStaleMeta) {
+		t.Fatalf("legacy add error = %v, want stale meta", err)
+	}
+	if len(memberships.upserts) != 0 {
+		t.Fatalf("legacy apply result projected guessed epoch: %+v", memberships.upserts)
 	}
 }
 
@@ -118,7 +159,7 @@ func TestAddSubscribersProjectsOrdinaryMemberships(t *testing.T) {
 
 	want := []membershipUpsertCall{
 		{channelID: "g1", channelType: 2, uids: []string{"u1", "u2"}, committedTail: 25, sourceVersion: 1},
-		{channelID: "g1", channelType: 2, uids: []string{"u3"}, committedTail: 25, sourceVersion: 1},
+		{channelID: "g1", channelType: 2, uids: []string{"u3"}, committedTail: 25, sourceVersion: 2},
 	}
 	if !equalMembershipUpsertCalls(memberships.upserts, want) {
 		t.Fatalf("membership upserts = %#v, want %#v", memberships.upserts, want)
@@ -152,7 +193,7 @@ func TestRemoveSubscribersDeletesOrdinaryMemberships(t *testing.T) {
 
 	want := []membershipDeleteCall{
 		{channelID: "g1", channelType: 2, uids: []string{"u1", "u2"}, sourceVersion: 1},
-		{channelID: "g1", channelType: 2, uids: []string{"u3"}, sourceVersion: 1},
+		{channelID: "g1", channelType: 2, uids: []string{"u3"}, sourceVersion: 2},
 	}
 	if !equalMembershipDeleteCalls(memberships.deletes, want) {
 		t.Fatalf("membership deletes = %#v, want %#v", memberships.deletes, want)
@@ -509,6 +550,15 @@ type recordingStore struct {
 	strictChannelLookup bool
 }
 
+type legacyCountedStore struct{ *recordingStore }
+
+func (r *legacyCountedStore) AddChannelSubscribersCounted(ctx context.Context, channelID string, channelType int64, uids []string, version ...uint64) (metadb.SubscriberMutationResult, error) {
+	if err := r.recordingStore.AddChannelSubscribers(ctx, channelID, channelType, uids, version...); err != nil {
+		return metadb.SubscriberMutationResult{}, err
+	}
+	return metadb.SubscriberMutationResult{RequestedCount: len(uids), ChangedCount: len(uids)}, nil
+}
+
 type channelKeyCall struct {
 	channelID   string
 	channelType int64
@@ -642,16 +692,18 @@ func (r *recordingStore) DeleteChannel(_ context.Context, channelID string, chan
 
 func (r *recordingStore) AddChannelSubscribers(_ context.Context, channelID string, channelType int64, uids []string, subscriberMutationVersion ...uint64) error {
 	version := firstMutationVersion(subscriberMutationVersion)
-	r.addSubscribers = append(r.addSubscribers, subscriberCall{channelID: channelID, channelType: channelType, uids: append([]string(nil), uids...), version: version})
 	r.recordSubscriberMutationVersion(channelID, channelType, version)
+	version = r.channels[recordingChannelKey(channelID, channelType)].SubscriberMutationVersion
+	r.addSubscribers = append(r.addSubscribers, subscriberCall{channelID: channelID, channelType: channelType, uids: append([]string(nil), uids...), version: version})
 	r.recordSubscriberCountDelta(channelID, channelType, int64(len(uids)))
 	return nil
 }
 
 func (r *recordingStore) RemoveChannelSubscribers(_ context.Context, channelID string, channelType int64, uids []string, subscriberMutationVersion ...uint64) error {
 	version := firstMutationVersion(subscriberMutationVersion)
-	r.removeSubscribers = append(r.removeSubscribers, subscriberCall{channelID: channelID, channelType: channelType, uids: append([]string(nil), uids...), version: version})
 	r.recordSubscriberMutationVersion(channelID, channelType, version)
+	version = r.channels[recordingChannelKey(channelID, channelType)].SubscriberMutationVersion
+	r.removeSubscribers = append(r.removeSubscribers, subscriberCall{channelID: channelID, channelType: channelType, uids: append([]string(nil), uids...), version: version})
 	r.recordSubscriberCountDelta(channelID, channelType, -int64(len(uids)))
 	return nil
 }
@@ -660,6 +712,7 @@ func (r *recordingStore) AddChannelSubscribersCounted(_ context.Context, channel
 	if err := r.AddChannelSubscribers(context.Background(), channelID, channelType, uids, subscriberMutationVersion...); err != nil {
 		return metadb.SubscriberMutationResult{}, err
 	}
+	r.countedAddResult.Version = r.channels[recordingChannelKey(channelID, channelType)].SubscriberMutationVersion
 	return r.countedAddResult, nil
 }
 
@@ -667,6 +720,7 @@ func (r *recordingStore) RemoveChannelSubscribersCounted(_ context.Context, chan
 	if err := r.RemoveChannelSubscribers(context.Background(), channelID, channelType, uids, subscriberMutationVersion...); err != nil {
 		return metadb.SubscriberMutationResult{}, err
 	}
+	r.countedRemoveResult.Version = r.channels[recordingChannelKey(channelID, channelType)].SubscriberMutationVersion
 	return r.countedRemoveResult, nil
 }
 
@@ -714,6 +768,9 @@ func (r *recordingStore) recordSubscriberMutationVersion(channelID string, chann
 	ch := r.channels[key]
 	ch.ChannelID = channelID
 	ch.ChannelType = channelType
+	if ch.SubscriberMutationVersion >= version {
+		version = ch.SubscriberMutationVersion + 1
+	}
 	ch.SubscriberMutationVersion = version
 	r.channels[key] = ch
 }

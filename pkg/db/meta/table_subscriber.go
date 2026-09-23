@@ -50,6 +50,8 @@ var SubscriberTable = subscriberTable.Schema()
 type SubscriberMutationResult struct {
 	RequestedCount int
 	ChangedCount   int
+	// Version is the Channel subscriber-set version assigned by this commit.
+	Version uint64
 }
 
 // AddSubscribers adds sorted unique subscribers and advances channel mutation version.

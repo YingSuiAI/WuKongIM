@@ -442,7 +442,7 @@ func (c *removeSubscribersCmd) applyResult() []byte {
 }
 
 var (
-	subscriberMutationResultMagic         = [...]byte{'W', 'K', 'S', 'M', 1}
+	subscriberMutationResultMagic         = [...]byte{'W', 'K', 'S', 'M', 2}
 	channelConditionalMutationResultMagic = [...]byte{'W', 'K', 'C', 'M', 1}
 )
 
@@ -475,17 +475,21 @@ func DecodeChannelConditionalMutationResult(data []byte) (bool, error) {
 func EncodeSubscriberMutationResult(result *metadb.SubscriberMutationResult) []byte {
 	buf := append([]byte(nil), subscriberMutationResultMagic[:]...)
 	if result == nil {
-		return append(buf, 0, 0)
+		return append(buf, 0, 0, 0)
 	}
 	buf = binary.AppendUvarint(buf, uint64(result.RequestedCount))
-	return binary.AppendUvarint(buf, uint64(result.ChangedCount))
+	buf = binary.AppendUvarint(buf, uint64(result.ChangedCount))
+	return binary.AppendUvarint(buf, result.Version)
 }
 
 // DecodeSubscriberMutationResult decodes a subscriber-set apply result.
 func DecodeSubscriberMutationResult(data []byte) (metadb.SubscriberMutationResult, error) {
-	if !bytes.HasPrefix(data, subscriberMutationResultMagic[:]) {
+	if len(data) < len(subscriberMutationResultMagic) ||
+		!bytes.Equal(data[:len(subscriberMutationResultMagic)-1], subscriberMutationResultMagic[:len(subscriberMutationResultMagic)-1]) ||
+		(data[len(subscriberMutationResultMagic)-1] != 1 && data[len(subscriberMutationResultMagic)-1] != 2) {
 		return metadb.SubscriberMutationResult{}, fmt.Errorf("%w: subscriber mutation result", metadb.ErrCorruptValue)
 	}
+	versioned := data[len(subscriberMutationResultMagic)-1] == 2
 	remaining := data[len(subscriberMutationResultMagic):]
 	requested, n := binary.Uvarint(remaining)
 	if n <= 0 {
@@ -493,10 +497,21 @@ func DecodeSubscriberMutationResult(data []byte) (metadb.SubscriberMutationResul
 	}
 	remaining = remaining[n:]
 	changed, n := binary.Uvarint(remaining)
-	if n <= 0 || n != len(remaining) {
+	if n <= 0 {
 		return metadb.SubscriberMutationResult{}, fmt.Errorf("%w: subscriber mutation changed count", metadb.ErrCorruptValue)
 	}
-	return metadb.SubscriberMutationResult{RequestedCount: int(requested), ChangedCount: int(changed)}, nil
+	remaining = remaining[n:]
+	if !versioned {
+		if len(remaining) != 0 {
+			return metadb.SubscriberMutationResult{}, fmt.Errorf("%w: subscriber mutation legacy result tail", metadb.ErrCorruptValue)
+		}
+		return metadb.SubscriberMutationResult{RequestedCount: int(requested), ChangedCount: int(changed)}, nil
+	}
+	version, n := binary.Uvarint(remaining)
+	if n <= 0 || n != len(remaining) {
+		return metadb.SubscriberMutationResult{}, fmt.Errorf("%w: subscriber mutation version", metadb.ErrCorruptValue)
+	}
+	return metadb.SubscriberMutationResult{RequestedCount: int(requested), ChangedCount: int(changed), Version: version}, nil
 }
 
 // --- UserChannelMemberships ---

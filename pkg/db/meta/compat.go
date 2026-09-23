@@ -1287,11 +1287,18 @@ func (b *WriteBatch) stageSubscribers(hashSlot uint16, channelID string, channel
 			channel = Channel{ChannelID: channelID, ChannelType: channelType}
 		}
 		if mutationVersion > 0 {
-			if channelExists && channel.SubscriberMutationVersion > mutationVersion {
-				return dberrors.ErrConflict
+			// A logical reset or a concurrent ingress can propose the same
+			// version for multiple Slot commands. Each durable command must
+			// publish a distinct version so remote fanout snapshots invalidate.
+			if channel.SubscriberMutationVersion >= mutationVersion {
+				if channel.SubscriberMutationVersion == math.MaxUint64 {
+					return dberrors.ErrConflict
+				}
+				mutationVersion = channel.SubscriberMutationVersion + 1
 			}
 			channel.SubscriberMutationVersion = mutationVersion
 		}
+		result.Version = channel.SubscriberMutationVersion
 		for _, uid := range normalized {
 			key, err := subscriberRowKey(hs, channelID, channelType, uid)
 			if err != nil {

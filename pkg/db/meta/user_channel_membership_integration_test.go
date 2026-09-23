@@ -354,6 +354,47 @@ func TestUserChannelMembershipReducerResetsEpochForSameVersionRemoveAndRejoin(t 
 	}
 }
 
+func TestUserChannelMembershipSameVersionTombstoneFailsClosed(t *testing.T) {
+	store := openTestMetaStore(t)
+	defer store.close(t)
+	ctx := context.Background()
+	shard := store.db.HashSlot(14)
+	live := UserChannelMembership{UID: "u1", ChannelID: "g1", ChannelType: 2, JoinSeq: 11, SourceVersion: 3, UpdatedAt: 100}
+	if err := shard.UpsertUserChannelMembership(ctx, live); err != nil {
+		t.Fatal(err)
+	}
+	tombstone := live
+	tombstone.Tombstone = true
+	tombstone.TombstoneAt = 200
+	tombstone.UpdatedAt = 200
+	if err := shard.UpsertUserChannelMembership(ctx, tombstone); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := shard.GetUserChannelMembership(ctx, "u1", "g1", 2)
+	if err != nil || !ok || !got.Tombstone {
+		t.Fatalf("same-version removal must deny history: got=%+v ok=%v err=%v", got, ok, err)
+	}
+}
+
+func TestUserChannelMembershipRepeatedAddPreservesHistoryBoundary(t *testing.T) {
+	store := openTestMetaStore(t)
+	defer store.close(t)
+	ctx := context.Background()
+	shard := store.db.HashSlot(14)
+	live := UserChannelMembership{UID: "u1", ChannelID: "g1", ChannelType: 2, JoinSeq: 51, ReadSeq: 60, DeletedToSeq: 50, SourceVersion: 4, UpdatedAt: 100}
+	if err := shard.UpsertUserChannelMembership(ctx, live); err != nil {
+		t.Fatal(err)
+	}
+	repeated := UserChannelMembership{UID: "u1", ChannelID: "g1", ChannelType: 2, JoinSeq: 101, ReadSeq: 100, DeletedToSeq: 100, SourceVersion: 5, UpdatedAt: 200}
+	if err := shard.UpsertUserChannelMembership(ctx, repeated); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := shard.GetUserChannelMembership(ctx, "u1", "g1", 2)
+	if err != nil || !ok || got.Tombstone || got.JoinSeq != 51 || got.ReadSeq != 60 || got.DeletedToSeq != 50 || got.SourceVersion != 5 {
+		t.Fatalf("repeated add changed existing history boundary: got=%+v ok=%v err=%v", got, ok, err)
+	}
+}
+
 func TestUserChannelMembershipPersonalStateIsMonotonicAndTombstoneProtected(t *testing.T) {
 	store := openTestMetaStore(t)
 	defer store.close(t)

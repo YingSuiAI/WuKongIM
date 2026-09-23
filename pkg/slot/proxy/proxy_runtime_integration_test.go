@@ -671,15 +671,17 @@ func TestStoreCountedSubscriberMutationsReturnDurableSetChanges(t *testing.T) {
 
 	added, err := nodes[0].store.AddChannelSubscribersCounted(ctx, channelID, 2, []string{"u1", "u1", "u2"}, 1)
 	require.NoError(t, err)
-	require.Equal(t, metadb.SubscriberMutationResult{RequestedCount: 2, ChangedCount: 2}, added)
+	require.Equal(t, metadb.SubscriberMutationResult{RequestedCount: 2, ChangedCount: 2, Version: 1}, added)
 
-	added, err = nodes[0].store.AddChannelSubscribersCounted(ctx, channelID, 2, []string{"u1", "u3"}, 2)
+	// A bulk call may reuse its proposed version for later chunks. Slot must
+	// assign a fresh version even when the proposal repeats.
+	added, err = nodes[0].store.AddChannelSubscribersCounted(ctx, channelID, 2, []string{"u1", "u3"}, 1)
 	require.NoError(t, err)
-	require.Equal(t, metadb.SubscriberMutationResult{RequestedCount: 2, ChangedCount: 1}, added)
+	require.Equal(t, metadb.SubscriberMutationResult{RequestedCount: 2, ChangedCount: 1, Version: 2}, added)
 
-	removed, err := nodes[0].store.RemoveChannelSubscribersCounted(ctx, channelID, 2, []string{"missing", "u2"}, 3)
+	removed, err := nodes[0].store.RemoveChannelSubscribersCounted(ctx, channelID, 2, []string{"missing", "u2"}, 1)
 	require.NoError(t, err)
-	require.Equal(t, metadb.SubscriberMutationResult{RequestedCount: 2, ChangedCount: 1}, removed)
+	require.Equal(t, metadb.SubscriberMutationResult{RequestedCount: 2, ChangedCount: 1, Version: 3}, removed)
 }
 
 func TestStoreConditionalChannelMutationsAreAuthoritativeAndPreserveSubscriberMetadata(t *testing.T) {
