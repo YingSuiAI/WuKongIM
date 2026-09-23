@@ -406,6 +406,40 @@ func TestThreeNodeServiceRejoinFailedUIDCompensatesThenRecovers(t *testing.T) {
 	if got := remoteRecipients(); len(got) != 1 || got[0] != sender {
 		t.Fatalf("per-UID compensation left rogue fanout=%v", got)
 	}
+	// An initial Channel Add can commit without ever creating its UID row.
+	// Even after the Channel subscriber is removed, that pair of absent facts
+	// cannot confirm Platform's removal barrier: strict rejoin needs a durable
+	// UID tombstone. The next ordinary Remove must create it.
+	const missingUIDChannel = "group-uid-row-never-projected"
+	const missingUID = "never-projected-u1"
+	if err := nodes[0].UpsertChannelMetadata(ctx, metadb.Channel{ChannelID: missingUIDChannel, ChannelType: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := nodes[0].AddChannelSubscribersCounted(ctx, missingUIDChannel, 2, []string{missingUID}, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := nodes[0].RemoveChannelSubscribersCounted(ctx, missingUIDChannel, 2, []string{missingUID}, 2); err != nil {
+		t.Fatal(err)
+	}
+	if row, found, err := nodes[1].GetUserChannelMembership(ctx, missingUID, missingUIDChannel, 2); err != nil || found {
+		t.Fatalf("initial failed projection row=%+v found=%t err=%v", row, found, err)
+	}
+	if _, _, err := apps[1].Messages().CheckChannelSubscribers(ctx, missingUIDChannel, 2, []string{missingUID}); !errors.Is(err, messageusecase.ErrSubscriberMembershipSplit) {
+		t.Fatalf("absent UID removal readback error=%v", err)
+	}
+	if err := apps[0].channels.RemoveSubscribers(ctx, channelusecase.SubscriberCommand{ChannelID: missingUIDChannel, ChannelType: 2, Subscribers: []string{missingUID}}); err != nil {
+		t.Fatal(err)
+	}
+	if row, found, err := nodes[1].GetUserChannelMembership(ctx, missingUID, missingUIDChannel, 2); err != nil || !found || !row.Tombstone {
+		t.Fatalf("retry Remove did not create tombstone row=%+v found=%t err=%v", row, found, err)
+	}
+	if ready, missing, err := apps[1].Messages().CheckChannelSubscribers(ctx, missingUIDChannel, 2, []string{missingUID}); err != nil || len(ready) != 0 || len(missing) != 1 || missing[0] != missingUID {
+		t.Fatalf("durable removal ready=%v missing=%v err=%v", ready, missing, err)
+	}
+	missingCmd := channelusecase.ServiceRejoinCommand{ChannelID: missingUIDChannel, ChannelType: 2, UID: missingUID, MembershipEpoch: 2}
+	if state, err := apps[2].channels.RejoinSubscriber(ctx, missingCmd); err != nil || !state.Ready || state.MembershipEpoch != 2 || state.JoinSeq != 1 {
+		t.Fatalf("rejoin after retrying absent UID removal state=%+v err=%v", state, err)
+	}
 }
 
 func startThreeNodeAuthApps(t *testing.T) ([]*App, []*clusterpkg.Node) {

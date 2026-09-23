@@ -47,9 +47,10 @@ func (a *App) CheckChannelSubscribers(ctx context.Context, channelID string, cha
 			ready = append(ready, candidate.UID)
 			continue
 		}
-		if channelLive || uidLive || fact.Subscriber {
-			// A one-sided result cannot prove removal. Reconciler must retry
-			// its UID projection and read both facts again before advancing.
+		if channelLive || uidLive || fact.Subscriber || !uidRows[index].found {
+			// Removal is proven only by a Channel-owned absent subscriber and
+			// a durable UID tombstone. A missing UID row leaves strict rejoin
+			// without an epoch predecessor; retry Remove to create the marker.
 			return nil, nil, ErrSubscriberMembershipSplit
 		}
 		missing = append(missing, candidate.UID)

@@ -41,6 +41,11 @@ func TestCheckChannelSubscribersRequiresBothFactsForRemoval(t *testing.T) {
 	rows := subscriberCheckMemberships{rows: map[string]metadb.UserChannelMembership{"u1": {UID: "u1", Tombstone: false, SourceVersion: 4}}}
 	authority := &recordingLiveMembershipAuthority{results: []channelmembers.LiveMembershipAuthorityResult{{ChannelFound: true, Subscriber: false, SubscriberMutationVersion: 5}}}
 	app := New(Options{Memberships: rows, MembershipAuthority: authority})
+	delete(rows.rows, "u1")
+	if ready, missing, err := app.CheckChannelSubscribers(context.Background(), "group", 2, []string{"u1"}); !errors.Is(err, ErrSubscriberMembershipSplit) || len(ready) != 0 || len(missing) != 0 {
+		t.Fatalf("Channel and UID absent before durable removal ready=%v missing=%v err=%v", ready, missing, err)
+	}
+	rows.rows["u1"] = metadb.UserChannelMembership{UID: "u1", Tombstone: false, SourceVersion: 4}
 	if ready, missing, err := app.CheckChannelSubscribers(context.Background(), "group", 2, []string{"u1"}); !errors.Is(err, ErrSubscriberMembershipSplit) || len(ready) != 0 || len(missing) != 0 {
 		t.Fatalf("Channel missing / UID live ready=%v missing=%v err=%v", ready, missing, err)
 	}
