@@ -46,9 +46,13 @@ delivery/presence integration, and cluster-backed operational capabilities.
 - Hidden control rows advance the raw history cursor but do not consume the
   visible page limit or prove `more=false`.
 - Adapters do not allocate replacement committed message identities.
-- Configured application ACK identity is extracted from the durable idempotency
-  hit through an injected metadata reader, without reinterpreting the existing
-  persisted payload hash as an original pre-admission request hash.
+- A durable idempotency index hit is only a candidate: SENDACK recovery uses a
+  bounded point read through the current Channel Leader and requires the exact
+  committed sequence, message id, sender, client key, and payload. Read errors
+  cannot authorize success.
+- Configured application ACK identity and server timestamp come from that
+  verified committed row through an injected metadata reader, without
+  reinterpreting the persisted payload hash as an original pre-admission hash.
 
 ## Read First
 
