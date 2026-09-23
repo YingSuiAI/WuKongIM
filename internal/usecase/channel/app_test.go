@@ -139,6 +139,53 @@ func TestOrdinarySubscriberMutationFailsClosedOnLegacyApplyResult(t *testing.T) 
 	}
 }
 
+func TestSubscriberMutationRetryProjectsAfterCommittedResultWasLost(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		add  bool
+	}{
+		{name: "add", add: true},
+		{name: "remove", add: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &ambiguousCountedStore{recordingStore: &recordingStore{channels: map[string]metadb.Channel{
+				recordingChannelKey("g1", 2): {ChannelID: "g1", ChannelType: 2, SubscriberMutationVersion: 4},
+			}}, failNext: true}
+			memberships := &recordingMembershipIndex{}
+			app := New(Options{Store: store, MembershipIndex: memberships})
+			cmd := SubscriberCommand{ChannelID: "g1", ChannelType: 2, Subscribers: []string{"u1"}}
+			mutate := app.AddSubscribers
+			if !tc.add {
+				mutate = app.RemoveSubscribers
+			}
+			if err := mutate(context.Background(), cmd); !errors.Is(err, metadb.ErrCorruptValue) {
+				t.Fatalf("first result error=%v, want ambiguous apply result", err)
+			}
+			channel, err := store.GetChannel(context.Background(), "g1", 2)
+			if err != nil || channel.SubscriberMutationVersion != 5 {
+				t.Fatalf("first Slot commit version=%d err=%v, want 5", channel.SubscriberMutationVersion, err)
+			}
+			if len(memberships.upserts) != 0 || len(memberships.deletes) != 0 {
+				t.Fatalf("UID projection ran after unknown result: upserts=%d deletes=%d", len(memberships.upserts), len(memberships.deletes))
+			}
+			if err := mutate(context.Background(), cmd); err != nil {
+				t.Fatalf("retry error=%v", err)
+			}
+			channel, err = store.GetChannel(context.Background(), "g1", 2)
+			if err != nil || channel.SubscriberMutationVersion != 6 {
+				t.Fatalf("retry Slot commit version=%d err=%v, want 6", channel.SubscriberMutationVersion, err)
+			}
+			if tc.add {
+				if len(memberships.upserts) != 1 || memberships.upserts[0].sourceVersion != 6 {
+					t.Fatalf("add projection after retry=%+v", memberships.upserts)
+				}
+			} else if len(memberships.deletes) != 1 || memberships.deletes[0].sourceVersion != 6 {
+				t.Fatalf("remove projection after retry=%+v", memberships.deletes)
+			}
+		})
+	}
+}
+
 func TestAddSubscribersProjectsOrdinaryMemberships(t *testing.T) {
 	store := &recordingStore{
 		channels: map[string]metadb.Channel{
@@ -551,6 +598,29 @@ type recordingStore struct {
 }
 
 type legacyCountedStore struct{ *recordingStore }
+
+type ambiguousCountedStore struct {
+	*recordingStore
+	failNext bool
+}
+
+func (r *ambiguousCountedStore) AddChannelSubscribersCounted(ctx context.Context, channelID string, channelType int64, uids []string, version ...uint64) (metadb.SubscriberMutationResult, error) {
+	result, err := r.recordingStore.AddChannelSubscribersCounted(ctx, channelID, channelType, uids, version...)
+	if r.failNext && err == nil {
+		r.failNext = false
+		return metadb.SubscriberMutationResult{}, metadb.ErrCorruptValue
+	}
+	return result, err
+}
+
+func (r *ambiguousCountedStore) RemoveChannelSubscribersCounted(ctx context.Context, channelID string, channelType int64, uids []string, version ...uint64) (metadb.SubscriberMutationResult, error) {
+	result, err := r.recordingStore.RemoveChannelSubscribersCounted(ctx, channelID, channelType, uids, version...)
+	if r.failNext && err == nil {
+		r.failNext = false
+		return metadb.SubscriberMutationResult{}, metadb.ErrCorruptValue
+	}
+	return result, err
+}
 
 func (r *legacyCountedStore) AddChannelSubscribersCounted(ctx context.Context, channelID string, channelType int64, uids []string, version ...uint64) (metadb.SubscriberMutationResult, error) {
 	if err := r.recordingStore.AddChannelSubscribers(ctx, channelID, channelType, uids, version...); err != nil {
