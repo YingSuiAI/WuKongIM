@@ -308,6 +308,27 @@ func TestThreeNodeServiceRejoinFailedUIDCompensatesThenRecovers(t *testing.T) {
 	if err != nil || len(page.Messages) != 1 || page.Messages[0].MessageSeq != after.MessageSeq {
 		t.Fatalf("remote history after rejoin page=%+v err=%v", page, err)
 	}
+	// A completed Platform epoch can later lose only its Channel-owned set
+	// entry while the UID row remains live. The same trusted epoch must repair
+	// that split without rewriting the original visibility floor.
+	channel, err := nodes[0].GetChannelMetadataAuthoritative(ctx, channelID, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := nodes[0].RemoveChannelSubscribersCounted(ctx, channelID, 2, []string{uid}, channel.SubscriberMutationVersion+1); err != nil {
+		t.Fatal(err)
+	}
+	if stale, err := apps[1].channels.CheckRejoinSubscriber(ctx, cmd); err != nil || stale.Ready {
+		t.Fatalf("lost Channel member readback=%+v err=%v", stale, err)
+	}
+	state, err = apps[2].channels.RejoinSubscriber(ctx, cmd)
+	if err != nil || !state.Ready || state.MembershipEpoch != 3 || state.JoinSeq != interval.MessageSeq+1 {
+		t.Fatalf("same epoch Channel repair=%+v err=%v", state, err)
+	}
+	page, err = apps[1].Messages().SyncChannelMessages(ctx, messageusecase.SyncChannelMessagesQuery{LoginUID: uid, ChannelID: channelID, ChannelType: 2, StartMessageSeq: 1, PullMode: messageusecase.PullModeUp, Limit: 10})
+	if err != nil || len(page.Messages) != 1 || page.Messages[0].MessageSeq != after.MessageSeq {
+		t.Fatalf("history after same epoch repair page=%+v err=%v", page, err)
+	}
 }
 
 func startThreeNodeAuthApps(t *testing.T) ([]*App, []*clusterpkg.Node) {
