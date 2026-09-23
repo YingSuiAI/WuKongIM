@@ -45,6 +45,9 @@ without owning gateway frames, cluster transport, or durable storage engines.
   Native idempotency, payload hashes, durable quorum, and sequence allocation
   continue to operate on those exact bytes; no asynchronous projection is needed
   for client display.
+- The Platform admission adapter maps direct relationship rejections to the
+  existing SENDACK reasons: DIRECT_NOT_FRIEND to SubscriberNotExist and
+  DIRECT_BLOCKED_BY_PEER to InBlacklist. Generic FORBIDDEN remains NotAllowSend.
 
 ## Read First
 

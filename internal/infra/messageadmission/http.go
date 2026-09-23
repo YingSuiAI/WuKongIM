@@ -156,6 +156,10 @@ func (c *Client) AdmitSend(ctx context.Context, cmd message.SendCommand) ([]byte
 			return nil, message.ReasonInvalidRequest, nil
 		case response.StatusCode == http.StatusForbidden && rejected.Code == imadmission.FORBIDDEN:
 			return nil, message.ReasonNotAllowSend, nil
+		case response.StatusCode == http.StatusForbidden && string(rejected.Code) == "DIRECT_NOT_FRIEND":
+			return nil, message.ReasonSubscriberNotExist, nil
+		case response.StatusCode == http.StatusForbidden && string(rejected.Code) == "DIRECT_BLOCKED_BY_PEER":
+			return nil, message.ReasonInBlacklist, nil
 		case response.StatusCode == http.StatusUnauthorized && rejected.Code == imadmission.UNAUTHENTICATED:
 			return nil, message.ReasonAuthFail, nil
 		default:

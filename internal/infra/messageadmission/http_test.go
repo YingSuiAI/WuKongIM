@@ -149,6 +149,8 @@ func TestHTTPAdmissionBoundsFailuresAndDoesNotRetryOrLeakDiagnostics(t *testing.
 		wantError      bool
 	}{
 		{"forbidden", 403, `{"code":"FORBIDDEN"}`, false, message.ReasonNotAllowSend, false},
+		{"former friend", 403, `{"code":"DIRECT_NOT_FRIEND"}`, false, message.ReasonSubscriberNotExist, false},
+		{"blocked by peer", 403, `{"code":"DIRECT_BLOCKED_BY_PEER"}`, false, message.ReasonInBlacklist, false},
 		{"conflict", 409, `{"code":"IDEMPOTENCY_CONFLICT"}`, false, message.ReasonInvalidRequest, false},
 		{"auth", 401, `{"code":"UNAUTHENTICATED"}`, false, message.ReasonAuthFail, false},
 		{"unavailable", 503, `{"code":"ADMISSION_UNAVAILABLE"}`, false, message.ReasonSystemError, true},
