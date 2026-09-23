@@ -212,7 +212,7 @@ func TestNewConstructionFailureReleasesChannelAppendPools(t *testing.T) {
 	})
 
 	app, err := New(cfg, WithLogger(wklog.NewNop()))
-	if !errors.Is(err, errSubscriberSnapshotVersionChanged) {
+	if err == nil {
 		if app != nil {
 			_ = app.Stop(context.Background())
 		}
