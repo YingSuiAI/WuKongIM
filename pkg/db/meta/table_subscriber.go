@@ -2,6 +2,7 @@ package meta
 
 import (
 	"context"
+	"encoding/binary"
 	"sort"
 
 	"github.com/WuKongIM/WuKongIM/pkg/db/internal/dberrors"
@@ -52,6 +53,9 @@ type SubscriberMutationResult struct {
 	ChangedCount   int
 	// Version is the Channel subscriber-set version assigned by this commit.
 	Version uint64
+	// Applied is used by conditional compensation; ordinary mutations do not
+	// need to inspect it.
+	Applied bool
 }
 
 // AddSubscribers adds sorted unique subscribers and advances channel mutation version.
@@ -77,6 +81,29 @@ func (s *Shard) ContainsSubscriber(ctx context.Context, channelID string, channe
 	}
 	_, ok, err := subscriberTable.Get(ctx, s, subscriberPrimaryKey(channelID, channelType, uid))
 	return ok, err
+}
+
+// SubscriberGeneration returns the Channel-owned last Add version for one UID.
+// Legacy nil-value rows have generation zero until a new Add rewrites them.
+func (s *Shard) SubscriberGeneration(ctx context.Context, channelID string, channelType int64, uid string) (uint64, bool, error) {
+	if err := s.check(ctx); err != nil {
+		return 0, false, err
+	}
+	key, err := subscriberRowKey(s.hashSlot, channelID, channelType, uid)
+	if err != nil {
+		return 0, false, err
+	}
+	value, exists, err := s.db.get(key)
+	if err != nil || !exists {
+		return 0, exists, err
+	}
+	if len(value) == 0 {
+		return 0, true, nil
+	}
+	if len(value) != 8 {
+		return 0, false, ErrCorruptValue
+	}
+	return binary.BigEndian.Uint64(value), true, nil
 }
 
 // HasSubscribers reports whether a channel has at least one subscriber.
@@ -178,9 +205,11 @@ func (s *Shard) mutateSubscribers(ctx context.Context, channelID string, channel
 		if add {
 			if !exists {
 				channel.SubscriberCount++
-			}
-			if err := batch.Set(key, nil); err != nil {
-				return err
+				var value [8]byte
+				binary.BigEndian.PutUint64(value[:], channel.SubscriberMutationVersion)
+				if err := batch.Set(key, value[:]); err != nil {
+					return err
+				}
 			}
 		} else {
 			if exists && channel.SubscriberCount > 0 {

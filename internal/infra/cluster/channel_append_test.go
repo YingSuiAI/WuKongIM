@@ -108,6 +108,30 @@ func TestChannelAppendMetadataCacheRejectsLatePreRestoreLoad(t *testing.T) {
 	}
 }
 
+func TestChannelAppendMetadataCacheRejectsOlderSubscriberObserver(t *testing.T) {
+	cache := NewChannelAppendMetadataCache()
+	id := channelappend.ChannelID{ID: "room", Type: 2}
+	cache.Store(id, ChannelAppendMetadata{Large: true, SubscriberMutationVersion: 10, DirectoryProjectionState: metadb.DirectoryProjectionReady})
+	if !cache.StoreIfSubscriberVersionAtLeast(id, ChannelAppendMetadata{Large: false, SubscriberMutationVersion: 12}) {
+		t.Fatal("V12 observer was rejected")
+	}
+	if cache.StoreIfSubscriberVersionAtLeast(id, ChannelAppendMetadata{Large: true, SubscriberMutationVersion: 11}) {
+		t.Fatal("late V11 observer was accepted")
+	}
+	got, ok := cache.Lookup(id)
+	if !ok || got.SubscriberMutationVersion != 12 || got.Large || got.DirectoryProjectionState != metadb.DirectoryProjectionReady {
+		t.Fatalf("metadata after late observer = %+v ok=%v", got, ok)
+	}
+	if cache.StoreIfGeneration(id, ChannelAppendMetadata{Large: true, SubscriberMutationVersion: 11}, cache.Generation()) {
+		t.Fatal("late authoritative read rolled metadata back to V11")
+	}
+	cache.Store(id, ChannelAppendMetadata{Large: true, SubscriberMutationVersion: 11})
+	got, ok = cache.Lookup(id)
+	if !ok || got.SubscriberMutationVersion != 12 || got.Large {
+		t.Fatalf("late channel snapshot rolled metadata back: %+v ok=%v", got, ok)
+	}
+}
+
 func TestChannelAppendClientAllowsMissingChannelMetadata(t *testing.T) {
 	channelID := channelappend.ChannelID{ID: "room", Type: 2}
 	client := NewChannelAppendClient(&channelAppendNodeForTest{

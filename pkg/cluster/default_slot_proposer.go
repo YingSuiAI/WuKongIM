@@ -227,6 +227,10 @@ func mapSlotApplyResult(command []byte, result []byte) error {
 			return metadb.ErrStaleMeta
 		}
 		return nil
+	case metafsm.ApplyResultPlatformMembershipProtected:
+		// The caller needs the typed apply bytes across a forwarded Slot RPC.
+		// Mapping this to a transport error would lose the sentinel remotely.
+		return nil
 	default:
 		return nil
 	}

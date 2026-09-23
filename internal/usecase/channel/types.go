@@ -83,6 +83,8 @@ type SubscriberMutationEvent struct {
 	SubscriberMutationVersion uint64
 	// Reset reports that AddedUIDs replaces the full ordinary subscriber snapshot.
 	Reset bool
+	// Invalidate discards a snapshot when the exact changed UID set is unknown.
+	Invalidate bool
 	// AddedUIDs are ordinary subscribers appended by the mutation.
 	AddedUIDs []string
 	// RemovedUIDs are ordinary subscribers removed by the mutation.

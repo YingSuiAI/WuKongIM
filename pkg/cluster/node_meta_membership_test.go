@@ -182,8 +182,46 @@ type collectingMembershipProposer struct {
 }
 
 type selectiveMembershipProposer struct {
-	failHashSlot uint16
-	err          error
+	failHashSlot      uint16
+	err               error
+	protectedHashSlot uint16
+	hasProtected      bool
+}
+
+type mixedFailureMembershipProposer struct {
+	entered    chan struct{}
+	release    chan struct{}
+	networkErr error
+}
+
+func (p *mixedFailureMembershipProposer) Propose(context.Context, propose.Request) error { return nil }
+
+func (p *mixedFailureMembershipProposer) ProposeResult(_ context.Context, req propose.Request) ([]byte, error) {
+	p.entered <- struct{}{}
+	<-p.release
+	if req.Target.HashSlot == 0 {
+		return []byte(metafsm.ApplyResultPlatformMembershipProtected), nil
+	}
+	return nil, p.networkErr
+}
+
+func TestUpsertUserChannelMembershipsKeepsProtectedResultAlongsideOtherSlotFailure(t *testing.T) {
+	want := errors.New("injected other UID Slot failure")
+	proposer := &mixedFailureMembershipProposer{entered: make(chan struct{}, 2), release: make(chan struct{}), networkErr: want}
+	node := newStartedSlotProxyPortNode(t, proposer)
+	u0 := keyForNodeHashSlot(t, 4, 0)
+	u3 := keyForNodeHashSlot(t, 4, 3)
+	done := make(chan error, 1)
+	go func() {
+		done <- node.UpsertUserChannelMemberships(context.Background(), "g1", 2, []string{u0, u3}, 0, 1, 1)
+	}()
+	<-proposer.entered
+	<-proposer.entered
+	close(proposer.release)
+	err := <-done
+	if !errors.Is(err, metadb.ErrPlatformMembershipProtected) || !errors.Is(err, want) {
+		t.Fatalf("mixed proposal error=%v", err)
+	}
 }
 
 type blockingSelectiveMembershipProposer struct {
@@ -205,6 +243,11 @@ func (p *blockingSelectiveMembershipProposer) Propose(ctx context.Context, req p
 	}
 }
 
+func (p *blockingSelectiveMembershipProposer) ProposeResult(ctx context.Context, req propose.Request) ([]byte, error) {
+	err := p.Propose(ctx, req)
+	return []byte(metafsm.ApplyResultOK), err
+}
+
 func (p *selectiveMembershipProposer) Propose(_ context.Context, req propose.Request) error {
 	if req.Target.HashSlot == p.failHashSlot {
 		return p.err
@@ -212,11 +255,23 @@ func (p *selectiveMembershipProposer) Propose(_ context.Context, req propose.Req
 	return nil
 }
 
+func (p *selectiveMembershipProposer) ProposeResult(ctx context.Context, req propose.Request) ([]byte, error) {
+	if p.hasProtected && req.Target.HashSlot == p.protectedHashSlot {
+		return []byte(metafsm.ApplyResultPlatformMembershipProtected), nil
+	}
+	return []byte(metafsm.ApplyResultOK), p.Propose(ctx, req)
+}
+
 func (p *collectingMembershipProposer) Propose(_ context.Context, req propose.Request) error {
 	p.mu.Lock()
 	p.requests = append(p.requests, req)
 	p.mu.Unlock()
 	return nil
+}
+
+func (p *collectingMembershipProposer) ProposeResult(ctx context.Context, req propose.Request) ([]byte, error) {
+	err := p.Propose(ctx, req)
+	return []byte(metafsm.ApplyResultOK), err
 }
 
 func (p *collectingMembershipProposer) take() []propose.Request {
@@ -407,6 +462,11 @@ func (p *controlledMembershipProposer) Propose(_ context.Context, req propose.Re
 	return nil
 }
 
+func (p *controlledMembershipProposer) ProposeResult(ctx context.Context, req propose.Request) ([]byte, error) {
+	err := p.Propose(ctx, req)
+	return []byte(metafsm.ApplyResultOK), err
+}
+
 func (p *controlledMembershipProposer) maxActiveCount() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -446,6 +506,11 @@ func (p *blockingMembershipProposer) Propose(_ context.Context, req propose.Requ
 	p.entered <- req.Target.HashSlot
 	<-p.release
 	return nil
+}
+
+func (p *blockingMembershipProposer) ProposeResult(ctx context.Context, req propose.Request) ([]byte, error) {
+	err := p.Propose(ctx, req)
+	return []byte(metafsm.ApplyResultOK), err
 }
 
 func awaitMembershipProposal(t *testing.T, entered <-chan uint16) uint16 {

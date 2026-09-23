@@ -84,9 +84,15 @@ func (a *App) RejoinSubscriber(ctx context.Context, cmd ServiceRejoinCommand) (S
 	if err := validateServiceRejoin(cmd); err != nil {
 		return ServiceRejoinState{}, err
 	}
-	counted, _, index, err := a.serviceRejoinDependencies()
+	_, _, index, err := a.serviceRejoinDependencies()
 	if err != nil {
 		return ServiceRejoinState{}, err
+	}
+	force, ok := a.store.(interface {
+		AddChannelSubscribersForRejoinCounted(context.Context, string, int64, []string, uint64) (metadb.SubscriberMutationResult, error)
+	})
+	if !ok {
+		return ServiceRejoinState{}, ErrStoreRequired
 	}
 	channel, err := a.store.GetChannel(ctx, cmd.ChannelID, int64(cmd.ChannelType))
 	if err != nil {
@@ -117,7 +123,7 @@ func (a *App) RejoinSubscriber(ctx context.Context, cmd ServiceRejoinCommand) (S
 		if state.Ready {
 			// A prior attempt may have committed both Slot facts but failed
 			// before refreshing the derived large-group flag.
-			if err := a.refreshRejoinDerivedState(ctx, cmd); err != nil {
+			if err := a.refreshRejoinDerivedState(ctx, cmd, state.SourceVersion); err != nil {
 				return ServiceRejoinState{}, err
 			}
 			return state, nil
@@ -138,7 +144,7 @@ func (a *App) RejoinSubscriber(ctx context.Context, cmd ServiceRejoinCommand) (S
 	}
 	// A previous attempt may have committed Channel ownership before its UID
 	// projection. Repeating the bounded add is safe and assigns a new fence.
-	result, err := counted.AddChannelSubscribersCounted(ctx, cmd.ChannelID, int64(cmd.ChannelType), []string{cmd.UID}, channel.SubscriberMutationVersion+1)
+	result, err := force.AddChannelSubscribersForRejoinCounted(ctx, cmd.ChannelID, int64(cmd.ChannelType), []string{cmd.UID}, channel.SubscriberMutationVersion+1)
 	if err != nil {
 		return ServiceRejoinState{}, err
 	}
@@ -154,46 +160,46 @@ func (a *App) RejoinSubscriber(ctx context.Context, cmd ServiceRejoinCommand) (S
 	if err := index.RejoinUserChannelMembership(ctx, rejoin); err != nil {
 		// A remote UID Slot may have committed while its response was lost.
 		// A strict read-back avoids removing a fully restored member.
-		if state, checkErr := a.CheckRejoinSubscriber(ctx, cmd); checkErr == nil && state.Ready {
-			if refreshErr := a.refreshRejoinDerivedState(ctx, cmd); refreshErr != nil {
+		if state, checkErr := a.CheckRejoinSubscriber(ctx, cmd); checkErr == nil && state.Ready && state.SourceVersion >= result.Version {
+			if refreshErr := a.refreshRejoinDerivedState(ctx, cmd, result.Version); refreshErr != nil {
 				return ServiceRejoinState{}, refreshErr
 			}
 			return state, nil
 		}
-		return ServiceRejoinState{}, a.compensateFailedRejoin(ctx, cmd, err)
+		return ServiceRejoinState{}, a.compensateFailedRejoin(ctx, cmd, result.Version, err)
 	}
 	state, err := a.CheckRejoinSubscriber(ctx, cmd)
 	if err != nil {
 		return ServiceRejoinState{}, err
 	}
-	if !state.Ready {
+	if !state.Ready || state.SourceVersion < result.Version {
 		return state, ErrServiceRejoinConflict
 	}
-	if err := a.refreshRejoinDerivedState(ctx, cmd); err != nil {
+	if err := a.refreshRejoinDerivedState(ctx, cmd, result.Version); err != nil {
 		return ServiceRejoinState{}, err
 	}
 	return state, nil
 }
 
-func (a *App) compensateFailedRejoin(ctx context.Context, cmd ServiceRejoinCommand, cause error) error {
+func (a *App) compensateFailedRejoin(ctx context.Context, cmd ServiceRejoinCommand, addVersion uint64, cause error) error {
 	// Channel and UID live in different Slots. If UID did not acknowledge the
 	// epoch write, remove the Channel member promptly to narrow the realtime
 	// versus history split. Platform keeps its durable barrier pending and
 	// retries. This is best effort: a failed compensation remains visible.
 	compensationCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
 	defer cancel()
-	if err := a.RemoveSubscribers(compensationCtx, SubscriberCommand{ChannelID: cmd.ChannelID, ChannelType: cmd.ChannelType, Subscribers: []string{cmd.UID}}); err != nil {
+	if err := a.compensateSubscriberAddIfVersion(compensationCtx, cmd.ChannelID, int64(cmd.ChannelType), []string{cmd.UID}, addVersion); err != nil {
 		return errors.Join(cause, fmt.Errorf("compensating subscriber removal: %w", err))
 	}
 	return cause
 }
 
-func (a *App) refreshRejoinDerivedState(ctx context.Context, cmd ServiceRejoinCommand) error {
+func (a *App) refreshRejoinDerivedState(ctx context.Context, cmd ServiceRejoinCommand, addVersion uint64) error {
 	channel, err := a.refreshLargeGroupFlag(ctx, cmd.ChannelID, int64(cmd.ChannelType))
 	if err != nil {
 		return err
 	}
-	a.notifySubscriberMutation(ctx, channel, false, []string{cmd.UID}, nil)
+	a.notifySubscriberMutation(ctx, channel, addVersion, []string{cmd.UID}, nil)
 	return nil
 }
 
@@ -203,7 +209,7 @@ func (a *App) CheckRejoinSubscriber(ctx context.Context, cmd ServiceRejoinComman
 	if err := validateServiceRejoin(cmd); err != nil {
 		return ServiceRejoinState{}, err
 	}
-	_, lookup, index, err := a.serviceRejoinDependencies()
+	_, _, index, err := a.serviceRejoinDependencies()
 	if err != nil {
 		return ServiceRejoinState{}, err
 	}
@@ -219,13 +225,19 @@ func (a *App) CheckRejoinSubscriber(ctx context.Context, cmd ServiceRejoinComman
 		return ServiceRejoinState{}, nil
 	}
 	state := ServiceRejoinState{MembershipEpoch: row.PlatformMembershipEpoch, JoinSeq: row.JoinSeq, DeletedToSeq: row.DeletedToSeq, SourceVersion: row.SourceVersion}
-	member, err := lookup.ContainsChannelSubscriber(ctx, cmd.ChannelID, int64(cmd.ChannelType), cmd.UID)
+	reader, ok := a.store.(interface {
+		SubscriberGeneration(context.Context, string, int64, string) (uint64, bool, error)
+	})
+	if !ok {
+		return ServiceRejoinState{}, ErrStoreRequired
+	}
+	generation, member, err := reader.SubscriberGeneration(ctx, cmd.ChannelID, int64(cmd.ChannelType), cmd.UID)
 	if err != nil {
 		return ServiceRejoinState{}, err
 	}
-	state.Ready = member && channel.Disband == 0 && !row.Tombstone && row.PlatformMembershipEpoch == cmd.MembershipEpoch &&
+	state.Ready = member && generation > 0 && channel.Disband == 0 && !row.Tombstone && row.PlatformMembershipEpoch == cmd.MembershipEpoch &&
 		row.JoinSeq == cmd.JoinedMessageSeq+1 && row.DeletedToSeq >= cmd.JoinedMessageSeq &&
-		row.SourceVersion != 0 && row.SourceVersion <= channel.SubscriberMutationVersion
+		row.SourceVersion >= generation && row.SourceVersion <= channel.SubscriberMutationVersion
 	if cmd.ExpectedDeletedToSeq != nil {
 		state.Ready = state.Ready && row.DeletedToSeq == *cmd.ExpectedDeletedToSeq
 	}

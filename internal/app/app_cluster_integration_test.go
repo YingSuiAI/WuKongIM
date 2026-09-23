@@ -269,8 +269,23 @@ func TestThreeNodeServiceRejoinFailedUIDCompensatesThenRecovers(t *testing.T) {
 		t.Fatalf("initial remote fanout=%v", got)
 	}
 	first := sendThreeNodeGroupPacketAs(t, apps[0], uid, channelID, "before-remove", 1)
+	beforeRemove, err := nodes[0].GetChannelMetadataAuthoritative(ctx, channelID, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Simulate the Channel Slot commit succeeding while the UID projection
+	// fails. The first removal read-back must remain pending.
+	if _, err := nodes[0].RemoveChannelSubscribersCounted(ctx, channelID, 2, []string{uid}, beforeRemove.SubscriberMutationVersion+1); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := apps[1].Messages().CheckChannelSubscribers(ctx, channelID, 2, []string{uid}); !errors.Is(err, messageusecase.ErrSubscriberMembershipSplit) {
+		t.Fatalf("split removal readback error=%v", err)
+	}
 	if err := apps[0].channels.RemoveSubscribers(ctx, member); err != nil {
 		t.Fatal(err)
+	}
+	if ready, missing, err := apps[1].Messages().CheckChannelSubscribers(ctx, channelID, 2, []string{uid}); err != nil || len(ready) != 0 || len(missing) != 1 || missing[0] != uid {
+		t.Fatalf("confirmed removal ready=%v missing=%v err=%v", ready, missing, err)
 	}
 	if got := remoteRecipients(); len(got) != 1 || got[0] != sender {
 		t.Fatalf("removed remote fanout=%v", got)
@@ -279,6 +294,11 @@ func TestThreeNodeServiceRejoinFailedUIDCompensatesThenRecovers(t *testing.T) {
 		t.Fatalf("removed member remote history error=%v", err)
 	}
 	interval := sendThreeNodeGroupPacketAs(t, apps[0], sender, channelID, "removed-interval", 2)
+	// Platform captures joined_message_sequence at this head, but the
+	// Reconciler may add the subscriber later. This message is authorized for
+	// the new epoch and must be recoverable even though realtime cannot fan out
+	// until the Channel subscriber is restored.
+	delayed := sendThreeNodeGroupPacketAs(t, apps[0], sender, channelID, "after-join-before-add", 3)
 	cmd := channelusecase.ServiceRejoinCommand{ChannelID: channelID, ChannelType: 2, UID: uid, MembershipEpoch: 3, PreviousRemovedMessageSeq: first.MessageSeq, JoinedMessageSeq: interval.MessageSeq, RepairSameEpoch: true}
 	store := clusterinfra.NewChannelMetadataStore(nodes[2], apps[2].ensureChannelAppendMetadataCache(), apps[2].goroutines)
 	faultIndex := &failOnceRejoinMembershipIndex{ChannelMetadataStore: store, fail: true}
@@ -303,10 +323,34 @@ func TestThreeNodeServiceRejoinFailedUIDCompensatesThenRecovers(t *testing.T) {
 	if got := remoteRecipients(); len(got) != 2 || got[0] != uid || got[1] != sender {
 		t.Fatalf("restored remote fanout=%v", got)
 	}
-	after := sendThreeNodeGroupPacketAs(t, apps[0], sender, channelID, "after-rejoin", 3)
+	after := sendThreeNodeGroupPacketAs(t, apps[0], sender, channelID, "after-rejoin", 4)
 	page, err := apps[1].Messages().SyncChannelMessages(ctx, messageusecase.SyncChannelMessagesQuery{LoginUID: uid, ChannelID: channelID, ChannelType: 2, StartMessageSeq: 1, PullMode: messageusecase.PullModeUp, Limit: 10})
-	if err != nil || len(page.Messages) != 1 || page.Messages[0].MessageSeq != after.MessageSeq {
+	if err != nil || len(page.Messages) != 2 || page.Messages[0].MessageSeq != delayed.MessageSeq || page.Messages[1].MessageSeq != after.MessageSeq {
 		t.Fatalf("remote history after rejoin page=%+v err=%v", page, err)
+	}
+	if err := apps[0].channels.RemoveSubscribers(ctx, member); err != nil {
+		t.Fatal(err)
+	}
+	versionBeforeProtected, err := nodes[0].GetChannelMetadataAuthoritative(ctx, channelID, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := apps[0].channels.AddSubscribers(ctx, member); !errors.Is(err, metadb.ErrPlatformMembershipProtected) {
+		t.Fatalf("ordinary add of Platform tombstone error=%v", err)
+	}
+	versionAfterProtected, err := nodes[0].GetChannelMetadataAuthoritative(ctx, channelID, 2)
+	if err != nil || versionAfterProtected.SubscriberMutationVersion <= versionBeforeProtected.SubscriberMutationVersion+1 {
+		t.Fatalf("protected compensation version before=%d after=%d err=%v", versionBeforeProtected.SubscriberMutationVersion, versionAfterProtected.SubscriberMutationVersion, err)
+	}
+	if got := remoteRecipients(); len(got) != 1 || got[0] != sender {
+		t.Fatalf("protected ordinary add left remote fanout=%v", got)
+	}
+	if _, err := apps[1].Messages().SyncChannelMessages(ctx, messageusecase.SyncChannelMessagesQuery{LoginUID: uid, ChannelID: channelID, ChannelType: 2, StartMessageSeq: 1, PullMode: messageusecase.PullModeUp, Limit: 10}); !errors.Is(err, messageusecase.ErrSyncMembershipRequired) {
+		t.Fatalf("protected tombstone history error=%v", err)
+	}
+	state, err = apps[2].channels.RejoinSubscriber(ctx, cmd)
+	if err != nil || !state.Ready || state.MembershipEpoch != 3 {
+		t.Fatalf("same epoch repair after protected ordinary add=%+v err=%v", state, err)
 	}
 	// A completed Platform epoch can later lose only its Channel-owned set
 	// entry while the UID row remains live. The same trusted epoch must repair
@@ -318,6 +362,10 @@ func TestThreeNodeServiceRejoinFailedUIDCompensatesThenRecovers(t *testing.T) {
 	if _, err := nodes[0].RemoveChannelSubscribersCounted(ctx, channelID, 2, []string{uid}, channel.SubscriberMutationVersion+1); err != nil {
 		t.Fatal(err)
 	}
+	lostChannel, err := nodes[0].GetChannelMetadataAuthoritative(ctx, channelID, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if stale, err := apps[1].channels.CheckRejoinSubscriber(ctx, cmd); err != nil || stale.Ready {
 		t.Fatalf("lost Channel member readback=%+v err=%v", stale, err)
 	}
@@ -325,9 +373,38 @@ func TestThreeNodeServiceRejoinFailedUIDCompensatesThenRecovers(t *testing.T) {
 	if err != nil || !state.Ready || state.MembershipEpoch != 3 || state.JoinSeq != interval.MessageSeq+1 {
 		t.Fatalf("same epoch Channel repair=%+v err=%v", state, err)
 	}
+	// A delayed compensation from the older Channel mutation may reach a
+	// different API node after this rejoin. Its CAS must not revoke the new
+	// generation or invalidate the remote fanout cache.
+	if _, err := store.RemoveChannelSubscribersIfVersion(ctx, channelID, 2, []string{uid}, lostChannel.SubscriberMutationVersion); !errors.Is(err, metadb.ErrStaleMeta) {
+		t.Fatalf("stale compensation error=%v", err)
+	}
+	if got := remoteRecipients(); len(got) != 2 || got[0] != uid || got[1] != sender {
+		t.Fatalf("stale compensation revoked remote fanout=%v", got)
+	}
 	page, err = apps[1].Messages().SyncChannelMessages(ctx, messageusecase.SyncChannelMessagesQuery{LoginUID: uid, ChannelID: channelID, ChannelType: 2, StartMessageSeq: 1, PullMode: messageusecase.PullModeUp, Limit: 10})
-	if err != nil || len(page.Messages) != 1 || page.Messages[0].MessageSeq != after.MessageSeq {
+	if err != nil || len(page.Messages) != 2 || page.Messages[0].MessageSeq != delayed.MessageSeq || page.Messages[1].MessageSeq != after.MessageSeq {
 		t.Fatalf("history after same epoch repair page=%+v err=%v", page, err)
+	}
+	if err := apps[0].channels.RemoveSubscribers(ctx, member); err != nil {
+		t.Fatal(err)
+	}
+	base, err := nodes[0].GetChannelMetadataAuthoritative(ctx, channelID, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rogue, err := nodes[0].AddChannelSubscribersCounted(ctx, channelID, 2, []string{uid}, base.SubscriberMutationVersion+1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := nodes[0].AddChannelSubscribersCounted(ctx, channelID, 2, []string{sender}, rogue.Version+1); err != nil {
+		t.Fatal(err)
+	}
+	if result, err := store.RemoveChannelSubscribersIfVersion(ctx, channelID, 2, []string{uid}, rogue.Version); err != nil || !result.Applied {
+		t.Fatalf("unrelated Channel mutation blocked UID compensation: result=%+v err=%v", result, err)
+	}
+	if got := remoteRecipients(); len(got) != 1 || got[0] != sender {
+		t.Fatalf("per-UID compensation left rogue fanout=%v", got)
 	}
 }
 

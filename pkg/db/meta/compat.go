@@ -26,6 +26,9 @@ var (
 	ErrCorruptValue = dberrors.ErrCorruptValue
 	// ErrStaleMeta reports stale metadata guards and monotonic conflicts.
 	ErrStaleMeta = dberrors.ErrConflict
+	// ErrPlatformMembershipProtected means an ordinary UID projection tried to
+	// revive a tombstone owned by a trusted Platform membership epoch.
+	ErrPlatformMembershipProtected = errors.New("metadb: Platform membership rejoin required")
 )
 
 // UserCursor identifies the last emitted user in a shard page scan.
@@ -450,6 +453,14 @@ func (s *ShardStore) ContainsSubscriber(ctx context.Context, channelID string, c
 		return false, err
 	}
 	return s.shard.ContainsSubscriber(ctx, channelID, channelType, uid)
+}
+
+// SubscriberGeneration returns one subscriber row's last Channel Add version.
+func (s *ShardStore) SubscriberGeneration(ctx context.Context, channelID string, channelType int64, uid string) (uint64, bool, error) {
+	if s == nil || s.shard == nil {
+		return 0, false, ErrNotFound
+	}
+	return s.shard.SubscriberGeneration(ctx, channelID, channelType, uid)
 }
 
 func (s *ShardStore) HasSubscribers(ctx context.Context, channelID string, channelType int64) (bool, error) {
@@ -1151,23 +1162,44 @@ func (b *WriteBatch) AdvanceChannelRetentionThroughSeq(hashSlot uint16, req Chan
 }
 
 func (b *WriteBatch) AddSubscribers(hashSlot uint16, channelID string, channelType int64, uids []string, mutationVersion ...uint64) error {
-	_, err := b.stageSubscribers(hashSlot, channelID, channelType, uids, optionalVersion(mutationVersion), true)
+	_, err := b.stageSubscribers(hashSlot, channelID, channelType, uids, optionalVersion(mutationVersion), true, nil, false)
 	return err
 }
 
 func (b *WriteBatch) RemoveSubscribers(hashSlot uint16, channelID string, channelType int64, uids []string, mutationVersion ...uint64) error {
-	_, err := b.stageSubscribers(hashSlot, channelID, channelType, uids, optionalVersion(mutationVersion), false)
+	_, err := b.stageSubscribers(hashSlot, channelID, channelType, uids, optionalVersion(mutationVersion), false, nil, false)
 	return err
 }
 
 // AddSubscribersCounted stages a set add and returns a result populated by Commit.
 func (b *WriteBatch) AddSubscribersCounted(hashSlot uint16, channelID string, channelType int64, uids []string, mutationVersion ...uint64) (*SubscriberMutationResult, error) {
-	return b.stageSubscribers(hashSlot, channelID, channelType, uids, optionalVersion(mutationVersion), true)
+	return b.stageSubscribers(hashSlot, channelID, channelType, uids, optionalVersion(mutationVersion), true, nil, false)
+}
+
+// AddSubscribersCountedForceGeneration is reserved for trusted epoch rejoin.
+// It establishes a new UID generation even if a stale Channel row already
+// exists, so an older compensation cannot remove the repaired member.
+func (b *WriteBatch) AddSubscribersCountedForceGeneration(hashSlot uint16, channelID string, channelType int64, uids []string, mutationVersion uint64) (*SubscriberMutationResult, error) {
+	if mutationVersion == 0 {
+		return nil, ErrInvalidArgument
+	}
+	return b.stageSubscribers(hashSlot, channelID, channelType, uids, mutationVersion, true, nil, true)
 }
 
 // RemoveSubscribersCounted stages a set removal and returns a result populated by Commit.
 func (b *WriteBatch) RemoveSubscribersCounted(hashSlot uint16, channelID string, channelType int64, uids []string, mutationVersion ...uint64) (*SubscriberMutationResult, error) {
-	return b.stageSubscribers(hashSlot, channelID, channelType, uids, optionalVersion(mutationVersion), false)
+	return b.stageSubscribers(hashSlot, channelID, channelType, uids, optionalVersion(mutationVersion), false, nil, false)
+}
+
+// RemoveSubscribersIfVersion only removes rows last added by the named
+// generation. The per-UID comparison and removal run in one Channel Slot
+// commit, so unrelated members may advance the Channel version without
+// preventing compensation or revoking a later rejoin of the same UID.
+func (b *WriteBatch) RemoveSubscribersIfVersion(hashSlot uint16, channelID string, channelType int64, uids []string, expectedVersion uint64) (*SubscriberMutationResult, error) {
+	if expectedVersion == math.MaxUint64 {
+		return nil, ErrInvalidArgument
+	}
+	return b.stageSubscribers(hashSlot, channelID, channelType, uids, expectedVersion+1, false, &expectedVersion, false)
 }
 
 func (b *WriteBatch) UpsertUserChannelMembership(hashSlot uint16, membership UserChannelMembership) error {
@@ -1175,6 +1207,15 @@ func (b *WriteBatch) UpsertUserChannelMembership(hashSlot uint16, membership Use
 		return err
 	}
 	return b.batch.UpsertUserChannelMembership(HashSlot(hashSlot), membership)
+}
+
+// UpsertUserChannelMembershipChecked preserves the committed protected
+// tombstone result for a counted ordinary subscriber projection.
+func (b *WriteBatch) UpsertUserChannelMembershipChecked(hashSlot uint16, membership UserChannelMembership, protected *bool) error {
+	if err := b.ensure(); err != nil {
+		return err
+	}
+	return b.batch.UpsertUserChannelMembershipChecked(HashSlot(hashSlot), membership, protected)
 }
 
 // RejoinUserChannelMembership stages a guarded Platform history-epoch reset.
@@ -1275,7 +1316,7 @@ func (b *WriteBatch) AppendMessageEvent(hashSlot uint16, event MessageEventAppen
 	return b.batch.AppendMessageEvent(HashSlot(hashSlot), event)
 }
 
-func (b *WriteBatch) stageSubscribers(hashSlot uint16, channelID string, channelType int64, uids []string, mutationVersion uint64, add bool) (*SubscriberMutationResult, error) {
+func (b *WriteBatch) stageSubscribers(hashSlot uint16, channelID string, channelType int64, uids []string, mutationVersion uint64, add bool, expectedVersion *uint64, forceGeneration bool) (*SubscriberMutationResult, error) {
 	if err := b.ensure(); err != nil {
 		return nil, err
 	}
@@ -1293,6 +1334,27 @@ func (b *WriteBatch) stageSubscribers(hashSlot uint16, channelID string, channel
 		}
 		if !channelExists {
 			channel = Channel{ChannelID: channelID, ChannelType: channelType}
+		}
+		if expectedVersion != nil {
+			matching := 0
+			for _, uid := range normalized {
+				key, err := subscriberRowKey(hs, channelID, channelType, uid)
+				if err != nil {
+					return err
+				}
+				generation, exists, err := state.loadSubscriberGeneration(key)
+				if err != nil {
+					return err
+				}
+				if exists && generation == *expectedVersion {
+					matching++
+				}
+			}
+			if matching == 0 {
+				result.Version = channel.SubscriberMutationVersion
+				return nil
+			}
+			result.Applied = true
 		}
 		if mutationVersion > 0 {
 			// A logical reset or a concurrent ingress can propose the same
@@ -1312,6 +1374,15 @@ func (b *WriteBatch) stageSubscribers(hashSlot uint16, channelID string, channel
 			if err != nil {
 				return err
 			}
+			if expectedVersion != nil {
+				generation, exists, err := state.loadSubscriberGeneration(key)
+				if err != nil {
+					return err
+				}
+				if !exists || generation != *expectedVersion {
+					continue
+				}
+			}
 			exists, err := state.loadSubscriberExists(key)
 			if err != nil {
 				return err
@@ -1321,10 +1392,14 @@ func (b *WriteBatch) stageSubscribers(hashSlot uint16, channelID string, channel
 					channel.SubscriberCount++
 					result.ChangedCount++
 				}
-				if err := batch.Set(key, nil); err != nil {
-					return err
+				if !exists || forceGeneration {
+					var value [8]byte
+					binary.BigEndian.PutUint64(value[:], channel.SubscriberMutationVersion)
+					if err := batch.Set(key, value[:]); err != nil {
+						return err
+					}
+					state.subscriberRows[string(key)] = subscriberRowOverlay{exists: true, generation: channel.SubscriberMutationVersion}
 				}
-				state.subscriberRows[string(key)] = true
 			} else {
 				if exists && channel.SubscriberCount > 0 {
 					channel.SubscriberCount--
@@ -1335,7 +1410,7 @@ func (b *WriteBatch) stageSubscribers(hashSlot uint16, channelID string, channel
 				if err := batch.Delete(key); err != nil {
 					return err
 				}
-				state.subscriberRows[string(key)] = false
+				state.subscriberRows[string(key)] = subscriberRowOverlay{}
 			}
 		}
 		if channelExists || mutationVersion > 0 {

@@ -351,6 +351,12 @@ func (s *Shard) ListUserChannelMembershipPage(ctx context.Context, uid string, c
 }
 
 func (b *Batch) UpsertUserChannelMembership(hashSlot HashSlot, membership UserChannelMembership) error {
+	return b.UpsertUserChannelMembershipChecked(hashSlot, membership, nil)
+}
+
+// UpsertUserChannelMembershipChecked reports a protected tombstone after the
+// durable batch resolves. Other rows in the same batch still commit.
+func (b *Batch) UpsertUserChannelMembershipChecked(hashSlot HashSlot, membership UserChannelMembership, protected *bool) error {
 	if err := b.ensureOpen(); err != nil {
 		return err
 	}
@@ -368,6 +374,9 @@ func (b *Batch) UpsertUserChannelMembership(hashSlot HashSlot, membership UserCh
 			return err
 		}
 		next := resolveUserChannelMembership(existing, exists, membership)
+		if protected != nil && exists && existing.Tombstone && existing.PlatformMembershipEpoch != 0 && !membership.Tombstone && next == existing {
+			*protected = true
+		}
 		if existing == next && exists {
 			return nil
 		}
@@ -412,6 +421,21 @@ func (b *Batch) RejoinUserChannelMembership(hashSlot HashSlot, rejoin PlatformMe
 		joinSeq := rejoin.JoinedSeq + 1
 		if rejoin.MembershipEpoch == existing.PlatformMembershipEpoch {
 			if existing.PlatformMembershipEpoch != 0 && !existing.Tombstone && existing.JoinSeq == joinSeq && existing.DeletedToSeq >= rejoin.JoinedSeq {
+				if rejoin.RepairSameEpoch && rejoin.SourceVersion > existing.SourceVersion {
+					// A completed epoch may need Channel-owned subscriber repair.
+					// Fence delayed UID tombstones from before that repair while
+					// leaving all user-owned visibility and read floors intact.
+					next := existing
+					next.SourceVersion = rejoin.SourceVersion
+					if rejoin.UpdatedAt > next.UpdatedAt {
+						next.UpdatedAt = rejoin.UpdatedAt
+					}
+					if err := stageUserChannelMembership(batch, hashSlot, primaryKey, existing, true, next); err != nil {
+						return err
+					}
+					value := encodeUserChannelMembershipValue(next)
+					state.tableRows[string(primaryKey)] = tableRowOverlay{value: append([]byte(nil), value...), exists: true}
+				}
 				result.Accepted = true
 				return nil
 			}

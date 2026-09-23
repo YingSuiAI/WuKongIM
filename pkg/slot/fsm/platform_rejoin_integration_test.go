@@ -81,7 +81,7 @@ func TestPlatformRejoinRebasesVisibilityAtJoinedSequence(t *testing.T) {
 	// A legacy ordinary add must not revive a Platform-owned tombstone.
 	if got := apply(10, EncodeUpsertUserChannelMembershipsCommand([]metadb.UserChannelMembership{{
 		UID: "u1", ChannelID: "g1", ChannelType: 2, JoinSeq: 91, SourceVersion: 7, UpdatedAt: 500,
-	}})); got != ApplyResultOK {
+	}})); got != ApplyResultPlatformMembershipProtected {
 		t.Fatalf("premature ordinary add result = %q", got)
 	}
 	row, err = db.ForSlot(11).GetUserChannelMembership(ctx, "u1", "g1", 2)

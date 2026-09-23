@@ -3,6 +3,8 @@ package channel
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sort"
 	"time"
 
 	metadb "github.com/WuKongIM/WuKongIM/pkg/db/meta"
@@ -29,6 +31,10 @@ type Store interface {
 type countedSubscriberStore interface {
 	AddChannelSubscribersCounted(ctx context.Context, channelID string, channelType int64, uids []string, subscriberMutationVersion ...uint64) (metadb.SubscriberMutationResult, error)
 	RemoveChannelSubscribersCounted(ctx context.Context, channelID string, channelType int64, uids []string, subscriberMutationVersion ...uint64) (metadb.SubscriberMutationResult, error)
+}
+
+type conditionalSubscriberRemovalStore interface {
+	RemoveChannelSubscribersIfVersion(ctx context.Context, channelID string, channelType int64, uids []string, expectedVersion uint64) (metadb.SubscriberMutationResult, error)
 }
 
 type subscriberLookupStore interface {
@@ -135,7 +141,7 @@ func (a *App) Upsert(ctx context.Context, cmd UpsertCommand) error {
 		if err != nil {
 			return err
 		}
-		a.notifySubscriberMutation(ctx, channel, cmd.Reset, cmd.Subscribers, nil)
+		a.notifySubscriberInvalidation(ctx, channel, channel.SubscriberMutationVersion)
 	}
 	return nil
 }
@@ -268,7 +274,7 @@ func (a *App) AddSubscribers(ctx context.Context, cmd SubscriberCommand) error {
 			if err != nil {
 				return err
 			}
-			a.notifySubscriberMutation(ctx, channel, true, nil, nil)
+			a.notifySubscriberInvalidation(ctx, channel, channel.SubscriberMutationVersion)
 		}
 		return nil
 	}
@@ -279,7 +285,7 @@ func (a *App) AddSubscribers(ctx context.Context, cmd SubscriberCommand) error {
 	if err != nil {
 		return err
 	}
-	a.notifySubscriberMutation(ctx, channel, cmd.Reset, cmd.Subscribers, nil)
+	a.notifySubscriberInvalidation(ctx, channel, channel.SubscriberMutationVersion)
 	return nil
 }
 
@@ -302,7 +308,7 @@ func (a *App) RemoveSubscribers(ctx context.Context, cmd SubscriberCommand) erro
 	if err != nil {
 		return err
 	}
-	a.notifySubscriberMutation(ctx, channel, false, nil, cmd.Subscribers)
+	a.notifySubscriberInvalidation(ctx, channel, channel.SubscriberMutationVersion)
 	return nil
 }
 
@@ -343,6 +349,9 @@ func (a *App) MutateSubscribersCounted(ctx context.Context, cmd SubscriberComman
 	if a.membershipIndex != nil {
 		if add {
 			err = a.membershipIndex.UpsertChannelMemberships(ctx, cmd.ChannelID, int64(cmd.ChannelType), cmd.Subscribers, committedTail, result.Version, a.now().UnixNano())
+			if err != nil {
+				return result, a.compensateProtectedOrdinaryAdd(ctx, cmd.ChannelID, int64(cmd.ChannelType), cmd.Subscribers, result.Version, err)
+			}
 		} else {
 			err = a.membershipIndex.TombstoneChannelMemberships(ctx, cmd.ChannelID, int64(cmd.ChannelType), cmd.Subscribers, result.Version, a.now().UnixNano())
 		}
@@ -355,9 +364,9 @@ func (a *App) MutateSubscribersCounted(ctx context.Context, cmd SubscriberComman
 		return result, err
 	}
 	if add {
-		a.notifySubscriberMutation(ctx, channel, false, cmd.Subscribers, nil)
+		a.notifySubscriberMutation(ctx, channel, result.Version, cmd.Subscribers, nil)
 	} else {
-		a.notifySubscriberMutation(ctx, channel, false, nil, cmd.Subscribers)
+		a.notifySubscriberMutation(ctx, channel, result.Version, nil, cmd.Subscribers)
 	}
 	return result, nil
 }
@@ -378,7 +387,7 @@ func (a *App) RemoveAllSubscribers(ctx context.Context, key ChannelKey) error {
 	if err != nil {
 		return err
 	}
-	a.notifySubscriberMutation(ctx, channel, true, nil, nil)
+	a.notifySubscriberInvalidation(ctx, channel, channel.SubscriberMutationVersion)
 	return nil
 }
 
@@ -704,8 +713,91 @@ func (a *App) addOrdinarySubscribersChunked(ctx context.Context, channelID strin
 		if a.membershipIndex == nil {
 			return nil
 		}
-		return a.membershipIndex.UpsertChannelMemberships(ctx, channelID, channelType, chunk, committedTail, result.Version, a.now().UnixNano())
+		if err := a.membershipIndex.UpsertChannelMemberships(ctx, channelID, channelType, chunk, committedTail, result.Version, a.now().UnixNano()); err != nil {
+			return a.compensateProtectedOrdinaryAdd(ctx, channelID, channelType, chunk, result.Version, err)
+		}
+		return nil
 	})
+}
+
+func (a *App) compensateProtectedOrdinaryAdd(ctx context.Context, channelID string, channelType int64, chunk []string, addVersion uint64, cause error) error {
+	compensationCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+	defer cancel()
+	// Inspect only the failed chunk. An existing live UID is a legal member
+	// even when its source version predates this repeated Add. For a blocked
+	// UID, compare the Channel-owned row's actual generation at Slot commit;
+	// this also cleans up a rogue row left by an earlier failed compensation.
+	// The normal 100k path has no additional UID or Channel point reads.
+	blockedByGeneration := make(map[uint64][]string)
+	var diagnostic error
+	reader, ok := a.membershipIndex.(interface {
+		GetUserChannelMembership(context.Context, string, string, int64) (metadb.UserChannelMembership, bool, error)
+	})
+	generationReader, generationOK := a.store.(interface {
+		SubscriberGeneration(context.Context, string, int64, string) (uint64, bool, error)
+	})
+	if !ok || !generationOK {
+		return errors.Join(cause, ErrStoreRequired)
+	}
+	for _, uid := range chunk {
+		row, found, uidErr := reader.GetUserChannelMembership(compensationCtx, uid, channelID, channelType)
+		if uidErr == nil && found && !row.Tombstone {
+			continue
+		}
+		generation, member, generationErr := generationReader.SubscriberGeneration(compensationCtx, channelID, channelType, uid)
+		if generationErr != nil {
+			diagnostic = errors.Join(diagnostic, fmt.Errorf("subscriber generation readback failed: %w", generationErr))
+			continue
+		}
+		if !member {
+			continue
+		}
+		if uidErr != nil {
+			diagnostic = errors.Join(diagnostic, fmt.Errorf("UID membership readback failed: %w", uidErr))
+			// When UID state is unknown, only rows created by this Add are safe
+			// to revoke. Existing generations may be legal old members.
+			if generation != addVersion {
+				continue
+			}
+		}
+		blockedByGeneration[generation] = append(blockedByGeneration[generation], uid)
+	}
+	generations := make([]uint64, 0, len(blockedByGeneration))
+	for generation := range blockedByGeneration {
+		generations = append(generations, generation)
+	}
+	sort.Slice(generations, func(i, j int) bool { return generations[i] < generations[j] })
+	for _, generation := range generations {
+		if err := a.compensateSubscriberAddIfVersion(compensationCtx, channelID, channelType, blockedByGeneration[generation], generation); err != nil {
+			diagnostic = errors.Join(diagnostic, fmt.Errorf("compensating subscriber generation %d: %w", generation, err))
+		}
+	}
+	return errors.Join(cause, diagnostic)
+}
+
+func (a *App) compensateSubscriberAddIfVersion(ctx context.Context, channelID string, channelType int64, uids []string, addVersion uint64) error {
+	store, ok := a.store.(conditionalSubscriberRemovalStore)
+	if !ok {
+		return ErrStoreRequired
+	}
+	result, err := store.RemoveChannelSubscribersIfVersion(ctx, channelID, channelType, uids, addVersion)
+	if err != nil {
+		return err
+	}
+	if !result.Applied || result.Version <= addVersion {
+		return metadb.ErrStaleMeta
+	}
+	// The UID Slot write is the operation that failed (or remained unknown).
+	// The Channel-owned removal makes realtime, send, and history fail closed;
+	// an extra UID tombstone could arrive after a newer strict rejoin and revoke
+	// its accepted epoch. Platform keeps the barrier pending until both facts
+	// read back consistently.
+	channel, err := a.refreshLargeGroupFlag(ctx, channelID, channelType)
+	if err != nil {
+		return err
+	}
+	a.notifySubscriberInvalidation(ctx, channel, channel.SubscriberMutationVersion)
+	return nil
 }
 
 func (a *App) addSubscribersChunked(ctx context.Context, channelID string, channelType int64, uids []string, subscriberMutationVersion uint64) error {
@@ -842,26 +934,25 @@ func (a *App) subscriberMutationVersionFor(ctx context.Context, channelID string
 }
 
 func (a *App) refreshLargeGroupFlag(ctx context.Context, channelID string, channelType int64) (metadb.Channel, error) {
-	channel, err := a.store.GetChannel(ctx, channelID, channelType)
-	if err != nil {
-		return metadb.Channel{}, err
+	store, ok := a.store.(interface {
+		RefreshChannelLarge(context.Context, string, int64, uint64) (metadb.Channel, error)
+	})
+	if !ok {
+		return metadb.Channel{}, ErrStoreRequired
 	}
-	large := int64(0)
-	if channel.SubscriberCount > uint64(a.largeGroupSubscriberThreshold) {
-		large = 1
-	}
-	if channel.Large == large {
-		return channel, nil
-	}
-	channel.Large = large
-	if err := a.store.UpsertChannel(ctx, channel); err != nil {
-		return metadb.Channel{}, err
-	}
-	return channel, nil
+	return store.RefreshChannelLarge(ctx, channelID, channelType, uint64(a.largeGroupSubscriberThreshold))
 }
 
-func (a *App) notifySubscriberMutation(ctx context.Context, channel metadb.Channel, reset bool, added []string, removed []string) {
+func (a *App) notifySubscriberMutation(ctx context.Context, channel metadb.Channel, mutationVersion uint64, added []string, removed []string) {
 	if a == nil || a.subscriberMutationObserver == nil {
+		return
+	}
+	if channel.SubscriberMutationVersion != mutationVersion {
+		// A later commit already changed the Channel. Invalidate at that
+		// observed version; publishing this older delta under it would revive
+		// or remove the wrong UID, while tagging invalidation with the old
+		// version would allow a same-version late delta to patch new contents.
+		a.notifySubscriberInvalidation(ctx, channel, channel.SubscriberMutationVersion)
 		return
 	}
 	a.subscriberMutationObserver.ObserveSubscriberMutation(ctx, SubscriberMutationEvent{
@@ -870,10 +961,19 @@ func (a *App) notifySubscriberMutation(ctx context.Context, channel metadb.Chann
 			ChannelType: uint8(channel.ChannelType),
 		},
 		Large:                     channel.Large != 0,
-		SubscriberMutationVersion: channel.SubscriberMutationVersion,
-		Reset:                     reset,
+		SubscriberMutationVersion: mutationVersion,
 		AddedUIDs:                 append([]string(nil), added...),
 		RemovedUIDs:               append([]string(nil), removed...),
+	})
+}
+
+func (a *App) notifySubscriberInvalidation(ctx context.Context, channel metadb.Channel, mutationVersion uint64) {
+	if a == nil || a.subscriberMutationObserver == nil {
+		return
+	}
+	a.subscriberMutationObserver.ObserveSubscriberMutation(ctx, SubscriberMutationEvent{
+		ChannelKey: ChannelKey{ChannelID: channel.ChannelID, ChannelType: uint8(channel.ChannelType)},
+		Large:      channel.Large != 0, SubscriberMutationVersion: mutationVersion, Invalidate: true,
 	})
 }
 

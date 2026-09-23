@@ -37,6 +37,10 @@ func inspectCommand(cmd command) (CommandInspection, error) {
 		return deviceInspection("upsert_device", typed.device), nil
 	case *upsertChannelCmd:
 		return channelInspection("upsert_channel", typed.channel), nil
+	case *refreshChannelLargeCmd:
+		return simpleInspection("refresh_channel_large", map[string]any{
+			"channel_id": typed.channelID, "channel_type": typed.channelType, "threshold": typed.threshold,
+		}), nil
 	case *deleteChannelCmd:
 		return simpleInspection("delete_channel", map[string]any{
 			"channel_id":   typed.channelID,
@@ -59,9 +63,14 @@ func inspectCommand(cmd command) (CommandInspection, error) {
 	case *advanceChannelRetentionThroughSeqCmd:
 		return retentionAdvanceInspection(typed.req), nil
 	case *addSubscribersCmd:
+		if typed.forceGeneration {
+			return subscribersInspection("add_subscribers_for_rejoin", typed.channelID, typed.channelType, typed.uids, typed.subscriberMutationVersion), nil
+		}
 		return subscribersInspection("add_subscribers", typed.channelID, typed.channelType, typed.uids, typed.subscriberMutationVersion), nil
 	case *removeSubscribersCmd:
 		return subscribersInspection("remove_subscribers", typed.channelID, typed.channelType, typed.uids, typed.subscriberMutationVersion), nil
+	case *removeSubscribersIfVersionCmd:
+		return subscribersInspection("remove_subscribers_if_version", typed.channelID, typed.channelType, typed.uids, typed.expectedVersion), nil
 	case *appendMessageEventCmd:
 		return simpleInspection("append_message_event", messageEventAppendPayload(typed.event)), nil
 	case *appendMessageEventsBatchCmd:

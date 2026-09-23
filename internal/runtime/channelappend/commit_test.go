@@ -614,6 +614,40 @@ func TestSubscriberMutationUpdatePatchesCachedSnapshot(t *testing.T) {
 	}
 }
 
+func TestSubscriberMutationEventsNeverRollBackNewerRecipientSnapshot(t *testing.T) {
+	target := localTargetForAppendTest("room")
+	target.SubscriberMutationVersion = 10
+	state := newChannelState(target, channelStateLimits{})
+	state.subscriberCache = subscriberCache{ready: true, mutationVersion: 10, recipients: []Recipient{{UID: "u2"}}}
+
+	// Rejoin V12 wins even if the previous removal notification arrives late.
+	state.applySubscriberMutation(SubscriberMutationUpdate{ChannelID: target.ChannelID, SubscriberMutationVersion: 11, RemovedUIDs: []string{"u2"}})
+	state.applySubscriberMutation(SubscriberMutationUpdate{ChannelID: target.ChannelID, SubscriberMutationVersion: 12, AddedUIDs: []string{"u2"}})
+	state.applySubscriberMutation(SubscriberMutationUpdate{ChannelID: target.ChannelID, SubscriberMutationVersion: 11, Invalidate: true})
+	staleTarget := target
+	staleTarget.SubscriberMutationVersion = 11
+	staleTarget.Large = true
+	state.refreshRecipientMetadata(staleTarget)
+	if state.target.SubscriberMutationVersion != 12 || state.target.Large || !state.subscriberCache.ready || state.subscriberCache.mutationVersion != 12 || !reflect.DeepEqual(state.subscriberCache.recipients, []Recipient{{UID: "u2"}}) {
+		t.Fatalf("late V11 invalidation changed V12 snapshot: target=%d cache=%+v", state.target.SubscriberMutationVersion, state.subscriberCache)
+	}
+
+	// An out-of-order delta with a version gap cannot patch a V10 snapshot.
+	state = newChannelState(target, channelStateLimits{})
+	state.subscriberCache = subscriberCache{ready: true, mutationVersion: 10, recipients: []Recipient{{UID: "u2"}}}
+	state.applySubscriberMutation(SubscriberMutationUpdate{ChannelID: target.ChannelID, SubscriberMutationVersion: 12, RemovedUIDs: []string{"u2"}})
+	state.applySubscriberMutation(SubscriberMutationUpdate{ChannelID: target.ChannelID, SubscriberMutationVersion: 11, AddedUIDs: []string{"u3"}})
+	if state.target.SubscriberMutationVersion != 12 || state.subscriberCache.ready {
+		t.Fatalf("out-of-order delta retained incomplete snapshot: target=%d cache=%+v", state.target.SubscriberMutationVersion, state.subscriberCache)
+	}
+
+	state.applySubscriberMutation(SubscriberMutationUpdate{ChannelID: target.ChannelID, SubscriberMutationVersion: 13, Reset: true, AddedUIDs: []string{"u2", "u3"}})
+	state.applySubscriberMutation(SubscriberMutationUpdate{ChannelID: target.ChannelID, SubscriberMutationVersion: 12, Reset: true, AddedUIDs: []string{"u4"}})
+	if state.target.SubscriberMutationVersion != 13 || !reflect.DeepEqual(state.subscriberCache.recipients, []Recipient{{UID: "u2"}, {UID: "u3"}}) {
+		t.Fatalf("late reset replaced newer snapshot: target=%d cache=%+v", state.target.SubscriberMutationVersion, state.subscriberCache)
+	}
+}
+
 func TestLargeGroupSubscribersRemainPagedPerCommittedMessage(t *testing.T) {
 	source := &recordingSubscriberSourceForRecipientTest{
 		pages: []SubscriberPage{

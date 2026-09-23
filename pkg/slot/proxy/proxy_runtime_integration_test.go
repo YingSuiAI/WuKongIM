@@ -708,6 +708,21 @@ func TestStoreConditionalChannelMutationsAreAuthoritativeAndPreserveSubscriberMe
 	require.Equal(t, int64(1), got.AllowStranger)
 	require.Equal(t, uint64(7), got.SubscriberMutationVersion)
 	require.Equal(t, uint64(1), got.SubscriberCount)
+	refreshed, err := nodes[0].store.RefreshChannelLarge(ctx, channelID, 2, 0)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), refreshed.Large)
+	require.Equal(t, int64(1), refreshed.Disband)
+	require.Equal(t, int64(1), refreshed.SendBan)
+	require.Equal(t, int64(1), refreshed.AllowStranger)
+	require.Equal(t, uint64(7), refreshed.SubscriberMutationVersion)
+	refreshed, err = nodes[0].store.RefreshChannelLarge(ctx, channelID, 2, 1)
+	require.NoError(t, err)
+	require.Equal(t, int64(0), refreshed.Large)
+	require.Equal(t, int64(1), refreshed.Disband)
+	require.ErrorIs(t, func() error {
+		_, err := nodes[0].store.RefreshChannelLarge(ctx, "missing-channel", 2, 1)
+		return err
+	}(), metadb.ErrNotFound)
 	require.ErrorIs(
 		t,
 		nodes[0].store.PatchChannelBusinessFlags(ctx, "missing-channel", 2, metadb.ChannelBusinessFlags{Ban: 1}),

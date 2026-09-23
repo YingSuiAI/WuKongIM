@@ -56,6 +56,9 @@ const (
 	cmdTypeCompletePersonDirectoryTaskBatch    uint8 = 65
 	cmdTypeCreateMessagePayloadCorrection      uint8 = 66
 	cmdTypeRejoinUserChannelMembership         uint8 = 67
+	cmdTypeRemoveSubscribersIfVersion          uint8 = 68
+	cmdTypeRefreshChannelLarge                 uint8 = 69
+	cmdTypeAddSubscribersForRejoin             uint8 = 70
 	cmdTypeBindPluginUser                      uint8 = 42
 	cmdTypeUnbindPluginUser                    uint8 = 43
 
@@ -122,6 +125,7 @@ const (
 	tagSubscriberChannelType     uint8 = 2
 	tagSubscriberUIDs            uint8 = 3
 	tagSubscriberMutationVersion uint8 = 4
+	tagSubscriberExpectedVersion uint8 = 5
 
 	// User channel membership field tags.
 	tagUserChannelMembershipCommandEntry uint8 = 1
@@ -178,6 +182,11 @@ const (
 	ApplyResultStaleMeta = "stale_meta"
 	// ApplyResultMembershipEpochConflict reports a rejected Platform rejoin guard.
 	ApplyResultMembershipEpochConflict = "membership_epoch_conflict"
+	// ApplyResultPlatformMembershipProtected reports that an ordinary UID
+	// projection could not revive a Platform-owned tombstone.
+	ApplyResultPlatformMembershipProtected = "platform_membership_protected"
+	// ApplyResultSubscriberVersionConflict means a newer Channel mutation won.
+	ApplyResultSubscriberVersionConflict = "subscriber_version_conflict"
 
 	// headerSize is version (1) + cmdType (1).
 	headerSize = 2
@@ -225,6 +234,9 @@ var commandDecoders = map[uint8]commandDecoder{
 	cmdTypeUpsertDevice:                        decodeUpsertDevice,
 	cmdTypeAddSubscribers:                      decodeAddSubscribers,
 	cmdTypeRemoveSubscribers:                   decodeRemoveSubscribers,
+	cmdTypeRemoveSubscribersIfVersion:          decodeRemoveSubscribersIfVersion,
+	cmdTypeRefreshChannelLarge:                 decodeRefreshChannelLarge,
+	cmdTypeAddSubscribersForRejoin:             decodeAddSubscribersForRejoin,
 	cmdTypeAdvanceChannelRetention:             decodeAdvanceChannelRetentionThroughSeq,
 	cmdTypeNoop:                                decodeNoop,
 	cmdTypeUpsertUserChannelMemberships:        decodeUpsertUserChannelMemberships,
@@ -413,10 +425,17 @@ type addSubscribersCmd struct {
 	uids                      []string
 	subscriberMutationVersion uint64
 	result                    *metadb.SubscriberMutationResult
+	forceGeneration           bool
 }
 
 func (c *addSubscribersCmd) apply(wb *metadb.WriteBatch, hashSlot uint16) error {
-	result, err := wb.AddSubscribersCounted(hashSlot, c.channelID, c.channelType, c.uids, c.subscriberMutationVersion)
+	var result *metadb.SubscriberMutationResult
+	var err error
+	if c.forceGeneration {
+		result, err = wb.AddSubscribersCountedForceGeneration(hashSlot, c.channelID, c.channelType, c.uids, c.subscriberMutationVersion)
+	} else {
+		result, err = wb.AddSubscribersCounted(hashSlot, c.channelID, c.channelType, c.uids, c.subscriberMutationVersion)
+	}
 	c.result = result
 	return err
 }
@@ -442,6 +461,27 @@ func (c *removeSubscribersCmd) apply(wb *metadb.WriteBatch, hashSlot uint16) err
 }
 
 func (c *removeSubscribersCmd) applyResult() []byte {
+	return EncodeSubscriberMutationResult(c.result)
+}
+
+type removeSubscribersIfVersionCmd struct {
+	channelID       string
+	channelType     int64
+	uids            []string
+	expectedVersion uint64
+	result          *metadb.SubscriberMutationResult
+}
+
+func (c *removeSubscribersIfVersionCmd) apply(wb *metadb.WriteBatch, hashSlot uint16) error {
+	result, err := wb.RemoveSubscribersIfVersion(hashSlot, c.channelID, c.channelType, c.uids, c.expectedVersion)
+	c.result = result
+	return err
+}
+
+func (c *removeSubscribersIfVersionCmd) applyResult() []byte {
+	if c.result == nil || !c.result.Applied {
+		return []byte(ApplyResultSubscriberVersionConflict)
+	}
 	return EncodeSubscriberMutationResult(c.result)
 }
 
@@ -522,15 +562,23 @@ func DecodeSubscriberMutationResult(data []byte) (metadb.SubscriberMutationResul
 
 type upsertUserChannelMembershipsCmd struct {
 	memberships []metadb.UserChannelMembership
+	protected   bool
 }
 
 func (c *upsertUserChannelMembershipsCmd) apply(wb *metadb.WriteBatch, hashSlot uint16) error {
 	for _, membership := range c.memberships {
-		if err := wb.UpsertUserChannelMembership(hashSlot, membership); err != nil {
+		if err := wb.UpsertUserChannelMembershipChecked(hashSlot, membership, &c.protected); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func (c *upsertUserChannelMembershipsCmd) applyResult() []byte {
+	if c.protected {
+		return []byte(ApplyResultPlatformMembershipProtected)
+	}
+	return []byte(ApplyResultOK)
 }
 
 type deleteUserChannelMembershipsCmd struct {
@@ -896,6 +944,18 @@ func EncodeAddSubscribersCommandChecked(channelID string, channelType int64, uid
 	return EncodeAddSubscribersCommand(channelID, channelType, uids, subscriberMutationVersion...), nil
 }
 
+// EncodeAddSubscribersForRejoinCommandChecked establishes a new trusted UID
+// generation even when a stale Channel subscriber row already exists.
+func EncodeAddSubscribersForRejoinCommandChecked(channelID string, channelType int64, uids []string, mutationVersion uint64) ([]byte, error) {
+	if err := ValidateSubscriberCommandLimits(uids); err != nil {
+		return nil, err
+	}
+	if mutationVersion == 0 {
+		return nil, metadb.ErrInvalidArgument
+	}
+	return encodeSubscribersCommand(cmdTypeAddSubscribersForRejoin, channelID, channelType, uids, mutationVersion), nil
+}
+
 // EncodeRemoveSubscribersCommand encodes a subscriber removal command.
 func EncodeRemoveSubscribersCommand(channelID string, channelType int64, uids []string, subscriberMutationVersion ...uint64) []byte {
 	return encodeSubscribersCommand(cmdTypeRemoveSubscribers, channelID, channelType, uids, subscriberMutationVersion...)
@@ -907,6 +967,19 @@ func EncodeRemoveSubscribersCommandChecked(channelID string, channelType int64, 
 		return nil, err
 	}
 	return EncodeRemoveSubscribersCommand(channelID, channelType, uids, subscriberMutationVersion...), nil
+}
+
+// EncodeRemoveSubscribersIfVersionCommandChecked encodes a Channel Slot CAS.
+func EncodeRemoveSubscribersIfVersionCommandChecked(channelID string, channelType int64, uids []string, expectedVersion uint64) ([]byte, error) {
+	if err := ValidateSubscriberCommandLimits(uids); err != nil {
+		return nil, err
+	}
+	if expectedVersion == ^uint64(0) {
+		return nil, metadb.ErrInvalidArgument
+	}
+	buf := encodeSubscribersCommand(cmdTypeRemoveSubscribersIfVersion, channelID, channelType, uids)
+	buf = appendUint64TLVField(buf, tagSubscriberExpectedVersion, expectedVersion)
+	return buf, nil
 }
 
 // EncodeUpsertUserChannelMembershipsCommand encodes UID-owned membership upserts.
@@ -2023,6 +2096,12 @@ func decodeAddSubscribers(data []byte) (command, error) {
 	})
 }
 
+func decodeAddSubscribersForRejoin(data []byte) (command, error) {
+	return decodeSubscribersCommand(data, func(channelID string, channelType int64, uids []string) command {
+		return &addSubscribersCmd{channelID: channelID, channelType: channelType, uids: uids, forceGeneration: true}
+	})
+}
+
 func decodeRemoveSubscribers(data []byte) (command, error) {
 	return decodeSubscribersCommand(data, func(channelID string, channelType int64, uids []string) command {
 		return &removeSubscribersCmd{
@@ -2033,12 +2112,20 @@ func decodeRemoveSubscribers(data []byte) (command, error) {
 	})
 }
 
+func decodeRemoveSubscribersIfVersion(data []byte) (command, error) {
+	return decodeSubscribersCommand(data, func(channelID string, channelType int64, uids []string) command {
+		return &removeSubscribersIfVersionCmd{channelID: channelID, channelType: channelType, uids: uids}
+	})
+}
+
 func decodeSubscribersCommand(data []byte, build func(channelID string, channelType int64, uids []string) command) (command, error) {
 	var (
 		channelID                 string
 		channelType               int64
 		uids                      []string
 		subscriberMutationVersion uint64
+		expectedVersion           uint64
+		haveExpectedVersion       bool
 		haveChannelID             bool
 		haveChannelType           bool
 		haveUIDs                  bool
@@ -2076,6 +2163,12 @@ func decodeSubscribersCommand(data []byte, build func(channelID string, channelT
 				return nil, fmt.Errorf("%w: bad subscriber mutation version length", metadb.ErrCorruptValue)
 			}
 			subscriberMutationVersion = binary.BigEndian.Uint64(value)
+		case tagSubscriberExpectedVersion:
+			if len(value) != 8 {
+				return nil, fmt.Errorf("%w: bad subscriber expected version length", metadb.ErrCorruptValue)
+			}
+			expectedVersion = binary.BigEndian.Uint64(value)
+			haveExpectedVersion = true
 		default:
 			// Unknown tag — skip for forward compatibility.
 		}
@@ -2091,6 +2184,12 @@ func decodeSubscribersCommand(data []byte, build func(channelID string, channelT
 		return cmd, nil
 	case *removeSubscribersCmd:
 		cmd.subscriberMutationVersion = subscriberMutationVersion
+		return cmd, nil
+	case *removeSubscribersIfVersionCmd:
+		if !haveExpectedVersion || expectedVersion == ^uint64(0) {
+			return nil, fmt.Errorf("%w: missing subscriber expected version", metadb.ErrCorruptValue)
+		}
+		cmd.expectedVersion = expectedVersion
 		return cmd, nil
 	default:
 		return built, nil

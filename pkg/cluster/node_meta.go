@@ -1055,21 +1055,41 @@ func (n *Node) submitUserMembershipProposals(ctx context.Context, proposals []us
 	workerCount := min(len(proposals), maxMembershipProposalConcurrency)
 	var workers sync.WaitGroup
 	var firstErr error
-	var firstErrOnce sync.Once
+	var firstErrMu sync.Mutex
 	worker := func() {
 		for index := range jobs {
 			if workerCtx.Err() != nil {
 				return
 			}
 			proposal := proposals[index]
-			if err := n.Propose(workerCtx, ProposeRequest{
+			request := ProposeRequest{
 				Command: proposal.command,
 				Target:  ProposeTarget{HashSlot: proposal.hashSlot, HasHashSlot: true},
-			}); err != nil {
-				firstErrOnce.Do(func() {
-					firstErr = err
+			}
+			var err error
+			if action == "upsert" {
+				var result []byte
+				result, err = n.ProposeResult(workerCtx, request)
+				if err == nil {
+					switch string(result) {
+					case metafsm.ApplyResultOK:
+					case metafsm.ApplyResultPlatformMembershipProtected:
+						err = metadb.ErrPlatformMembershipProtected
+					default:
+						err = metadb.ErrStaleMeta
+					}
+				}
+			} else {
+				err = n.Propose(workerCtx, request)
+			}
+			if err != nil {
+				protected := errors.Is(err, metadb.ErrPlatformMembershipProtected)
+				firstErrMu.Lock()
+				firstErr = errors.Join(firstErr, err)
+				firstErrMu.Unlock()
+				if !protected {
 					cancel()
-				})
+				}
 				continue
 			}
 			succeeded[index] = true

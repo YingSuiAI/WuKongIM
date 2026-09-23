@@ -10,7 +10,7 @@ var (
 	identityRPCRequestMagic    = [...]byte{'W', 'K', 'I', 'Q', 1}
 	identityRPCResponseMagic   = [...]byte{'W', 'K', 'I', 'S', 1}
 	subscriberRPCRequestMagic  = [...]byte{'W', 'K', 'S', 'Q', 1}
-	subscriberRPCResponseMagic = [...]byte{'W', 'K', 'S', 'S', 1}
+	subscriberRPCResponseMagic = [...]byte{'W', 'K', 'S', 'S', 2}
 )
 
 const (
@@ -369,6 +369,7 @@ func encodeSubscriberRPCResponseBinary(resp subscriberRPCResponse) ([]byte, erro
 	dst = runtimeMetaAppendBool(dst, resp.Done)
 	dst = runtimeMetaAppendBool(dst, resp.Contains)
 	dst = runtimeMetaAppendBool(dst, resp.HasAny)
+	dst = runtimeMetaAppendUvarint(dst, resp.Generation)
 	return dst, nil
 }
 
@@ -398,6 +399,9 @@ func decodeSubscriberRPCResponseBinary(body []byte) (subscriberRPCResponse, erro
 		return subscriberRPCResponse{}, err
 	}
 	if resp.HasAny, offset, err = runtimeMetaReadBool(body, offset); err != nil {
+		return subscriberRPCResponse{}, err
+	}
+	if resp.Generation, offset, err = runtimeMetaReadUvarint(body, offset); err != nil {
 		return subscriberRPCResponse{}, err
 	}
 	if offset != len(body) {

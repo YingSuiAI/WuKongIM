@@ -136,6 +136,8 @@ type SubscriberMutationUpdate struct {
 	SubscriberMutationVersion uint64
 	// Reset reports that AddedUIDs replaces the cached snapshot instead of patching it.
 	Reset bool
+	// Invalidate forces the next fanout to reload the authoritative subscriber set.
+	Invalidate bool
 	// AddedUIDs are subscribers appended by this mutation.
 	AddedUIDs []string
 	// RemovedUIDs are subscribers removed by this mutation.

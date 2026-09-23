@@ -75,6 +75,9 @@ func (s *channelState) enqueuePrepared(items []preparedSend) {
 }
 
 func (s *channelState) refreshRecipientMetadata(target AuthorityTarget) {
+	if target.SubscriberMutationVersion < s.target.SubscriberMutationVersion {
+		return
+	}
 	if s.target.Large != target.Large || s.target.SubscriberMutationVersion != target.SubscriberMutationVersion {
 		s.subscriberCache = subscriberCache{}
 	}
@@ -102,9 +105,23 @@ func (s *channelState) refreshTargetMetadata(target AuthorityTarget) {
 }
 
 func (s *channelState) applySubscriberMutation(update SubscriberMutationUpdate) {
+	if update.SubscriberMutationVersion < s.target.SubscriberMutationVersion ||
+		(s.subscriberCache.ready && update.SubscriberMutationVersion < s.subscriberCache.mutationVersion) {
+		return
+	}
+	previousVersion := s.target.SubscriberMutationVersion
 	s.target.Large = update.Large
 	s.target.SubscriberMutationVersion = update.SubscriberMutationVersion
 	if update.Large {
+		s.subscriberCache = subscriberCache{}
+		return
+	}
+	if update.Invalidate {
+		s.subscriberCache = subscriberCache{}
+		return
+	}
+	if !update.Reset && update.SubscriberMutationVersion > previousVersion && update.SubscriberMutationVersion-previousVersion > 1 {
+		// A missing mutation means a delta cannot produce a complete snapshot.
 		s.subscriberCache = subscriberCache{}
 		return
 	}
