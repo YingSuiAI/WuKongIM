@@ -25,7 +25,7 @@ func (o channelAppendSubscriberMutationObserver) ObserveSubscriberMutation(ctx c
 		Type: event.ChannelType,
 	}
 	if o.app.channelAppendMetadata != nil {
-		o.app.channelAppendMetadata.Store(channelID, clusterChannelAppendMetadata(event))
+		o.app.channelAppendMetadata.StoreIfSubscriberVersionAtLeast(channelID, clusterChannelAppendMetadata(event))
 	}
 	if o.app.channelAppends == nil {
 		return
@@ -40,6 +40,7 @@ func (o channelAppendSubscriberMutationObserver) ObserveSubscriberMutation(ctx c
 		Large:                     event.Large,
 		SubscriberMutationVersion: event.SubscriberMutationVersion,
 		Reset:                     event.Reset,
+		Invalidate:                event.Invalidate,
 		AddedUIDs:                 append([]string(nil), event.AddedUIDs...),
 		RemovedUIDs:               append([]string(nil), event.RemovedUIDs...),
 	})

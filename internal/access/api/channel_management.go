@@ -55,28 +55,42 @@ func (s *Server) registerChannelRoutes() {
 	if s == nil || s.engine == nil {
 		return
 	}
-	s.engine.POST("/channel", s.handleChannelUpsert)
+	s.engine.POST("/channel", s.requireConfiguredChannelMutationToken, s.handleChannelUpsert)
 	s.engine.POST("/channel/committed-head", s.requireServiceToken, s.handleChannelCommittedHead)
 	s.engine.POST("/channel/committed-message", s.requireServiceToken, s.handleChannelCommittedMessage)
 	s.engine.POST("/channel/committed-messages", s.requireServiceToken, s.handleChannelCommittedMessages)
 	s.engine.POST("/channel/message-payload-correction", s.requireServiceToken, s.handleMessagePayloadCorrection)
 	s.engine.POST("/channel/committed-message-claim", s.requireServiceToken, s.handleCommittedMessageClaim)
-	s.engine.POST("/channel/info", s.handleChannelInfo)
-	s.engine.POST("/channel/delete", s.handleChannelDelete)
-	s.engine.POST("/channel/subscriber_add", s.handleChannelSubscriberAdd)
+	s.engine.POST("/channel/info", s.requireConfiguredChannelMutationToken, s.handleChannelInfo)
+	s.engine.POST("/channel/delete", s.requireConfiguredChannelMutationToken, s.handleChannelDelete)
+	s.engine.POST("/channel/subscriber_add", s.requireConfiguredChannelMutationToken, s.handleChannelSubscriberAdd)
 	s.engine.POST("/channel/subscriber_check", s.requireServiceToken, s.handleChannelSubscriberCheck)
-	s.engine.POST("/channel/subscriber_remove", s.handleChannelSubscriberRemove)
-	s.engine.POST("/channel/subscriber_remove_all", s.handleChannelSubscriberRemoveAll)
-	s.engine.POST("/tmpchannel/subscriber_set", s.handleTmpChannelSubscriberSet)
-	s.engine.POST("/channel/blacklist_add", s.handleChannelDenylistAdd)
-	s.engine.POST("/channel/blacklist_set", s.handleChannelDenylistSet)
-	s.engine.POST("/channel/blacklist_remove", s.handleChannelDenylistRemove)
-	s.engine.POST("/channel/blacklist_remove_all", s.handleChannelDenylistRemoveAll)
-	s.engine.POST("/channel/whitelist_add", s.handleChannelAllowlistAdd)
-	s.engine.POST("/channel/whitelist_set", s.handleChannelAllowlistSet)
-	s.engine.POST("/channel/whitelist_remove", s.handleChannelAllowlistRemove)
-	s.engine.POST("/channel/whitelist_remove_all", s.handleChannelAllowlistRemoveAll)
+	s.engine.POST("/channel/subscriber_rejoin", s.requireServiceToken, s.handleChannelServiceRejoin)
+	s.engine.POST("/channel/subscriber_rejoin_check", s.requireServiceToken, s.handleChannelServiceRejoinCheck)
+	s.engine.POST("/channel/subscriber_remove", s.requireConfiguredChannelMutationToken, s.handleChannelSubscriberRemove)
+	s.engine.POST("/channel/subscriber_remove_all", s.requireConfiguredChannelMutationToken, s.handleChannelSubscriberRemoveAll)
+	s.engine.POST("/tmpchannel/subscriber_set", s.requireConfiguredChannelMutationToken, s.handleTmpChannelSubscriberSet)
+	s.engine.POST("/channel/blacklist_add", s.requireConfiguredChannelMutationToken, s.handleChannelDenylistAdd)
+	s.engine.POST("/channel/blacklist_set", s.requireConfiguredChannelMutationToken, s.handleChannelDenylistSet)
+	s.engine.POST("/channel/blacklist_remove", s.requireConfiguredChannelMutationToken, s.handleChannelDenylistRemove)
+	s.engine.POST("/channel/blacklist_remove_all", s.requireConfiguredChannelMutationToken, s.handleChannelDenylistRemoveAll)
+	s.engine.POST("/channel/whitelist_add", s.requireConfiguredChannelMutationToken, s.handleChannelAllowlistAdd)
+	s.engine.POST("/channel/whitelist_set", s.requireConfiguredChannelMutationToken, s.handleChannelAllowlistSet)
+	s.engine.POST("/channel/whitelist_remove", s.requireConfiguredChannelMutationToken, s.handleChannelAllowlistRemove)
+	s.engine.POST("/channel/whitelist_remove_all", s.requireConfiguredChannelMutationToken, s.handleChannelAllowlistRemoveAll)
 	s.engine.GET("/channel/whitelist", s.handleChannelAllowlistGet)
+}
+
+// Existing standalone deployments can leave ServiceToken unconfigured. When
+// configured, ordinary Channel mutation routes must share the same service
+// boundary as subscriber_rejoin; otherwise an unauthenticated legacy add can
+// revive realtime fanout before Platform's epoch authority has reconciled.
+func (s *Server) requireConfiguredChannelMutationToken(c *gin.Context) {
+	if s.serviceToken == "" {
+		c.Next()
+		return
+	}
+	s.requireServiceToken(c)
 }
 
 func (s *Server) handleChannelUpsert(c *gin.Context) {

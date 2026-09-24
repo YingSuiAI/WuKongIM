@@ -41,14 +41,37 @@ func (c *ChannelAppendMetadataCache) Lookup(id channelappend.ChannelID) (Channel
 	return metadata, ok
 }
 
-// Store records recipient fanout metadata for a channel.
+// Store records recipient fanout metadata without replacing a newer
+// subscriber snapshot with a stale channel write or delayed read.
 func (c *ChannelAppendMetadataCache) Store(id channelappend.ChannelID, metadata ChannelAppendMetadata) {
 	if c == nil {
 		return
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if current, ok := c.entries[id]; ok && metadata.SubscriberMutationVersion < current.SubscriberMutationVersion {
+		return
+	}
 	c.entries[id] = metadata
+}
+
+// StoreIfSubscriberVersionAtLeast applies an observer's recipient metadata
+// only when its committed subscriber version has not been superseded. The
+// observer does not own directory projection state, so preserve that field.
+func (c *ChannelAppendMetadataCache) StoreIfSubscriberVersionAtLeast(id channelappend.ChannelID, metadata ChannelAppendMetadata) bool {
+	if c == nil {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if current, ok := c.entries[id]; ok {
+		if metadata.SubscriberMutationVersion < current.SubscriberMutationVersion {
+			return false
+		}
+		metadata.DirectoryProjectionState = current.DirectoryProjectionState
+	}
+	c.entries[id] = metadata
+	return true
 }
 
 // Generation returns the current logical cache generation. A caller that is
@@ -72,6 +95,9 @@ func (c *ChannelAppendMetadataCache) StoreIfGeneration(id channelappend.ChannelI
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.generation != generation {
+		return false
+	}
+	if current, ok := c.entries[id]; ok && metadata.SubscriberMutationVersion < current.SubscriberMutationVersion {
 		return false
 	}
 	c.entries[id] = metadata

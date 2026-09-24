@@ -2,6 +2,7 @@ package meta
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 
 	"github.com/WuKongIM/WuKongIM/pkg/db/internal/commit"
@@ -55,7 +56,7 @@ type batchCommitState struct {
 	tableCreates     map[string]struct{}
 	runtimeMeta      map[string]runtimeMetaOverlay
 	migrationTasks   map[string]migrationTaskOverlay
-	subscriberRows   map[string]bool
+	subscriberRows   map[string]subscriberRowOverlay
 	channelPublishes map[string]Channel
 	channelDeletes   map[string]struct{}
 }
@@ -63,6 +64,11 @@ type batchCommitState struct {
 type tableRowOverlay struct {
 	value  []byte
 	exists bool
+}
+
+type subscriberRowOverlay struct {
+	exists     bool
+	generation uint64
 }
 
 type runtimeMetaOverlay struct {
@@ -128,7 +134,13 @@ func (b *Batch) UpsertChannel(hashSlot HashSlot, channel Channel) error {
 		}
 		if err == nil && exists {
 			next.SubscriberCount = existing.SubscriberCount
+			if existing.Disband != 0 {
+				next.Disband = 1
+			}
 			if existing.SubscriberMutationVersion > next.SubscriberMutationVersion {
+				// A subscriber mutation may have refreshed the derived fanout
+				// mode after the caller read its Channel snapshot.
+				next.Large = existing.Large
 				next.SubscriberMutationVersion = existing.SubscriberMutationVersion
 			}
 			if existing.DirectoryProjectionState > next.DirectoryProjectionState {
@@ -354,7 +366,7 @@ func (b *Batch) Commit(ctx context.Context) error {
 		tableCreates:     make(map[string]struct{}),
 		runtimeMeta:      make(map[string]runtimeMetaOverlay),
 		migrationTasks:   make(map[string]migrationTaskOverlay),
-		subscriberRows:   make(map[string]bool),
+		subscriberRows:   make(map[string]subscriberRowOverlay),
 		channelPublishes: make(map[string]Channel),
 		channelDeletes:   make(map[string]struct{}),
 	}
@@ -437,11 +449,28 @@ func (state *batchCommitState) loadChannel(ctx context.Context, key []byte, chan
 }
 
 func (state *batchCommitState) loadSubscriberExists(key []byte) (bool, error) {
-	if exists, ok := state.subscriberRows[string(key)]; ok {
-		return exists, nil
+	if row, ok := state.subscriberRows[string(key)]; ok {
+		return row.exists, nil
 	}
 	_, exists, err := state.db.get(key)
 	return exists, err
+}
+
+func (state *batchCommitState) loadSubscriberGeneration(key []byte) (uint64, bool, error) {
+	if row, ok := state.subscriberRows[string(key)]; ok {
+		return row.generation, row.exists, nil
+	}
+	value, exists, err := state.db.get(key)
+	if err != nil || !exists {
+		return 0, exists, err
+	}
+	if len(value) == 0 { // Legacy subscriber rows had no value.
+		return 0, true, nil
+	}
+	if len(value) != 8 {
+		return 0, false, ErrCorruptValue
+	}
+	return binary.BigEndian.Uint64(value), true, nil
 }
 
 func (state *batchCommitState) loadChannelMigrationTask(ctx context.Context, hashSlot HashSlot, key []byte, channelID string, channelType int64, taskID string) (ChannelMigrationTask, bool, error) {

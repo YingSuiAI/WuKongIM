@@ -116,6 +116,26 @@ func (s *Store) PatchChannelBusinessFlags(ctx context.Context, channelID string,
 	return nil
 }
 
+// RefreshChannelLarge derives Large from the latest durable subscriber count
+// in the Channel Slot and returns the complete committed Channel row.
+func (s *Store) RefreshChannelLarge(ctx context.Context, channelID string, channelType int64, threshold uint64) (metadb.Channel, error) {
+	slotID := s.cluster.SlotForKey(channelID)
+	hashSlot := hashSlotForKey(s.cluster, channelID)
+	data, err := proposeWithHashSlotResult(ctx, s.cluster, slotID, hashSlot,
+		metafsm.EncodeRefreshChannelLargeCommand(channelID, channelType, threshold))
+	if err != nil {
+		return metadb.Channel{}, err
+	}
+	result, err := metafsm.DecodeChannelLargeRefreshResult(data)
+	if err != nil {
+		return metadb.Channel{}, err
+	}
+	if !result.Found {
+		return metadb.Channel{}, metadb.ErrNotFound
+	}
+	return result.Channel, nil
+}
+
 func (s *Store) DeleteChannel(ctx context.Context, channelID string, channelType int64) error {
 	slotID := s.cluster.SlotForKey(channelID)
 	hashSlot := hashSlotForKey(s.cluster, channelID)
@@ -161,6 +181,22 @@ func (s *Store) AddChannelSubscribersCounted(ctx context.Context, channelID stri
 	return s.mutateChannelSubscribersCounted(ctx, channelID, channelType, uids, true, subscriberMutationVersion...)
 }
 
+// AddChannelSubscribersForRejoinCounted writes a new per-UID generation even
+// if a stale Channel subscriber row already exists.
+func (s *Store) AddChannelSubscribersForRejoinCounted(ctx context.Context, channelID string, channelType int64, uids []string, mutationVersion uint64) (metadb.SubscriberMutationResult, error) {
+	slotID := s.cluster.SlotForKey(channelID)
+	hashSlot := hashSlotForKey(s.cluster, channelID)
+	cmd, err := metafsm.EncodeAddSubscribersForRejoinCommandChecked(channelID, channelType, uids, mutationVersion)
+	if err != nil {
+		return metadb.SubscriberMutationResult{}, err
+	}
+	resultBytes, err := proposeWithHashSlotResult(ctx, s.cluster, slotID, hashSlot, cmd)
+	if err != nil {
+		return metadb.SubscriberMutationResult{}, err
+	}
+	return metafsm.DecodeSubscriberMutationResult(resultBytes)
+}
+
 func (s *Store) RemoveChannelSubscribers(ctx context.Context, channelID string, channelType int64, uids []string, subscriberMutationVersion ...uint64) error {
 	slotID := s.cluster.SlotForKey(channelID)
 	hashSlot := hashSlotForKey(s.cluster, channelID)
@@ -174,6 +210,30 @@ func (s *Store) RemoveChannelSubscribers(ctx context.Context, channelID string, 
 // RemoveChannelSubscribersCounted removes a UID set and returns the exact committed row count.
 func (s *Store) RemoveChannelSubscribersCounted(ctx context.Context, channelID string, channelType int64, uids []string, subscriberMutationVersion ...uint64) (metadb.SubscriberMutationResult, error) {
 	return s.mutateChannelSubscribersCounted(ctx, channelID, channelType, uids, false, subscriberMutationVersion...)
+}
+
+// RemoveChannelSubscribersIfVersion compensates only subscriber rows last
+// added by the named generation. Other members can advance the Channel version.
+func (s *Store) RemoveChannelSubscribersIfVersion(ctx context.Context, channelID string, channelType int64, uids []string, expectedVersion uint64) (metadb.SubscriberMutationResult, error) {
+	slotID := s.cluster.SlotForKey(channelID)
+	hashSlot := hashSlotForKey(s.cluster, channelID)
+	cmd, err := metafsm.EncodeRemoveSubscribersIfVersionCommandChecked(channelID, channelType, uids, expectedVersion)
+	if err != nil {
+		return metadb.SubscriberMutationResult{}, err
+	}
+	resultBytes, err := proposeWithHashSlotResult(ctx, s.cluster, slotID, hashSlot, cmd)
+	if err != nil {
+		return metadb.SubscriberMutationResult{}, err
+	}
+	if string(resultBytes) == metafsm.ApplyResultSubscriberVersionConflict {
+		return metadb.SubscriberMutationResult{}, metadb.ErrStaleMeta
+	}
+	result, err := metafsm.DecodeSubscriberMutationResult(resultBytes)
+	if err != nil {
+		return metadb.SubscriberMutationResult{}, err
+	}
+	result.Applied = true
+	return result, nil
 }
 
 func (s *Store) mutateChannelSubscribersCounted(ctx context.Context, channelID string, channelType int64, uids []string, add bool, subscriberMutationVersion ...uint64) (metadb.SubscriberMutationResult, error) {

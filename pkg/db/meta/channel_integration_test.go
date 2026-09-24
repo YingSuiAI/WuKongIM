@@ -333,6 +333,64 @@ func TestChannelUpsertsCannotRollBackSubscriberMutationVersion(t *testing.T) {
 	}
 }
 
+func TestStaleChannelUpsertCannotRollBackRefreshedLarge(t *testing.T) {
+	store := openTestMetaStore(t)
+	defer store.close(t)
+	ctx := context.Background()
+	shard := store.db.HashSlot(45)
+	channel := Channel{ChannelID: "large-version-guard", ChannelType: 2, Ban: 1}
+	if err := shard.CreateChannel(ctx, channel); err != nil {
+		t.Fatal(err)
+	}
+	stale, ok, err := shard.GetChannel(ctx, channel.ChannelID, channel.ChannelType)
+	if err != nil || !ok {
+		t.Fatalf("GetChannel stale snapshot: ok=%v err=%v", ok, err)
+	}
+	if err := shard.AddSubscribers(ctx, channel.ChannelID, channel.ChannelType, []string{"u1", "u2"}, 7); err != nil {
+		t.Fatal(err)
+	}
+	batch := (&DB{meta: store.db, engine: store.engine}).NewWriteBatch()
+	if _, err := batch.RefreshChannelLarge(45, channel.ChannelID, channel.ChannelType, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := batch.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	batch.Close()
+	stale.SendBan = 1
+	if err := shard.UpsertChannel(ctx, stale); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := shard.GetChannel(ctx, channel.ChannelID, channel.ChannelType)
+	if err != nil || !ok || got.Large != 1 || got.SubscriberMutationVersion != 7 || got.SendBan != 1 {
+		t.Fatalf("stale direct upsert rewrote Large: got=%+v ok=%v err=%v", got, ok, err)
+	}
+	stale.Large = 0
+	stale.Ban = 0
+	batch = (&DB{meta: store.db, engine: store.engine}).NewWriteBatch()
+	if err := batch.UpsertChannel(45, stale); err != nil {
+		t.Fatal(err)
+	}
+	if err := batch.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	batch.Close()
+	got, ok, err = shard.GetChannel(ctx, channel.ChannelID, channel.ChannelType)
+	if err != nil || !ok || got.Large != 1 || got.SubscriberMutationVersion != 7 || got.Ban != 0 {
+		t.Fatalf("stale batch upsert rewrote Large: got=%+v ok=%v err=%v", got, ok, err)
+	}
+	// An upsert based on the current version retains the public explicit
+	// Large flag behavior.
+	got.Large = 0
+	if err := shard.UpsertChannel(ctx, got); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err = shard.GetChannel(ctx, channel.ChannelID, channel.ChannelType)
+	if err != nil || !ok || got.Large != 0 {
+		t.Fatalf("current-version Large update failed: got=%+v ok=%v err=%v", got, ok, err)
+	}
+}
+
 func TestChannelDeleteRemovesOrphanIDIndex(t *testing.T) {
 	store := openTestMetaStore(t)
 	defer store.close(t)

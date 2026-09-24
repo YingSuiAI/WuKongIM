@@ -15,15 +15,19 @@ func (a *App) CheckChannelSubscribers(ctx context.Context, channelID string, cha
 	ready := make([]string, 0, len(uids))
 	missing := make([]string, 0, len(uids))
 	candidates := make([]channelmembers.LiveMembership, 0, len(uids))
+	uidRows := make([]struct {
+		found     bool
+		tombstone bool
+	}, 0, len(uids))
 	for _, uid := range uids {
 		membership, ok, err := a.memberships.GetUserChannelMembership(ctx, uid, channelID, int64(channelType))
 		if err != nil {
 			return nil, nil, err
 		}
-		if !ok || membership.Tombstone {
-			missing = append(missing, uid)
-			continue
-		}
+		uidRows = append(uidRows, struct {
+			found     bool
+			tombstone bool
+		}{found: ok, tombstone: membership.Tombstone})
 		candidates = append(candidates, channelmembers.LiveMembership{
 			UID: uid, ChannelID: channelID, ChannelType: int64(channelType), SourceVersion: membership.SourceVersion,
 		})
@@ -37,12 +41,17 @@ func (a *App) CheckChannelSubscribers(ctx context.Context, channelID string, cha
 		if fact.Err != nil {
 			return nil, nil, fact.Err
 		}
-		if fact.ChannelFound && fact.Subscriber && !fact.Disband {
+		channelLive := fact.ChannelFound && fact.Subscriber && !fact.Disband
+		uidLive := uidRows[index].found && !uidRows[index].tombstone
+		if channelLive && uidLive {
 			ready = append(ready, candidate.UID)
 			continue
 		}
-		if fact.SubscriberMutationVersion > candidate.SourceVersion {
-			_ = a.membershipAuthority.TombstoneRevokedMembership(ctx, candidate, fact.SubscriberMutationVersion, a.now().UnixNano())
+		if channelLive || uidLive || fact.Subscriber || !uidRows[index].found {
+			// Removal is proven only by a Channel-owned absent subscriber and
+			// a durable UID tombstone. A missing UID row leaves strict rejoin
+			// without an epoch predecessor; retry Remove to create the marker.
+			return nil, nil, ErrSubscriberMembershipSplit
 		}
 		missing = append(missing, candidate.UID)
 	}

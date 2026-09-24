@@ -238,6 +238,14 @@ func (n *Node) PatchChannelBusinessFlags(ctx context.Context, channelID string, 
 	return n.defaultSlotProxy.PatchChannelBusinessFlags(ctx, channelID, channelType, flags)
 }
 
+// RefreshChannelLarge computes the flag in the Channel Slot from its current count.
+func (n *Node) RefreshChannelLarge(ctx context.Context, channelID string, channelType int64, threshold uint64) (metadb.Channel, error) {
+	if n == nil || n.defaultSlotProxy == nil {
+		return metadb.Channel{}, ErrNotStarted
+	}
+	return n.defaultSlotProxy.RefreshChannelLarge(ctx, channelID, channelType, threshold)
+}
+
 // ListChannelSubscribersAuthoritative reads one subscriber page from the current Slot leader.
 func (n *Node) ListChannelSubscribersAuthoritative(ctx context.Context, channelID string, channelType int64, afterUID string, limit int) ([]string, string, bool, error) {
 	if n == nil || n.defaultSlotProxy == nil {
@@ -252,6 +260,14 @@ func (n *Node) ContainsChannelSubscriberAuthoritative(ctx context.Context, chann
 		return false, ErrNotStarted
 	}
 	return n.defaultSlotProxy.ContainsChannelSubscriber(ctx, channelID, channelType, uid)
+}
+
+// SubscriberGenerationAuthoritative reads one Channel-owned UID Add version.
+func (n *Node) SubscriberGenerationAuthoritative(ctx context.Context, channelID string, channelType int64, uid string) (uint64, bool, error) {
+	if n == nil || n.defaultSlotProxy == nil {
+		return 0, false, ErrNotStarted
+	}
+	return n.defaultSlotProxy.SubscriberGeneration(ctx, channelID, channelType, uid)
 }
 
 // HasChannelSubscribersAuthoritative checks set non-emptiness on the Slot leader.
@@ -283,12 +299,28 @@ func (n *Node) AddChannelSubscribersCounted(ctx context.Context, channelID strin
 	return n.defaultSlotProxy.AddChannelSubscribersCounted(ctx, channelID, channelType, uids, mutationVersion)
 }
 
+// AddChannelSubscribersForRejoinCounted establishes a trusted UID generation.
+func (n *Node) AddChannelSubscribersForRejoinCounted(ctx context.Context, channelID string, channelType int64, uids []string, mutationVersion uint64) (metadb.SubscriberMutationResult, error) {
+	if n == nil || n.defaultSlotProxy == nil {
+		return metadb.SubscriberMutationResult{}, ErrNotStarted
+	}
+	return n.defaultSlotProxy.AddChannelSubscribersForRejoinCounted(ctx, channelID, channelType, uids, mutationVersion)
+}
+
 // RemoveChannelSubscribersCounted applies a set removal and returns its durable change count.
 func (n *Node) RemoveChannelSubscribersCounted(ctx context.Context, channelID string, channelType int64, uids []string, mutationVersion uint64) (metadb.SubscriberMutationResult, error) {
 	if n == nil || n.defaultSlotProxy == nil {
 		return metadb.SubscriberMutationResult{}, ErrNotStarted
 	}
 	return n.defaultSlotProxy.RemoveChannelSubscribersCounted(ctx, channelID, channelType, uids, mutationVersion)
+}
+
+// RemoveChannelSubscribersIfVersion compensates only rows from one add generation.
+func (n *Node) RemoveChannelSubscribersIfVersion(ctx context.Context, channelID string, channelType int64, uids []string, expectedVersion uint64) (metadb.SubscriberMutationResult, error) {
+	if n == nil || n.defaultSlotProxy == nil {
+		return metadb.SubscriberMutationResult{}, ErrNotStarted
+	}
+	return n.defaultSlotProxy.RemoveChannelSubscribersIfVersion(ctx, channelID, channelType, uids, expectedVersion)
 }
 
 // ProposeLocalWithHashSlot submits only when this node is the current Slot leader.

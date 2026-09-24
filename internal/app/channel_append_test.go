@@ -28,3 +28,22 @@ func TestChannelAppendSubscriberMutationObserverRefreshesMetadataCache(t *testin
 		t.Fatalf("metadata cache = %#v ok=%v, want large version 7", metadata, ok)
 	}
 }
+
+func TestChannelAppendSubscriberMutationObserverKeepsNewerRejoinVersion(t *testing.T) {
+	cache := clusterinfra.NewChannelAppendMetadataCache()
+	observer := channelAppendSubscriberMutationObserver{app: &App{channelAppendMetadata: cache}}
+	key := channelusecase.ChannelKey{ChannelID: "g1", ChannelType: 2}
+	observer.ObserveSubscriberMutation(context.Background(), channelusecase.SubscriberMutationEvent{
+		ChannelKey: key, SubscriberMutationVersion: 11, Invalidate: true,
+	})
+	observer.ObserveSubscriberMutation(context.Background(), channelusecase.SubscriberMutationEvent{
+		ChannelKey: key, SubscriberMutationVersion: 12, AddedUIDs: []string{"u2"},
+	})
+	observer.ObserveSubscriberMutation(context.Background(), channelusecase.SubscriberMutationEvent{
+		ChannelKey: key, SubscriberMutationVersion: 11, Invalidate: true, Large: true,
+	})
+	got, ok := cache.Lookup(channelappend.ChannelID{ID: "g1", Type: 2})
+	if !ok || got.SubscriberMutationVersion != 12 || got.Large {
+		t.Fatalf("late invalidation regressed metadata: %+v ok=%v", got, ok)
+	}
+}

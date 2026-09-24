@@ -5,6 +5,7 @@ package meta
 import (
 	"bytes"
 	"context"
+	"errors"
 	"testing"
 )
 
@@ -194,6 +195,169 @@ func TestWriteBatchSubscriberMutationsReportExactChangedCount(t *testing.T) {
 	}
 	if removeResult.RequestedCount != 2 || removeResult.ChangedCount != 1 || removeResult.Version != 3 {
 		t.Fatalf("remove result = %#v, want requested=2 changed=1 version=3", removeResult)
+	}
+}
+
+func TestConditionalSubscriberCompensationCannotRemoveNewerRejoin(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	shard := db.ForHashSlot(5)
+	const channelID = "conditional-rejoin"
+	if err := shard.CreateChannel(ctx, Channel{ChannelID: channelID, ChannelType: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if err := shard.AddSubscribers(ctx, channelID, 2, []string{"u1"}, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := shard.AddSubscribers(ctx, channelID, 2, []string{"u1"}, 2); err != nil {
+		t.Fatal(err)
+	}
+	if generation, found, err := shard.SubscriberGeneration(ctx, channelID, 2, "u1"); err != nil || !found || generation != 1 {
+		t.Fatalf("repeated ordinary Add rewrote existing generation: generation=%d found=%t err=%v", generation, found, err)
+	}
+	// An unrelated member advances the Channel version, but u1 still belongs
+	// to add generation 1 and can be compensated safely.
+	if err := shard.AddSubscribers(ctx, channelID, 2, []string{"u2"}, 3); err != nil {
+		t.Fatal(err)
+	}
+	unrelated := db.NewWriteBatch()
+	unrelatedResult, err := unrelated.RemoveSubscribersIfVersion(5, channelID, 2, []string{"u1"}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := unrelated.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	unrelated.Close()
+	if !unrelatedResult.Applied || unrelatedResult.Version != 4 {
+		t.Fatalf("unrelated version blocked compensation: %+v", unrelatedResult)
+	}
+	u2, err := shard.ContainsSubscriber(ctx, channelID, 2, "u2")
+	if err != nil || !u2 {
+		t.Fatalf("unrelated member removed: member=%t err=%v", u2, err)
+	}
+	// A later strict rejoin force-writes generation 5 before generation 1's
+	// delayed compensation runs.
+	rejoin := db.NewWriteBatch()
+	_, err = rejoin.AddSubscribersCountedForceGeneration(5, channelID, 2, []string{"u1"}, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rejoin.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	rejoin.Close()
+	stale := db.NewWriteBatch()
+	staleResult, err := stale.RemoveSubscribersIfVersion(5, channelID, 2, []string{"u1"}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stale.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	stale.Close()
+	if staleResult.Applied {
+		t.Fatalf("stale compensation applied: %+v", staleResult)
+	}
+	member, err := shard.ContainsSubscriber(ctx, channelID, 2, "u1")
+	if err != nil || !member {
+		t.Fatalf("newer rejoin was removed: member=%t err=%v", member, err)
+	}
+	current := db.NewWriteBatch()
+	currentResult, err := current.RemoveSubscribersIfVersion(5, channelID, 2, []string{"u1"}, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := current.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	current.Close()
+	if !currentResult.Applied || currentResult.Version != 6 {
+		t.Fatalf("current compensation result: %+v", currentResult)
+	}
+	member, err = shard.ContainsSubscriber(ctx, channelID, 2, "u1")
+	if err != nil || member {
+		t.Fatalf("current compensation did not remove: member=%t err=%v", member, err)
+	}
+	invalid := db.NewWriteBatch()
+	defer invalid.Close()
+	if _, err := invalid.RemoveSubscribersIfVersion(5, channelID, 2, []string{"u1"}, ^uint64(0)); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("max version error=%v", err)
+	}
+}
+
+func TestConditionalSubscriberCompensationHandlesLegacyNilGeneration(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	shard := db.ForHashSlot(5)
+	seedLegacy := func(channelID string) {
+		t.Helper()
+		if err := shard.CreateChannel(ctx, Channel{ChannelID: channelID, ChannelType: 2, SubscriberCount: 1, SubscriberMutationVersion: 1}); err != nil {
+			t.Fatal(err)
+		}
+		key, err := subscriberRowKey(5, channelID, 2, "u1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		batch := shard.db.engine.NewBatch()
+		defer batch.Close()
+		if err := batch.Set(key, nil); err != nil {
+			t.Fatal(err)
+		}
+		if err := batch.Commit(true); err != nil {
+			t.Fatal(err)
+		}
+		generation, found, err := shard.SubscriberGeneration(ctx, channelID, 2, "u1")
+		if err != nil || !found || generation != 0 {
+			t.Fatalf("legacy generation=%d found=%t err=%v", generation, found, err)
+		}
+	}
+	seedLegacy("legacy-compensate")
+	remove := db.NewWriteBatch()
+	result, err := remove.RemoveSubscribersIfVersion(5, "legacy-compensate", 2, []string{"u1"}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := remove.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	remove.Close()
+	if !result.Applied || result.ChangedCount != 1 {
+		t.Fatalf("legacy compensation result=%+v", result)
+	}
+	seedLegacy("legacy-rejoined")
+	rejoin := db.NewWriteBatch()
+	_, err = rejoin.AddSubscribersCountedForceGeneration(5, "legacy-rejoined", 2, []string{"u1"}, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rejoin.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	rejoin.Close()
+	stale := db.NewWriteBatch()
+	staleResult, err := stale.RemoveSubscribersIfVersion(5, "legacy-rejoined", 2, []string{"u1"}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stale.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	stale.Close()
+	if staleResult.Applied {
+		t.Fatalf("legacy compensation removed newer generation: %+v", staleResult)
+	}
+	generation, found, err := shard.SubscriberGeneration(ctx, "legacy-rejoined", 2, "u1")
+	if err != nil || !found || generation != 2 {
+		t.Fatalf("new generation=%d found=%t err=%v", generation, found, err)
 	}
 }
 

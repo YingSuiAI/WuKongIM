@@ -333,6 +333,7 @@ func (s *Shard) writeChannel(ctx context.Context, channel Channel, mode tableWri
 		if err == nil {
 			channel.SubscriberCount = existing.SubscriberCount
 			if existing.SubscriberMutationVersion > channel.SubscriberMutationVersion {
+				channel.Large = existing.Large
 				channel.SubscriberMutationVersion = existing.SubscriberMutationVersion
 			}
 			if existing.Disband != 0 {

@@ -151,6 +151,43 @@ func TestSyncChannelMessagesRequiresLiveMembershipAndClampsVisibilityFloor(t *te
 	}
 }
 
+func TestSyncChannelMessagesUsesRejoinFloorAfterLateRemoval(t *testing.T) {
+	reader := &recordingChannelMessageReader{}
+	memberships := &recordingSyncMembershipStore{row: metadb.UserChannelMembership{
+		UID: "u1", ChannelID: "g1", ChannelType: 2,
+		Tombstone: true, JoinSeq: 11, DeletedToSeq: 30, SourceVersion: 4,
+	}, ok: true}
+	app := New(Options{Reader: reader, Memberships: memberships, MembershipAuthority: allowLiveMembershipAuthority()})
+	query := SyncChannelMessagesQuery{LoginUID: "u1", ChannelID: "g1", ChannelType: 2, StartMessageSeq: 1, PullMode: PullModeUp}
+	if _, err := app.SyncChannelMessages(context.Background(), query); !errors.Is(err, ErrSyncMembershipRequired) {
+		t.Fatalf("removed member read error=%v", err)
+	}
+	if len(reader.queries) != 0 {
+		t.Fatalf("removed member reached history reader: %+v", reader.queries)
+	}
+	// Platform's joined sequence is 50. The new epoch hides the removed
+	// interval through 50 while allowing messages committed after rejoin.
+	memberships.row = metadb.UserChannelMembership{
+		UID: "u1", ChannelID: "g1", ChannelType: 2,
+		JoinSeq: 51, DeletedToSeq: 50, SourceVersion: 5, PlatformMembershipEpoch: 3,
+	}
+	if _, err := app.SyncChannelMessages(context.Background(), query); err != nil {
+		t.Fatalf("rejoined member history error=%v", err)
+	}
+	if len(reader.queries) != 1 || reader.queries[0].StartSeq != 51 || reader.queries[0].MinSeq != 51 {
+		t.Fatalf("rejoined read queries=%+v, want visibility from 51", reader.queries)
+	}
+	// A later explicit Hide/Clear remains effective even when the member
+	// rejoins again; rejoin must never lower this user-owned visibility floor.
+	memberships.row.DeletedToSeq = 90
+	if _, err := app.SyncChannelMessages(context.Background(), query); err != nil {
+		t.Fatalf("hidden rejoined member history error=%v", err)
+	}
+	if len(reader.queries) != 2 || reader.queries[1].StartSeq != 91 || reader.queries[1].MinSeq != 91 {
+		t.Fatalf("user hidden floor was lowered: %+v", reader.queries)
+	}
+}
+
 func TestSyncChannelMessagesRequiresMembershipStore(t *testing.T) {
 	app := New(Options{Reader: &recordingChannelMessageReader{}})
 

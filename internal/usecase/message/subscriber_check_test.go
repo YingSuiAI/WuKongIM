@@ -22,20 +22,41 @@ func (s subscriberCheckMemberships) GetUserChannelMembership(_ context.Context, 
 func TestCheckChannelSubscribersUsesHistoryMembershipFacts(t *testing.T) {
 	authority := &recordingLiveMembershipAuthority{results: []channelmembers.LiveMembershipAuthorityResult{
 		{ChannelFound: true, Subscriber: true, SubscriberMutationVersion: 12},
+		{ChannelFound: true, Subscriber: false, SubscriberMutationVersion: 11},
 		{ChannelFound: true, Subscriber: false, SubscriberMutationVersion: 13},
 	}}
 	app := New(Options{Memberships: subscriberCheckMemberships{rows: map[string]metadb.UserChannelMembership{
 		"ready": {SourceVersion: 12}, "revoked": {SourceVersion: 12}, "removed": {Tombstone: true, SourceVersion: 11},
 	}}, MembershipAuthority: authority})
 	ready, missing, err := app.CheckChannelSubscribers(context.Background(), "group", 2, []string{"ready", "removed", "revoked"})
-	if err != nil || !reflect.DeepEqual(ready, []string{"ready"}) || !reflect.DeepEqual(missing, []string{"removed", "revoked"}) {
+	if !errors.Is(err, ErrSubscriberMembershipSplit) || len(ready) != 0 || len(missing) != 0 {
 		t.Fatalf("ready=%#v missing=%#v err=%v", ready, missing, err)
 	}
-	if len(authority.tombstones) != 1 || authority.tombstones[0].membership.UID != "revoked" || authority.tombstones[0].version != 13 {
-		t.Fatalf("tombstones=%#v, want stale UID projection repaired", authority.tombstones)
+	if len(authority.candidates) != 1 || len(authority.candidates[0]) != 3 {
+		t.Fatalf("authority candidates=%#v, want all UIDs", authority.candidates)
 	}
-	if len(authority.candidates) != 1 || len(authority.candidates[0]) != 2 {
-		t.Fatalf("authority candidates=%#v, want live UIDs only", authority.candidates)
+}
+
+func TestCheckChannelSubscribersRequiresBothFactsForRemoval(t *testing.T) {
+	rows := subscriberCheckMemberships{rows: map[string]metadb.UserChannelMembership{"u1": {UID: "u1", Tombstone: false, SourceVersion: 4}}}
+	authority := &recordingLiveMembershipAuthority{results: []channelmembers.LiveMembershipAuthorityResult{{ChannelFound: true, Subscriber: false, SubscriberMutationVersion: 5}}}
+	app := New(Options{Memberships: rows, MembershipAuthority: authority})
+	delete(rows.rows, "u1")
+	if ready, missing, err := app.CheckChannelSubscribers(context.Background(), "group", 2, []string{"u1"}); !errors.Is(err, ErrSubscriberMembershipSplit) || len(ready) != 0 || len(missing) != 0 {
+		t.Fatalf("Channel and UID absent before durable removal ready=%v missing=%v err=%v", ready, missing, err)
+	}
+	rows.rows["u1"] = metadb.UserChannelMembership{UID: "u1", Tombstone: false, SourceVersion: 4}
+	if ready, missing, err := app.CheckChannelSubscribers(context.Background(), "group", 2, []string{"u1"}); !errors.Is(err, ErrSubscriberMembershipSplit) || len(ready) != 0 || len(missing) != 0 {
+		t.Fatalf("Channel missing / UID live ready=%v missing=%v err=%v", ready, missing, err)
+	}
+	rows.rows["u1"] = metadb.UserChannelMembership{UID: "u1", Tombstone: true, SourceVersion: 5}
+	ready, missing, err := app.CheckChannelSubscribers(context.Background(), "group", 2, []string{"u1"})
+	if err != nil || len(ready) != 0 || !reflect.DeepEqual(missing, []string{"u1"}) {
+		t.Fatalf("both removed ready=%v missing=%v err=%v", ready, missing, err)
+	}
+	authority.results[0].Subscriber = true
+	if ready, missing, err := app.CheckChannelSubscribers(context.Background(), "group", 2, []string{"u1"}); !errors.Is(err, ErrSubscriberMembershipSplit) || len(ready) != 0 || len(missing) != 0 {
+		t.Fatalf("Channel live / UID tombstone ready=%v missing=%v err=%v", ready, missing, err)
 	}
 }
 

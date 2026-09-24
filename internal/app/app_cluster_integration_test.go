@@ -4,15 +4,52 @@ package app
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
+	clusterinfra "github.com/WuKongIM/WuKongIM/internal/infra/cluster"
 	"github.com/WuKongIM/WuKongIM/internal/runtime/channelappend"
+	channelusecase "github.com/WuKongIM/WuKongIM/internal/usecase/channel"
+	messageusecase "github.com/WuKongIM/WuKongIM/internal/usecase/message"
 	channelruntime "github.com/WuKongIM/WuKongIM/pkg/channel"
 	clusterpkg "github.com/WuKongIM/WuKongIM/pkg/cluster"
 	metadb "github.com/WuKongIM/WuKongIM/pkg/db/meta"
+	coregateway "github.com/WuKongIM/WuKongIM/pkg/gateway"
 	"github.com/WuKongIM/WuKongIM/pkg/protocol/frame"
 )
+
+type failOnceRejoinMembershipIndex struct {
+	*clusterinfra.ChannelMetadataStore
+	fail     bool
+	observed []metadb.PlatformMembershipRejoin
+}
+
+func sendThreeNodeGroupPacketAs(t *testing.T, app *App, uid, channelID, clientMsgNo string, clientSeq uint64) *frame.SendackPacket {
+	t.Helper()
+	writes := &sendackSmokeSessionWrites{}
+	sess := newSendackSmokeSession(writes)
+	sess.SetValue(coregateway.SessionValueUID, uid)
+	sess.SetValue(coregateway.SessionValueProtocolVersion, uint8(frame.LatestVersion))
+	packet := &frame.SendPacket{ClientSeq: clientSeq, ClientMsgNo: clientMsgNo, ChannelID: channelID, ChannelType: frame.ChannelTypeGroup, Payload: []byte(clientMsgNo)}
+	if err := app.Handler().OnFrame(coregateway.Context{Session: sess, RequestContext: context.Background()}, packet); err != nil {
+		t.Fatal(err)
+	}
+	ack := writes.requireOnlySendack(t)
+	if ack.ReasonCode != frame.ReasonSuccess {
+		t.Fatalf("send %s reason=%v", clientMsgNo, ack.ReasonCode)
+	}
+	return ack
+}
+
+func (i *failOnceRejoinMembershipIndex) RejoinUserChannelMembership(ctx context.Context, rejoin metadb.PlatformMembershipRejoin) error {
+	i.observed = append(i.observed, rejoin)
+	if i.fail {
+		i.fail = false
+		return errors.New("injected UID Slot failure")
+	}
+	return i.ChannelMetadataStore.RejoinUserChannelMembership(ctx, rejoin)
+}
 
 func TestStaticMultiNodeClusterStartsControllerVoters(t *testing.T) {
 	addrs := []string{freeSendackSmokeTCPAddr(t), freeSendackSmokeTCPAddr(t), freeSendackSmokeTCPAddr(t)}
@@ -192,6 +229,216 @@ func TestThreeNodeSubscriberChunksInvalidateRemoteFanoutSnapshot(t *testing.T) {
 	}
 	if got := page(apps[1], removed.Version); len(got) != 1 || got[0] != "u2" {
 		t.Fatalf("cached remote fanout after removal = %v", got)
+	}
+}
+
+func TestThreeNodeServiceRejoinFailedUIDCompensatesThenRecovers(t *testing.T) {
+	apps, nodes := startThreeNodeAuthApps(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer cancel()
+	const channelID = "group-service-rejoin-three"
+	const uid = "rejoin-u1"
+	const sender = "rejoin-u2"
+	if err := nodes[0].UpsertChannelMetadata(ctx, metadb.Channel{ChannelID: channelID, ChannelType: 2}); err != nil {
+		t.Fatal(err)
+	}
+	member := channelusecase.SubscriberCommand{ChannelID: channelID, ChannelType: 2, Subscribers: []string{uid}}
+	if err := apps[0].channels.AddSubscribers(ctx, channelusecase.SubscriberCommand{ChannelID: channelID, ChannelType: 2, Subscribers: []string{uid, sender}}); err != nil {
+		t.Fatal(err)
+	}
+	remoteRecipients := func() []string {
+		t.Helper()
+		channel, err := nodes[1].GetChannelMetadata(ctx, channelID, 2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		page, err := apps[1].deliveryMeta.NextSubscriberPage(ctx, channelappend.SubscriberPageRequest{
+			ChannelID:                 channelappend.ChannelID{ID: channelID, Type: frame.ChannelTypeGroup},
+			SubscriberMutationVersion: channel.SubscriberMutationVersion, Limit: 10,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		uids := make([]string, 0, len(page.Recipients))
+		for _, recipient := range page.Recipients {
+			uids = append(uids, recipient.UID)
+		}
+		return uids
+	}
+	if got := remoteRecipients(); len(got) != 2 || got[0] != uid || got[1] != sender {
+		t.Fatalf("initial remote fanout=%v", got)
+	}
+	first := sendThreeNodeGroupPacketAs(t, apps[0], uid, channelID, "before-remove", 1)
+	beforeRemove, err := nodes[0].GetChannelMetadataAuthoritative(ctx, channelID, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Simulate the Channel Slot commit succeeding while the UID projection
+	// fails. The first removal read-back must remain pending.
+	if _, err := nodes[0].RemoveChannelSubscribersCounted(ctx, channelID, 2, []string{uid}, beforeRemove.SubscriberMutationVersion+1); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := apps[1].Messages().CheckChannelSubscribers(ctx, channelID, 2, []string{uid}); !errors.Is(err, messageusecase.ErrSubscriberMembershipSplit) {
+		t.Fatalf("split removal readback error=%v", err)
+	}
+	if err := apps[0].channels.RemoveSubscribers(ctx, member); err != nil {
+		t.Fatal(err)
+	}
+	if ready, missing, err := apps[1].Messages().CheckChannelSubscribers(ctx, channelID, 2, []string{uid}); err != nil || len(ready) != 0 || len(missing) != 1 || missing[0] != uid {
+		t.Fatalf("confirmed removal ready=%v missing=%v err=%v", ready, missing, err)
+	}
+	if got := remoteRecipients(); len(got) != 1 || got[0] != sender {
+		t.Fatalf("removed remote fanout=%v", got)
+	}
+	if _, err := apps[1].Messages().SyncChannelMessages(ctx, messageusecase.SyncChannelMessagesQuery{LoginUID: uid, ChannelID: channelID, ChannelType: 2, StartMessageSeq: 1, PullMode: messageusecase.PullModeUp, Limit: 10}); !errors.Is(err, messageusecase.ErrSyncMembershipRequired) {
+		t.Fatalf("removed member remote history error=%v", err)
+	}
+	interval := sendThreeNodeGroupPacketAs(t, apps[0], sender, channelID, "removed-interval", 2)
+	// Platform captures joined_message_sequence at this head, but the
+	// Reconciler may add the subscriber later. This message is authorized for
+	// the new epoch and must be recoverable even though realtime cannot fan out
+	// until the Channel subscriber is restored.
+	delayed := sendThreeNodeGroupPacketAs(t, apps[0], sender, channelID, "after-join-before-add", 3)
+	cmd := channelusecase.ServiceRejoinCommand{ChannelID: channelID, ChannelType: 2, UID: uid, MembershipEpoch: 3, PreviousRemovedMessageSeq: first.MessageSeq, JoinedMessageSeq: interval.MessageSeq, RepairSameEpoch: true}
+	store := clusterinfra.NewChannelMetadataStore(nodes[2], apps[2].ensureChannelAppendMetadataCache(), apps[2].goroutines)
+	faultIndex := &failOnceRejoinMembershipIndex{ChannelMetadataStore: store, fail: true}
+	faulty := channelusecase.New(channelusecase.Options{Store: store, MembershipIndex: faultIndex, CommittedTail: store, SubscriberMutationObserver: channelAppendSubscriberMutationObserver{app: apps[2]}})
+	if _, err := faulty.RejoinSubscriber(ctx, cmd); err == nil {
+		t.Fatal("injected UID failure unexpectedly succeeded")
+	}
+	if got := remoteRecipients(); len(got) != 1 || got[0] != sender {
+		t.Fatalf("failed rejoin left realtime fanout=%v", got)
+	}
+	if row, found, err := nodes[2].GetUserChannelMembership(ctx, uid, channelID, 2); err != nil || !found || !row.Tombstone {
+		t.Fatalf("UID after compensation row=%+v found=%t err=%v", row, found, err)
+	}
+	state, err := faulty.RejoinSubscriber(ctx, cmd)
+	if err != nil || !state.Ready || state.MembershipEpoch != 3 || state.JoinSeq != interval.MessageSeq+1 {
+		t.Fatalf("retry state=%+v err=%v requests=%+v", state, err, faultIndex.observed)
+	}
+	readback, err := apps[1].channels.CheckRejoinSubscriber(ctx, cmd)
+	if err != nil || !readback.Ready || readback.MembershipEpoch != 3 || readback.JoinSeq != interval.MessageSeq+1 {
+		t.Fatalf("remote readback=%+v err=%v", readback, err)
+	}
+	if got := remoteRecipients(); len(got) != 2 || got[0] != uid || got[1] != sender {
+		t.Fatalf("restored remote fanout=%v", got)
+	}
+	after := sendThreeNodeGroupPacketAs(t, apps[0], sender, channelID, "after-rejoin", 4)
+	page, err := apps[1].Messages().SyncChannelMessages(ctx, messageusecase.SyncChannelMessagesQuery{LoginUID: uid, ChannelID: channelID, ChannelType: 2, StartMessageSeq: 1, PullMode: messageusecase.PullModeUp, Limit: 10})
+	if err != nil || len(page.Messages) != 2 || page.Messages[0].MessageSeq != delayed.MessageSeq || page.Messages[1].MessageSeq != after.MessageSeq {
+		t.Fatalf("remote history after rejoin page=%+v err=%v", page, err)
+	}
+	if err := apps[0].channels.RemoveSubscribers(ctx, member); err != nil {
+		t.Fatal(err)
+	}
+	versionBeforeProtected, err := nodes[0].GetChannelMetadataAuthoritative(ctx, channelID, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := apps[0].channels.AddSubscribers(ctx, member); !errors.Is(err, metadb.ErrPlatformMembershipProtected) {
+		t.Fatalf("ordinary add of Platform tombstone error=%v", err)
+	}
+	versionAfterProtected, err := nodes[0].GetChannelMetadataAuthoritative(ctx, channelID, 2)
+	if err != nil || versionAfterProtected.SubscriberMutationVersion <= versionBeforeProtected.SubscriberMutationVersion+1 {
+		t.Fatalf("protected compensation version before=%d after=%d err=%v", versionBeforeProtected.SubscriberMutationVersion, versionAfterProtected.SubscriberMutationVersion, err)
+	}
+	if got := remoteRecipients(); len(got) != 1 || got[0] != sender {
+		t.Fatalf("protected ordinary add left remote fanout=%v", got)
+	}
+	if _, err := apps[1].Messages().SyncChannelMessages(ctx, messageusecase.SyncChannelMessagesQuery{LoginUID: uid, ChannelID: channelID, ChannelType: 2, StartMessageSeq: 1, PullMode: messageusecase.PullModeUp, Limit: 10}); !errors.Is(err, messageusecase.ErrSyncMembershipRequired) {
+		t.Fatalf("protected tombstone history error=%v", err)
+	}
+	state, err = apps[2].channels.RejoinSubscriber(ctx, cmd)
+	if err != nil || !state.Ready || state.MembershipEpoch != 3 {
+		t.Fatalf("same epoch repair after protected ordinary add=%+v err=%v", state, err)
+	}
+	// A completed Platform epoch can later lose only its Channel-owned set
+	// entry while the UID row remains live. The same trusted epoch must repair
+	// that split without rewriting the original visibility floor.
+	channel, err := nodes[0].GetChannelMetadataAuthoritative(ctx, channelID, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := nodes[0].RemoveChannelSubscribersCounted(ctx, channelID, 2, []string{uid}, channel.SubscriberMutationVersion+1); err != nil {
+		t.Fatal(err)
+	}
+	lostChannel, err := nodes[0].GetChannelMetadataAuthoritative(ctx, channelID, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stale, err := apps[1].channels.CheckRejoinSubscriber(ctx, cmd); err != nil || stale.Ready {
+		t.Fatalf("lost Channel member readback=%+v err=%v", stale, err)
+	}
+	state, err = apps[2].channels.RejoinSubscriber(ctx, cmd)
+	if err != nil || !state.Ready || state.MembershipEpoch != 3 || state.JoinSeq != interval.MessageSeq+1 {
+		t.Fatalf("same epoch Channel repair=%+v err=%v", state, err)
+	}
+	// A delayed compensation from the older Channel mutation may reach a
+	// different API node after this rejoin. Its CAS must not revoke the new
+	// generation or invalidate the remote fanout cache.
+	if _, err := store.RemoveChannelSubscribersIfVersion(ctx, channelID, 2, []string{uid}, lostChannel.SubscriberMutationVersion); !errors.Is(err, metadb.ErrStaleMeta) {
+		t.Fatalf("stale compensation error=%v", err)
+	}
+	if got := remoteRecipients(); len(got) != 2 || got[0] != uid || got[1] != sender {
+		t.Fatalf("stale compensation revoked remote fanout=%v", got)
+	}
+	page, err = apps[1].Messages().SyncChannelMessages(ctx, messageusecase.SyncChannelMessagesQuery{LoginUID: uid, ChannelID: channelID, ChannelType: 2, StartMessageSeq: 1, PullMode: messageusecase.PullModeUp, Limit: 10})
+	if err != nil || len(page.Messages) != 2 || page.Messages[0].MessageSeq != delayed.MessageSeq || page.Messages[1].MessageSeq != after.MessageSeq {
+		t.Fatalf("history after same epoch repair page=%+v err=%v", page, err)
+	}
+	if err := apps[0].channels.RemoveSubscribers(ctx, member); err != nil {
+		t.Fatal(err)
+	}
+	base, err := nodes[0].GetChannelMetadataAuthoritative(ctx, channelID, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rogue, err := nodes[0].AddChannelSubscribersCounted(ctx, channelID, 2, []string{uid}, base.SubscriberMutationVersion+1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := nodes[0].AddChannelSubscribersCounted(ctx, channelID, 2, []string{sender}, rogue.Version+1); err != nil {
+		t.Fatal(err)
+	}
+	if result, err := store.RemoveChannelSubscribersIfVersion(ctx, channelID, 2, []string{uid}, rogue.Version); err != nil || !result.Applied {
+		t.Fatalf("unrelated Channel mutation blocked UID compensation: result=%+v err=%v", result, err)
+	}
+	if got := remoteRecipients(); len(got) != 1 || got[0] != sender {
+		t.Fatalf("per-UID compensation left rogue fanout=%v", got)
+	}
+	// An initial Channel Add can commit without ever creating its UID row.
+	// Even after the Channel subscriber is removed, that pair of absent facts
+	// cannot confirm Platform's removal barrier: strict rejoin needs a durable
+	// UID tombstone. The next ordinary Remove must create it.
+	const missingUIDChannel = "group-uid-row-never-projected"
+	const missingUID = "never-projected-u1"
+	if err := nodes[0].UpsertChannelMetadata(ctx, metadb.Channel{ChannelID: missingUIDChannel, ChannelType: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := nodes[0].AddChannelSubscribersCounted(ctx, missingUIDChannel, 2, []string{missingUID}, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := nodes[0].RemoveChannelSubscribersCounted(ctx, missingUIDChannel, 2, []string{missingUID}, 2); err != nil {
+		t.Fatal(err)
+	}
+	if row, found, err := nodes[1].GetUserChannelMembership(ctx, missingUID, missingUIDChannel, 2); err != nil || found {
+		t.Fatalf("initial failed projection row=%+v found=%t err=%v", row, found, err)
+	}
+	if _, _, err := apps[1].Messages().CheckChannelSubscribers(ctx, missingUIDChannel, 2, []string{missingUID}); !errors.Is(err, messageusecase.ErrSubscriberMembershipSplit) {
+		t.Fatalf("absent UID removal readback error=%v", err)
+	}
+	if err := apps[0].channels.RemoveSubscribers(ctx, channelusecase.SubscriberCommand{ChannelID: missingUIDChannel, ChannelType: 2, Subscribers: []string{missingUID}}); err != nil {
+		t.Fatal(err)
+	}
+	if row, found, err := nodes[1].GetUserChannelMembership(ctx, missingUID, missingUIDChannel, 2); err != nil || !found || !row.Tombstone {
+		t.Fatalf("retry Remove did not create tombstone row=%+v found=%t err=%v", row, found, err)
+	}
+	if ready, missing, err := apps[1].Messages().CheckChannelSubscribers(ctx, missingUIDChannel, 2, []string{missingUID}); err != nil || len(ready) != 0 || len(missing) != 1 || missing[0] != missingUID {
+		t.Fatalf("durable removal ready=%v missing=%v err=%v", ready, missing, err)
+	}
+	missingCmd := channelusecase.ServiceRejoinCommand{ChannelID: missingUIDChannel, ChannelType: 2, UID: missingUID, MembershipEpoch: 2}
+	if state, err := apps[2].channels.RejoinSubscriber(ctx, missingCmd); err != nil || !state.Ready || state.MembershipEpoch != 2 || state.JoinSeq != 1 {
+		t.Fatalf("rejoin after retrying absent UID removal state=%+v err=%v", state, err)
 	}
 }
 

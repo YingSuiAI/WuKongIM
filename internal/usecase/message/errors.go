@@ -19,6 +19,9 @@ var (
 	ErrMessageReaderRequired = errors.New("internal/message: message reader required")
 	// ErrSyncMembershipRequired rejects pulls without a live UID membership.
 	ErrSyncMembershipRequired = errors.New("internal/message: valid channel membership required")
+	// ErrSubscriberMembershipSplit prevents reconciliation from treating one
+	// missing Slot fact as a completed removal or a completed add.
+	ErrSubscriberMembershipSplit = errors.New("internal/message: channel and UID membership disagree")
 	// ErrSyncChannelDisbanded rejects pulls from a terminal channel identity.
 	ErrSyncChannelDisbanded = errors.New("internal/message: channel disbanded")
 	// ErrSyncBatchItemsRequired reports an empty batch message-pull request.

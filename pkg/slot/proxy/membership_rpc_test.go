@@ -16,7 +16,7 @@ func TestStoreReadsUIDMembershipDirectoryFromAuthoritativeRemoteSlot(t *testing.
 	ordinary := metadb.UserChannelMembership{
 		UID: uid, ChannelID: "g1", ChannelType: 2,
 		JoinSeq: 4, ReadSeq: 5, DeletedToSeq: 6, ActivatedAt: 7,
-		SourceVersion: 8, UpdatedAt: 9,
+		SourceVersion: 8, PlatformMembershipEpoch: 3, UpdatedAt: 9,
 	}
 	command := metadb.UserCMDChannelMembership{
 		UID: uid, CommandChannelID: "g1@cmd", ChannelType: 2,
@@ -50,6 +50,23 @@ func TestStoreReadsUIDMembershipDirectoryFromAuthoritativeRemoteSlot(t *testing.
 	require.Equal(t, metadb.UserCMDChannelMembershipCursor{
 		CommandChannelID: command.CommandChannelID, ChannelType: command.ChannelType,
 	}, cmdCursor)
+}
+
+func TestMembershipRPCResponseV2PreservesPlatformEpochAndDecodesLegacyEmptyResponse(t *testing.T) {
+	row := metadb.UserChannelMembership{UID: "u1", ChannelID: "g1", ChannelType: 2, JoinSeq: 51, SourceVersion: 8, PlatformMembershipEpoch: 3}
+	body, err := encodeMembershipRPCResponse(membershipRPCResponse{Status: rpcStatusOK, Membership: &row, Memberships: []metadb.UserChannelMembership{row}})
+	require.NoError(t, err)
+	decoded, err := decodeMembershipRPCResponse(body)
+	require.NoError(t, err)
+	require.Equal(t, row, *decoded.Membership)
+	require.Equal(t, []metadb.UserChannelMembership{row}, decoded.Memberships)
+
+	legacy, err := encodeMembershipRPCResponse(membershipRPCResponse{Status: rpcStatusOK})
+	require.NoError(t, err)
+	copy(legacy[:len(membershipRPCResponseMagicV1)], membershipRPCResponseMagicV1[:])
+	decoded, err = decodeMembershipRPCResponse(legacy)
+	require.NoError(t, err)
+	require.Nil(t, decoded.Membership)
 }
 
 func TestMembershipRPCRejectsUIDBoundToDifferentSlot(t *testing.T) {

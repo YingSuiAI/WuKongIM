@@ -28,6 +28,7 @@ type subscriberRPCResponse struct {
 	NextCursor string   `json:"next_cursor,omitempty"`
 	Done       bool     `json:"done"`
 	Contains   bool     `json:"contains,omitempty"`
+	Generation uint64   `json:"generation,omitempty"`
 	HasAny     bool     `json:"has_any,omitempty"`
 }
 
@@ -83,6 +84,28 @@ func (s *Store) SnapshotChannelSubscribers(ctx context.Context, channelID string
 func (s *Store) ContainsChannelSubscriber(ctx context.Context, channelID string, channelType int64, uid string) (bool, error) {
 	slotID := s.cluster.SlotForKey(channelID)
 	return s.containsChannelSubscriberAuthoritative(ctx, slotID, channelID, channelType, uid)
+}
+
+// SubscriberGeneration reads the last Add generation from the authoritative
+// Channel Slot. It is used to check that UID and Channel facts belong to the
+// same rejoin attempt.
+func (s *Store) SubscriberGeneration(ctx context.Context, channelID string, channelType int64, uid string) (uint64, bool, error) {
+	slotID := s.cluster.SlotForKey(channelID)
+	hashSlot := hashSlotForKey(s.cluster, channelID)
+	if s.shouldServeSlotLocally(slotID) {
+		if err := s.confirmCurrentSlotRead(ctx, slotID); err != nil {
+			return 0, false, err
+		}
+		return s.db.ForHashSlot(hashSlot).SubscriberGeneration(ctx, channelID, channelType, uid)
+	}
+	resp, err := s.callSubscriberRPC(ctx, slotID, subscriberRPCRequest{
+		SlotID: uint64(slotID), HashSlot: hashSlot, ChannelID: channelID,
+		ChannelType: channelType, ContainsUID: uid,
+	})
+	if err != nil {
+		return 0, false, err
+	}
+	return resp.Generation, resp.Contains, nil
 }
 
 // HasChannelSubscribers reads subscriber-set non-emptiness from the authoritative slot owner.
@@ -167,13 +190,14 @@ func (s *Store) handleSubscriberRPC(ctx context.Context, body []byte) ([]byte, e
 		if err := s.confirmCurrentSlotRead(ctx, slotID); err != nil {
 			return nil, err
 		}
-		ok, err := s.db.ForHashSlot(hashSlot).ContainsSubscriber(ctx, req.ChannelID, req.ChannelType, req.ContainsUID)
+		generation, ok, err := s.db.ForHashSlot(hashSlot).SubscriberGeneration(ctx, req.ChannelID, req.ChannelType, req.ContainsUID)
 		if err != nil {
 			return nil, err
 		}
 		return encodeSubscriberRPCResponse(subscriberRPCResponse{
-			Status:   rpcStatusOK,
-			Contains: ok,
+			Status:     rpcStatusOK,
+			Contains:   ok,
+			Generation: generation,
 		})
 	}
 	if req.HasAny {

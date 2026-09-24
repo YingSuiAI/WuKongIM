@@ -286,12 +286,17 @@ func TestSubscriberMutationsRefreshLargeGroupFlag(t *testing.T) {
 		t.Fatalf("RemoveSubscribers() error = %v", err)
 	}
 
-	want := []metadb.Channel{
-		{ChannelID: "g1", ChannelType: 2, Large: 1, SubscriberMutationVersion: 1, SubscriberCount: 4},
-		{ChannelID: "g2", ChannelType: 2, SubscriberMutationVersion: 1, SubscriberCount: 3},
+	want := map[string]metadb.Channel{
+		recordingChannelKey("g1", 2): {ChannelID: "g1", ChannelType: 2, Large: 1, SubscriberMutationVersion: 1, SubscriberCount: 4},
+		recordingChannelKey("g2", 2): {ChannelID: "g2", ChannelType: 2, SubscriberMutationVersion: 1, SubscriberCount: 3},
 	}
-	if got := store.upsertChannels; !equalChannels(got, want) {
-		t.Fatalf("upserted channels = %#v, want %#v", got, want)
+	for key, expected := range want {
+		if got := store.channels[key]; got != expected {
+			t.Fatalf("refreshed channel %s = %#v, want %#v", key, got, expected)
+		}
+	}
+	if len(store.upsertChannels) != 0 {
+		t.Fatalf("refresh performed an unfenced channel upsert: %#v", store.upsertChannels)
 	}
 }
 
@@ -333,15 +338,15 @@ func TestSubscriberMutationsNotifyObserverWithFinalMetadata(t *testing.T) {
 	}
 	add := observer.events[0]
 	if add.ChannelID != "g1" || add.ChannelType != 2 || !add.Large ||
-		add.SubscriberMutationVersion != 1 || add.Reset ||
-		!equalStrings(add.AddedUIDs, []string{"u1", "u2"}) || len(add.RemovedUIDs) != 0 {
-		t.Fatalf("add event = %#v, want final large metadata and added subscribers", add)
+		add.SubscriberMutationVersion != 1 || !add.Invalidate || add.Reset ||
+		len(add.AddedUIDs) != 0 || len(add.RemovedUIDs) != 0 {
+		t.Fatalf("add event = %#v, want versioned authoritative reload", add)
 	}
 	remove := observer.events[1]
 	if remove.ChannelID != "g1" || remove.ChannelType != 2 || remove.Large ||
-		remove.SubscriberMutationVersion != 2 || remove.Reset ||
-		!equalStrings(remove.RemovedUIDs, []string{"u1"}) || len(remove.AddedUIDs) != 0 {
-		t.Fatalf("remove event = %#v, want final non-large metadata and removed subscribers", remove)
+		remove.SubscriberMutationVersion != 2 || !remove.Invalidate || remove.Reset ||
+		len(remove.RemovedUIDs) != 0 || len(remove.AddedUIDs) != 0 {
+		t.Fatalf("remove event = %#v, want versioned authoritative reload", remove)
 	}
 }
 
@@ -584,17 +589,18 @@ func TestMutateSubscribersCountedMaintainsReverseProjection(t *testing.T) {
 }
 
 type recordingStore struct {
-	upsertChannels      []metadb.Channel
-	deleteChannels      []channelKeyCall
-	addSubscribers      []subscriberCall
-	removeSubscribers   []subscriberCall
-	listSubscribers     []listSubscribersCall
-	listPages           []listPage
-	channels            map[string]metadb.Channel
-	getChannelErr       error
-	countedAddResult    metadb.SubscriberMutationResult
-	countedRemoveResult metadb.SubscriberMutationResult
-	strictChannelLookup bool
+	upsertChannels        []metadb.Channel
+	deleteChannels        []channelKeyCall
+	addSubscribers        []subscriberCall
+	removeSubscribers     []subscriberCall
+	listSubscribers       []listSubscribersCall
+	listPages             []listPage
+	channels              map[string]metadb.Channel
+	getChannelErr         error
+	countedAddResult      metadb.SubscriberMutationResult
+	countedRemoveResult   metadb.SubscriberMutationResult
+	strictChannelLookup   bool
+	subscriberGenerations map[string]uint64
 }
 
 type legacyCountedStore struct{ *recordingStore }
@@ -794,6 +800,26 @@ func (r *recordingStore) RemoveChannelSubscribersCounted(_ context.Context, chan
 	return r.countedRemoveResult, nil
 }
 
+func (r *recordingStore) RemoveChannelSubscribersIfVersion(ctx context.Context, channelID string, channelType int64, uids []string, expectedVersion uint64) (metadb.SubscriberMutationResult, error) {
+	matched := make([]string, 0, len(uids))
+	for _, uid := range uids {
+		generation, found, err := r.SubscriberGeneration(ctx, channelID, channelType, uid)
+		if err != nil {
+			return metadb.SubscriberMutationResult{}, err
+		}
+		if found && generation == expectedVersion {
+			matched = append(matched, uid)
+		}
+	}
+	if len(matched) == 0 {
+		return metadb.SubscriberMutationResult{}, metadb.ErrStaleMeta
+	}
+	current := r.channels[recordingChannelKey(channelID, channelType)].SubscriberMutationVersion
+	result, err := r.RemoveChannelSubscribersCounted(ctx, channelID, channelType, matched, current+1)
+	result.Applied = err == nil
+	return result, err
+}
+
 func (r *recordingStore) ListChannelSubscribers(_ context.Context, channelID string, channelType int64, afterUID string, limit int) ([]string, string, bool, error) {
 	r.listSubscribers = append(r.listSubscribers, listSubscribersCall{channelID: channelID, channelType: channelType, afterUID: afterUID, limit: limit})
 	if len(r.listPages) == 0 {
@@ -806,6 +832,20 @@ func (r *recordingStore) ListChannelSubscribers(_ context.Context, channelID str
 
 func (r *recordingStore) ContainsChannelSubscriber(context.Context, string, int64, string) (bool, error) {
 	return false, nil
+}
+
+func (r *recordingStore) SubscriberGeneration(_ context.Context, _ string, _ int64, uid string) (uint64, bool, error) {
+	if generation, ok := r.subscriberGenerations[uid]; ok {
+		return generation, true, nil
+	}
+	for i := len(r.addSubscribers) - 1; i >= 0; i-- {
+		for _, candidate := range r.addSubscribers[i].uids {
+			if candidate == uid {
+				return r.addSubscribers[i].version, true, nil
+			}
+		}
+	}
+	return 0, false, nil
 }
 
 func (r *recordingStore) HasChannelSubscribers(context.Context, string, int64) (bool, error) {
@@ -825,6 +865,22 @@ func (r *recordingStore) GetChannel(_ context.Context, channelID string, channel
 		return metadb.Channel{}, metadb.ErrNotFound
 	}
 	return metadb.Channel{ChannelID: channelID, ChannelType: channelType}, nil
+}
+
+func (r *recordingStore) RefreshChannelLarge(ctx context.Context, channelID string, channelType int64, threshold uint64) (metadb.Channel, error) {
+	ch, err := r.GetChannel(ctx, channelID, channelType)
+	if err != nil {
+		return metadb.Channel{}, err
+	}
+	if ch.SubscriberCount > threshold {
+		ch.Large = 1
+	} else {
+		ch.Large = 0
+	}
+	if r.channels != nil {
+		r.channels[recordingChannelKey(channelID, channelType)] = ch
+	}
+	return ch, nil
 }
 
 func (r *recordingStore) recordSubscriberMutationVersion(channelID string, channelType int64, version uint64) {

@@ -185,12 +185,14 @@ func TestChannelMetadataStoreRefreshesAppendMetadataCache(t *testing.T) {
 		Large:                     1,
 		SubscriberMutationVersion: 7,
 	}
+	// A concurrent subscriber commit can make the caller's Channel stale
+	// before its Slot upsert responds. Never repopulate the cache from ch.
+	cache.Store(channelappend.ChannelID{ID: "g1", Type: 2}, ChannelAppendMetadata{Large: false, SubscriberMutationVersion: 8})
 	if err := store.UpsertChannel(context.Background(), channel); err != nil {
 		t.Fatalf("UpsertChannel() error = %v", err)
 	}
-	metadata, ok := cache.Lookup(channelappend.ChannelID{ID: "g1", Type: 2})
-	if !ok || !metadata.Large || metadata.SubscriberMutationVersion != 7 {
-		t.Fatalf("metadata cache = %#v ok=%v, want large version 7", metadata, ok)
+	if metadata, ok := cache.Lookup(channelappend.ChannelID{ID: "g1", Type: 2}); ok {
+		t.Fatalf("unverified upsert snapshot entered metadata cache: %#v", metadata)
 	}
 
 	if err := store.DeleteChannel(context.Background(), "g1", 2); err != nil {

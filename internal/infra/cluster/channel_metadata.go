@@ -34,6 +34,10 @@ type authoritativeChannelMetadataNode interface {
 	HasChannelSubscribersAuthoritative(context.Context, string, int64) (bool, error)
 }
 
+type authoritativeSubscriberGenerationNode interface {
+	SubscriberGenerationAuthoritative(context.Context, string, int64, string) (uint64, bool, error)
+}
+
 // AuthoritativePermissionBatchNode exposes Slot-grouped permission fact reads.
 type AuthoritativePermissionBatchNode interface {
 	ReadPermissionMetadataBatchAuthoritative(context.Context, []slotproxy.PermissionMetadataRead) []slotproxy.PermissionMetadataReadResult
@@ -44,9 +48,21 @@ type countedChannelSubscriberMutationNode interface {
 	RemoveChannelSubscribersCounted(context.Context, string, int64, []string, uint64) (metadb.SubscriberMutationResult, error)
 }
 
+type conditionalSubscriberRemovalNode interface {
+	RemoveChannelSubscribersIfVersion(context.Context, string, int64, []string, uint64) (metadb.SubscriberMutationResult, error)
+}
+
+type trustedSubscriberRejoinNode interface {
+	AddChannelSubscribersForRejoinCounted(context.Context, string, int64, []string, uint64) (metadb.SubscriberMutationResult, error)
+}
+
 type conditionalChannelMetadataNode interface {
 	CreateChannelMetadataStrict(context.Context, metadb.Channel) error
 	PatchChannelBusinessFlags(context.Context, string, int64, metadb.ChannelBusinessFlags) error
+}
+
+type largeChannelRefreshNode interface {
+	RefreshChannelLarge(context.Context, string, int64, uint64) (metadb.Channel, error)
 }
 
 type restoreChannelSubscriberNode interface {
@@ -57,6 +73,11 @@ type restoreChannelSubscriberNode interface {
 type ChannelMembershipNode interface {
 	UpsertUserChannelMemberships(context.Context, string, int64, []string, uint64, uint64, int64) error
 	TombstoneUserChannelMemberships(context.Context, string, int64, []string, uint64, int64) error
+}
+
+type serviceRejoinMembershipNode interface {
+	GetUserChannelMembership(context.Context, string, string, int64) (metadb.UserChannelMembership, bool, error)
+	RejoinUserChannelMembership(context.Context, metadb.PlatformMembershipRejoin) error
 }
 
 type committedChannelTailNode interface {
@@ -138,7 +159,9 @@ func (s *ChannelMetadataStore) UpsertChannel(ctx context.Context, ch metadb.Chan
 	if err := s.node.UpsertChannelMetadata(ctx, ch); err != nil {
 		return err
 	}
-	s.appendMetadataCache.storeChannel(ch)
+	// The Slot reducer may merge a newer subscriber version/count into this
+	// upsert. The caller's snapshot is not the committed Channel row.
+	s.appendMetadataCache.Delete(channelappend.ChannelID{ID: ch.ChannelID, Type: uint8(ch.ChannelType)})
 	return nil
 }
 
@@ -154,7 +177,8 @@ func (s *ChannelMetadataStore) CreateChannelStrict(ctx context.Context, ch metad
 	if err := node.CreateChannelMetadataStrict(ctx, ch); err != nil {
 		return err
 	}
-	s.appendMetadataCache.storeChannel(ch)
+	// Another subscriber mutation may commit before this create returns.
+	s.appendMetadataCache.Delete(channelappend.ChannelID{ID: ch.ChannelID, Type: uint8(ch.ChannelType)})
 	return nil
 }
 
@@ -172,6 +196,28 @@ func (s *ChannelMetadataStore) PatchChannelBusinessFlags(ctx context.Context, ch
 	}
 	s.appendMetadataCache.Delete(channelappend.ChannelID{ID: channelID, Type: uint8(channelType)})
 	return nil
+}
+
+// RefreshChannelLarge atomically refreshes Large in the Channel Slot and
+// returns the committed Channel row, including current business flags.
+func (s *ChannelMetadataStore) RefreshChannelLarge(ctx context.Context, channelID string, channelType int64, threshold uint64) (metadb.Channel, error) {
+	if s == nil || s.node == nil {
+		return metadb.Channel{}, metadb.ErrNotFound
+	}
+	node, ok := s.node.(largeChannelRefreshNode)
+	if !ok {
+		return metadb.Channel{}, metadb.ErrInvalidArgument
+	}
+	channel, err := node.RefreshChannelLarge(ctx, channelID, channelType, threshold)
+	if err != nil {
+		return metadb.Channel{}, err
+	}
+	// A concurrent Manager patch may already follow the refresh. Drop the
+	// process-local copy instead of storing a potentially stale full row.
+	if s.appendMetadataCache != nil {
+		s.appendMetadataCache.Delete(channelappend.ChannelID{ID: channelID, Type: uint8(channelType)})
+	}
+	return channel, nil
 }
 
 // DeleteChannel removes channel metadata through Slot ownership.
@@ -214,6 +260,18 @@ func (s *ChannelMetadataStore) AddChannelSubscribersCounted(ctx context.Context,
 	return node.AddChannelSubscribersCounted(ctx, channelID, channelType, append([]string(nil), uids...), firstSubscriberMutationVersion(subscriberMutationVersion))
 }
 
+// AddChannelSubscribersForRejoinCounted forwards the trusted rejoin mutation.
+func (s *ChannelMetadataStore) AddChannelSubscribersForRejoinCounted(ctx context.Context, channelID string, channelType int64, uids []string, mutationVersion uint64) (metadb.SubscriberMutationResult, error) {
+	if s == nil || s.node == nil {
+		return metadb.SubscriberMutationResult{}, metadb.ErrNotFound
+	}
+	node, ok := s.node.(trustedSubscriberRejoinNode)
+	if !ok {
+		return metadb.SubscriberMutationResult{}, metadb.ErrInvalidArgument
+	}
+	return node.AddChannelSubscribersForRejoinCounted(ctx, channelID, channelType, append([]string(nil), uids...), mutationVersion)
+}
+
 // RemoveChannelSubscribersCounted removes subscribers and returns the exact durable set changes.
 func (s *ChannelMetadataStore) RemoveChannelSubscribersCounted(ctx context.Context, channelID string, channelType int64, uids []string, subscriberMutationVersion ...uint64) (metadb.SubscriberMutationResult, error) {
 	if s == nil || s.node == nil {
@@ -224,6 +282,19 @@ func (s *ChannelMetadataStore) RemoveChannelSubscribersCounted(ctx context.Conte
 		return metadb.SubscriberMutationResult{}, metadb.ErrInvalidArgument
 	}
 	return node.RemoveChannelSubscribersCounted(ctx, channelID, channelType, append([]string(nil), uids...), firstSubscriberMutationVersion(subscriberMutationVersion))
+}
+
+// RemoveChannelSubscribersIfVersion forwards the compensation CAS to the
+// authoritative Channel Slot; a node without the capability fails closed.
+func (s *ChannelMetadataStore) RemoveChannelSubscribersIfVersion(ctx context.Context, channelID string, channelType int64, uids []string, expectedVersion uint64) (metadb.SubscriberMutationResult, error) {
+	if s == nil || s.node == nil {
+		return metadb.SubscriberMutationResult{}, metadb.ErrNotFound
+	}
+	node, ok := s.node.(conditionalSubscriberRemovalNode)
+	if !ok {
+		return metadb.SubscriberMutationResult{}, metadb.ErrInvalidArgument
+	}
+	return node.RemoveChannelSubscribersIfVersion(ctx, channelID, channelType, append([]string(nil), uids...), expectedVersion)
 }
 
 // ListChannelSubscribers reads one channel subscriber page from the authoritative Slot leader.
@@ -271,6 +342,19 @@ func (s *ChannelMetadataStore) ContainsChannelSubscriber(ctx context.Context, ch
 		ctx, channelID, channelType, uid,
 	)
 	return contains, mapChannelPermissionReadError(err)
+}
+
+// SubscriberGeneration reads the per-UID Channel Add generation from its Slot leader.
+func (s *ChannelMetadataStore) SubscriberGeneration(ctx context.Context, channelID string, channelType int64, uid string) (uint64, bool, error) {
+	if s == nil || s.node == nil {
+		return 0, false, mapChannelPermissionReadError(clusterpkg.ErrRouteNotReady)
+	}
+	node, ok := s.node.(authoritativeSubscriberGenerationNode)
+	if !ok {
+		return 0, false, mapChannelPermissionReadError(clusterpkg.ErrRouteNotReady)
+	}
+	generation, found, err := node.SubscriberGenerationAuthoritative(ctx, channelID, channelType, uid)
+	return generation, found, mapChannelPermissionReadError(err)
 }
 
 // HasChannelSubscribers reports whether the channel has at least one subscriber row.
@@ -442,6 +526,30 @@ func (s *ChannelMetadataStore) TombstoneChannelMemberships(ctx context.Context, 
 		return metadb.ErrNotFound
 	}
 	return s.membershipNode.TombstoneUserChannelMemberships(ctx, channelID, channelType, append([]string(nil), uids...), sourceVersion, updatedAt)
+}
+
+// GetUserChannelMembership reads one UID row from its authoritative Slot.
+func (s *ChannelMetadataStore) GetUserChannelMembership(ctx context.Context, uid, channelID string, channelType int64) (metadb.UserChannelMembership, bool, error) {
+	if s == nil {
+		return metadb.UserChannelMembership{}, false, clusterpkg.ErrRouteNotReady
+	}
+	node, ok := s.membershipNode.(serviceRejoinMembershipNode)
+	if !ok {
+		return metadb.UserChannelMembership{}, false, clusterpkg.ErrRouteNotReady
+	}
+	return node.GetUserChannelMembership(ctx, uid, channelID, channelType)
+}
+
+// RejoinUserChannelMembership delegates a guarded Platform epoch to the UID Slot.
+func (s *ChannelMetadataStore) RejoinUserChannelMembership(ctx context.Context, rejoin metadb.PlatformMembershipRejoin) error {
+	if s == nil {
+		return clusterpkg.ErrRouteNotReady
+	}
+	node, ok := s.membershipNode.(serviceRejoinMembershipNode)
+	if !ok {
+		return clusterpkg.ErrRouteNotReady
+	}
+	return node.RejoinUserChannelMembership(ctx, rejoin)
 }
 
 // CommittedChannelTail captures the channel boundary used to initialize a
