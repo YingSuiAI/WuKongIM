@@ -65,6 +65,7 @@ func (s *Server) registerChannelRoutes() {
 	s.engine.POST("/channel/delete", s.requireConfiguredChannelMutationToken, s.handleChannelDelete)
 	s.engine.POST("/channel/subscriber_add", s.requireConfiguredChannelMutationToken, s.handleChannelSubscriberAdd)
 	s.engine.POST("/channel/subscriber_check", s.requireServiceToken, s.handleChannelSubscriberCheck)
+	s.engine.POST("/channel/blacklist_check", s.requireServiceToken, s.handleChannelBlacklistCheck)
 	s.engine.POST("/channel/subscriber_rejoin", s.requireServiceToken, s.handleChannelServiceRejoin)
 	s.engine.POST("/channel/subscriber_rejoin_check", s.requireServiceToken, s.handleChannelServiceRejoinCheck)
 	s.engine.POST("/channel/subscriber_remove", s.requireConfiguredChannelMutationToken, s.handleChannelSubscriberRemove)
