@@ -291,8 +291,8 @@ type MessageConfig struct {
 	// SystemDeviceID identifies trusted gateway sessions that bypass channel-type-specific
 	// send permissions after sender SendBan has passed.
 	SystemDeviceID string
-	// PermissionCacheTTL enables a bounded read-through cache for permission channel,
-	// membership, and missing-channel reads. Zero keeps permission reads uncached.
+	// PermissionCacheTTL is a legacy accepted setting. SEND authorization always
+	// reads current authority facts; cached membership could outlive a ban or removal.
 	PermissionCacheTTL time.Duration
 }
 

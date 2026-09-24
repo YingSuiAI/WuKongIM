@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"testing"
 
 	metadb "github.com/WuKongIM/WuKongIM/pkg/db/meta"
@@ -36,6 +37,80 @@ func TestUpsertResetsSubscribersBeforeAddingReplacement(t *testing.T) {
 	if got, want := store.addSubscribers, []subscriberCall{{channelID: "g1", channelType: 2, uids: []string{"u1", "u2"}, version: 2}}; !equalSubscriberCalls(got, want) {
 		t.Fatalf("added subscribers = %#v, want %#v", got, want)
 	}
+}
+
+func TestSetDenylistAddsBeforeRemovingOldDeniedMembers(t *testing.T) {
+	store := &denylistOrderStore{recordingStore: &recordingStore{listPages: []listPage{
+		{uids: []string{"old", "keep", "new"}, cursor: "new", done: true},
+	}}}
+	app := New(Options{Store: store, SubscriberPageLimit: 2})
+	if err := app.SetDenylist(context.Background(), MemberCommand{
+		ChannelKey: ChannelKey{ChannelID: "g1", ChannelType: 2}, UIDs: []string{"keep", "new"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := store.calls, []string{"add:keep,new", "remove:old"}; !equalStrings(got, want) {
+		t.Fatalf("denylist mutation order = %#v, want %#v", got, want)
+	}
+	if len(store.listSubscribers) != 1 || store.listSubscribers[0].limit != 2 {
+		t.Fatalf("denylist cleanup was not page bounded: %#v", store.listSubscribers)
+	}
+}
+
+func TestSetDenylistAddFailurePreservesExistingDeniedMembers(t *testing.T) {
+	store := &denylistOrderStore{recordingStore: &recordingStore{listPages: []listPage{
+		{uids: []string{"old"}, cursor: "old", done: true},
+	}}, failAdd: true}
+	app := New(Options{Store: store})
+	if err := app.SetDenylist(context.Background(), MemberCommand{
+		ChannelKey: ChannelKey{ChannelID: "g1", ChannelType: 2}, UIDs: []string{"new"},
+	}); err == nil {
+		t.Fatal("SetDenylist() succeeded despite add failure")
+	}
+	if len(store.removeSubscribers) != 0 || len(store.listSubscribers) != 0 {
+		t.Fatalf("existing denylist removed before desired entries were added: remove=%#v list=%#v", store.removeSubscribers, store.listSubscribers)
+	}
+}
+
+func TestSetDenylistCleanupFailureKeepsNewDeniedMembers(t *testing.T) {
+	store := &denylistOrderStore{recordingStore: &recordingStore{listPages: []listPage{
+		{uids: []string{"old", "new"}, cursor: "new", done: true},
+	}}, failRemove: true}
+	app := New(Options{Store: store})
+	if err := app.SetDenylist(context.Background(), MemberCommand{
+		ChannelKey: ChannelKey{ChannelID: "g1", ChannelType: 2}, UIDs: []string{"new"},
+	}); err == nil {
+		t.Fatal("SetDenylist() succeeded despite cleanup failure")
+	}
+	if got, want := store.calls, []string{"add:new", "remove:old"}; !equalStrings(got, want) {
+		t.Fatalf("denylist failure order = %#v, want %#v", got, want)
+	}
+	if len(store.addSubscribers) != 1 || len(store.removeSubscribers) != 0 {
+		t.Fatalf("new denial did not precede failed cleanup: add=%#v remove=%#v", store.addSubscribers, store.removeSubscribers)
+	}
+}
+
+type denylistOrderStore struct {
+	*recordingStore
+	calls      []string
+	failAdd    bool
+	failRemove bool
+}
+
+func (s *denylistOrderStore) AddChannelSubscribers(ctx context.Context, channelID string, channelType int64, uids []string, version ...uint64) error {
+	if s.failAdd {
+		return errors.New("injected denylist add failure")
+	}
+	s.calls = append(s.calls, "add:"+strings.Join(uids, ","))
+	return s.recordingStore.AddChannelSubscribers(ctx, channelID, channelType, uids, version...)
+}
+
+func (s *denylistOrderStore) RemoveChannelSubscribers(ctx context.Context, channelID string, channelType int64, uids []string, version ...uint64) error {
+	s.calls = append(s.calls, "remove:"+strings.Join(uids, ","))
+	if s.failRemove {
+		return errors.New("injected denylist cleanup failure")
+	}
+	return s.recordingStore.RemoveChannelSubscribers(ctx, channelID, channelType, uids, version...)
 }
 
 func TestUpdateInfoPreservesSubscriberMetadata(t *testing.T) {

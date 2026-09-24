@@ -1361,6 +1361,96 @@ func TestSendTerminalCheckBypassesLivePermissionCache(t *testing.T) {
 	}
 }
 
+func TestSendMembershipChangesBypassConfiguredPermissionCache(t *testing.T) {
+	store := newFakePermissionStore()
+	key := permissionKey("g1", int64(channelTypeGroup))
+	store.channels[key] = metadb.Channel{ChannelID: "g1", ChannelType: int64(channelTypeGroup)}
+	store.members[key] = map[string]bool{"u1": true}
+	memberKey := channelmembers.ChannelKey{ChannelID: "g1", ChannelType: channelTypeGroup}
+	denyKey := permissionKey(channelmembers.DenylistChannelID(memberKey), int64(channelTypeGroup))
+	allowKey := permissionKey(channelmembers.AllowlistChannelID(memberKey), int64(channelTypeGroup))
+	app := New(Options{
+		Submitter:       &recordingSubmitter{sendResult: SendResult{Reason: ReasonSuccess}},
+		PermissionStore: store, PermissionCacheTTL: time.Hour,
+	})
+	cmd := SendCommand{FromUID: "u1", ChannelID: "g1", ChannelType: channelTypeGroup, Payload: []byte("hi")}
+	check := func(want Reason) {
+		t.Helper()
+		result, err := app.Send(context.Background(), cmd)
+		if err != nil || result.Reason != want {
+			t.Fatalf("Send() = %#v, %v, want reason %v", result, err, want)
+		}
+	}
+	check(ReasonSuccess)
+	store.members[denyKey] = map[string]bool{"u1": true}
+	check(ReasonInBlacklist)
+	delete(store.members[denyKey], "u1")
+	check(ReasonSuccess)
+	delete(store.members[key], "u1")
+	check(ReasonSubscriberNotExist)
+	store.members[key]["u1"] = true
+	store.hasAny[allowKey] = true
+	store.members[allowKey] = map[string]bool{"u2": true}
+	check(ReasonNotInWhitelist)
+	store.members[allowKey]["u1"] = true
+	check(ReasonSuccess)
+	store.channels[permissionKey("u1", int64(channelTypePerson))] = metadb.Channel{ChannelID: "u1", ChannelType: int64(channelTypePerson), SendBan: 1}
+	check(ReasonSendBan)
+}
+
+func TestSendBatchUsesAuthoritativePermissionReadsWithConfiguredCacheTTL(t *testing.T) {
+	base := newFakePermissionStore()
+	key := permissionKey("g1", int64(channelTypeGroup))
+	base.channels[key] = metadb.Channel{ChannelID: "g1", ChannelType: int64(channelTypeGroup)}
+	base.members[key] = map[string]bool{"u1": true}
+	store := &recordingPermissionBatchStore{base: base}
+	app := New(Options{
+		Submitter:       &recordingSubmitter{batchResults: []SendBatchItemResult{{Result: SendResult{Reason: ReasonSuccess}}}},
+		PermissionStore: store, PermissionBatchStore: store, PermissionCacheTTL: time.Hour,
+	})
+	items := []SendBatchItem{{Command: SendCommand{FromUID: "u1", ChannelID: "g1", ChannelType: channelTypeGroup, Payload: []byte("hi")}}}
+	check := func(want Reason) {
+		t.Helper()
+		results := app.SendBatch(items)
+		if len(results) != 1 || results[0].Err != nil || results[0].Result.Reason != want {
+			t.Fatalf("SendBatch() = %#v, want reason %v", results, want)
+		}
+	}
+	check(ReasonSuccess)
+	denyID := channelmembers.DenylistChannelID(channelmembers.ChannelKey{ChannelID: "g1", ChannelType: channelTypeGroup})
+	base.members[permissionKey(denyID, int64(channelTypeGroup))] = map[string]bool{"u1": true}
+	check(ReasonInBlacklist)
+	if got := store.batchCalls.Load(); got != 2 {
+		t.Fatalf("authoritative batch calls = %d, want one for each send", got)
+	}
+	if got := base.getChannelCalls.Load() + base.containsCalls.Load() + base.hasAnyCalls.Load(); got != 0 {
+		t.Fatalf("point permission calls = %d, want zero when batch store is available", got)
+	}
+}
+
+func TestPersonSendSeesBlockAndUnblockWithConfiguredCacheTTL(t *testing.T) {
+	store := newFakePermissionStore()
+	key := channelmembers.ChannelKey{ChannelID: "u2", ChannelType: channelTypePerson}
+	denyKey := permissionKey(channelmembers.DenylistChannelID(key), int64(channelTypePerson))
+	app := New(Options{
+		Submitter:       &recordingSubmitter{sendResult: SendResult{Reason: ReasonSuccess}},
+		PermissionStore: store, PermissionCacheTTL: time.Hour,
+	})
+	cmd := SendCommand{FromUID: "u1", ChannelID: "u2", ChannelType: channelTypePerson, NormalizePersonChannel: true, Payload: []byte("hi")}
+	check := func(want Reason) {
+		t.Helper()
+		result, err := app.Send(context.Background(), cmd)
+		if err != nil || result.Reason != want {
+			t.Fatalf("Send() = %#v, %v, want reason %v", result, err, want)
+		}
+	}
+	check(ReasonSuccess)
+	store.members[denyKey] = map[string]bool{"u1": true}
+	check(ReasonInBlacklist)
+	delete(store.members[denyKey], "u1")
+	check(ReasonSuccess)
+}
+
 func TestSendAllowsLegacyPermissionPassesAndBypasses(t *testing.T) {
 	tests := []struct {
 		name      string

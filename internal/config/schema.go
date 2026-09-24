@@ -196,7 +196,7 @@ var schemaFields = []fieldSpec{
 
 	{TOMLPath: "message.person_whitelist_enabled", EnvKey: "WK_MESSAGE_PERSON_WHITELIST_ENABLED", Kind: kindBool, Group: "message", Label: "Person whitelist enabled"},
 	{TOMLPath: "message.system_device_id", EnvKey: "WK_MESSAGE_SYSTEM_DEVICE_ID", Kind: kindString, Group: "message", Label: "System device ID"},
-	{TOMLPath: "message.permission_cache_ttl", EnvKey: "WK_MESSAGE_PERMISSION_CACHE_TTL", Kind: kindDuration, Group: "message", Label: "Permission cache TTL"},
+	{TOMLPath: "message.permission_cache_ttl", EnvKey: "WK_MESSAGE_PERMISSION_CACHE_TTL", Kind: kindDuration, Group: "message", Label: "Legacy permission cache TTL (ignored)"},
 	{TOMLPath: "message.admission_url", EnvKey: "WK_MESSAGE_ADMISSION_URL", Kind: kindString, Group: "message", Label: "Mandatory application admission endpoint", DiagnosticSensitive: true},
 	{TOMLPath: "message.admission_timeout", EnvKey: "WK_MESSAGE_ADMISSION_TIMEOUT", Kind: kindDuration, Group: "message", Label: "Application admission timeout"},
 

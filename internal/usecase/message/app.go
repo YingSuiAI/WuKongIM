@@ -27,7 +27,6 @@ type Options struct {
 	// SendBatch may call it concurrently for independent items.
 	PermissionStore PermissionStore
 	// PermissionBatchStore optionally groups raw permission facts by authority.
-	// It is used only when PermissionCacheTTL is zero.
 	PermissionBatchStore PermissionBatchStore
 	// PersonDirectory establishes both UID-owned memberships before the first
 	// persistent ordinary append to a canonical person channel.
@@ -42,9 +41,11 @@ type Options struct {
 	PersonWhitelistEnabled bool
 	// SystemDeviceID identifies trusted system-device sessions after SendBan passes.
 	SystemDeviceID string
-	// PermissionCacheTTL enables a bounded read-through permission cache. Zero keeps reads uncached.
+	// PermissionCacheTTL is accepted for configuration compatibility. SEND
+	// authorization always reads current facts so membership and denylist
+	// mutations cannot be hidden by a stale node-local cache.
 	PermissionCacheTTL time.Duration
-	// Now supplies wall time for permission cache expiry.
+	// Now supplies wall time for message admission and sync behavior.
 	Now func() time.Time
 	// SendBatchObserver receives bounded stage timing without entry-specific details.
 	SendBatchObserver SendBatchObserver
@@ -60,9 +61,9 @@ type App struct {
 	eventStore          MessageEventStore
 	permissions         PermissionStore
 	// permissionBatch performs one authoritative, batch-scoped metadata read
-	// when the configured store supports it and no cross-batch TTL cache is enabled.
+	// when the configured store supports it.
 	permissionBatch PermissionBatchStore
-	// permissionAuthority bypasses the optional cache for terminal channel checks.
+	// permissionAuthority reads terminal channel state from the same raw store.
 	permissionAuthority    PermissionStore
 	personDirectory        PersonDirectoryEnsurer
 	sendHook               SendHook
@@ -79,11 +80,6 @@ func New(opts Options) *App {
 	if opts.Now == nil {
 		opts.Now = time.Now
 	}
-	permissions := newPermissionCache(opts.PermissionStore, opts.PermissionCacheTTL, opts.Now)
-	var permissionBatch PermissionBatchStore
-	if opts.PermissionCacheTTL <= 0 {
-		permissionBatch = opts.PermissionBatchStore
-	}
 	return &App{
 		submitter:              opts.Submitter,
 		reader:                 opts.Reader,
@@ -91,8 +87,8 @@ func New(opts Options) *App {
 		membershipAuthority:    opts.MembershipAuthority,
 		channelState:           opts.ChannelState,
 		eventStore:             opts.EventStore,
-		permissions:            permissions,
-		permissionBatch:        permissionBatch,
+		permissions:            opts.PermissionStore,
+		permissionBatch:        opts.PermissionBatchStore,
 		permissionAuthority:    opts.PermissionStore,
 		personDirectory:        opts.PersonDirectory,
 		sendHook:               opts.SendHook,
@@ -133,15 +129,9 @@ type SyncChannelStateStore interface {
 	GetChannelForMessagePull(ctx context.Context, channelID string, channelType int64) (metadb.Channel, error)
 }
 
-// ResetAfterRestore invalidates optional read-through authorization results so
-// the restored membership and channel metadata are authoritative immediately.
+// ResetAfterRestore remains a restore lifecycle hook. SEND authorization uses
+// uncached authority and therefore has no node-local permission facts to clear.
 func (a *App) ResetAfterRestore() {
-	if a == nil {
-		return
-	}
-	if cache, ok := a.permissions.(*permissionCache); ok {
-		cache.resetAfterRestore()
-	}
 }
 
 // PermissionStore provides authoritative membership and channel reads for send
