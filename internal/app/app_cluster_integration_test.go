@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/WuKongIM/WuKongIM/internal/runtime/channelappend"
 	channelruntime "github.com/WuKongIM/WuKongIM/pkg/channel"
 	clusterpkg "github.com/WuKongIM/WuKongIM/pkg/cluster"
 	metadb "github.com/WuKongIM/WuKongIM/pkg/db/meta"
@@ -145,6 +146,52 @@ func TestWKProtoTokenAuthReadsCurrentSlotLeaderFromNonLeaderGateway(t *testing.T
 	}
 	if credential.DeviceLevel != frame.DeviceLevelMaster || credential.DeviceSessionID != "device-session-v2" || credential.IMSessionID != "im-session-v2" || credential.InstallationGeneration != 7 || credential.AuthorizationFence != 12 {
 		t.Fatalf("verifyWKProtoToken(v2) credential=%#v, want exact v2 credential", credential)
+	}
+}
+
+func TestThreeNodeSubscriberChunksInvalidateRemoteFanoutSnapshot(t *testing.T) {
+	apps, nodes := startThreeNodeAuthApps(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	const channelID = "group-subscriber-chunk-three"
+	if err := nodes[0].UpsertChannelMetadata(ctx, metadb.Channel{ChannelID: channelID, ChannelType: 2}); err != nil {
+		t.Fatal(err)
+	}
+	first, err := nodes[0].AddChannelSubscribersCounted(ctx, channelID, 2, []string{"u1"}, 1)
+	if err != nil || first.Version != 1 {
+		t.Fatalf("first chunk = %+v, err=%v", first, err)
+	}
+	page := func(app *App, version uint64) []string {
+		t.Helper()
+		result, err := app.deliveryMeta.NextSubscriberPage(ctx, channelappend.SubscriberPageRequest{
+			ChannelID:                 channelappend.ChannelID{ID: channelID, Type: frame.ChannelTypeGroup},
+			SubscriberMutationVersion: version, Limit: 10,
+		})
+		if err != nil {
+			t.Fatalf("NextSubscriberPage(version=%d): %v", version, err)
+		}
+		uids := make([]string, 0, len(result.Recipients))
+		for _, recipient := range result.Recipients {
+			uids = append(uids, recipient.UID)
+		}
+		return uids
+	}
+	if got := page(apps[1], first.Version); len(got) != 1 || got[0] != "u1" {
+		t.Fatalf("first remote fanout = %v", got)
+	}
+	second, err := nodes[2].AddChannelSubscribersCounted(ctx, channelID, 2, []string{"u2"}, 1)
+	if err != nil || second.Version != 2 {
+		t.Fatalf("second same-proposal chunk = %+v, err=%v", second, err)
+	}
+	if got := page(apps[1], second.Version); len(got) != 2 || got[0] != "u1" || got[1] != "u2" {
+		t.Fatalf("cached remote fanout after second chunk = %v", got)
+	}
+	removed, err := nodes[0].RemoveChannelSubscribersCounted(ctx, channelID, 2, []string{"u1"}, 1)
+	if err != nil || removed.Version != 3 {
+		t.Fatalf("same-proposal removal = %+v, err=%v", removed, err)
+	}
+	if got := page(apps[1], removed.Version); len(got) != 1 || got[0] != "u2" {
+		t.Fatalf("cached remote fanout after removal = %v", got)
 	}
 }
 

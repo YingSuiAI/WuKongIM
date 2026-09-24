@@ -543,7 +543,16 @@ func resolveUserChannelMembership(existing UserChannelMembership, exists bool, n
 	}
 	if next.SourceVersion == existing.SourceVersion {
 		if !existing.Tombstone && next.Tombstone {
-			return existing
+			// Older writers may reuse one source version across reset chunks.
+			// Deny history on an equal-version removal instead of retaining
+			// a live row after Channel-owned membership has been removed.
+			if next.UpdatedAt < existing.UpdatedAt {
+				return existing
+			}
+			next.JoinSeq = existing.JoinSeq
+			next.ReadSeq = existing.ReadSeq
+			next.DeletedToSeq = existing.DeletedToSeq
+			return next
 		}
 		if existing.Tombstone && !next.Tombstone {
 			// A reset can remove and re-add one subscriber under the same

@@ -28,6 +28,8 @@ offers routed metadata operations.
    applies ordered commands in metadata batches.
 4. Publish apply results after durability, preserving typed no-op/conflict
    outcomes where the command defines them.
+   Subscriber-set results include the exact Channel mutation version assigned
+   by the durable Slot commit so UID membership projection can use that fence.
 5. Read barriers use safe ReadIndex and wait for durable FSM application.
 6. Snapshot and restore the owned metadata spans through lifecycle and
    maintenance boundaries.

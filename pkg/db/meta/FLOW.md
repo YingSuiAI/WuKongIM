@@ -34,6 +34,9 @@ payload-correction records.
 
 - Durable table, key, column, and codec identities are compatibility-sensitive.
 - Batch overlays preserve same-batch visibility and expected result semantics.
+- Each versioned subscriber-set commit gets a strictly increasing Channel
+  mutation version. The counted result reports that committed version, and
+  unrelated Channel upserts cannot roll it back.
 - Credential stale no-ops are per-command results; they must not fail another
   Slot's request sharing the physical commit. Hash-slot locks last through fsync.
 - Correction bodies remain separate from original Channel message logs.

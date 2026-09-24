@@ -3888,7 +3888,7 @@ func TestDeliveryMetaStoreCachesSubscriberSnapshotAcrossPages(t *testing.T) {
 
 func TestDeliveryMetaStoreRefreshesRemoteSubscriberMutation(t *testing.T) {
 	node := &recordingDeliveryMetaNode{
-		upserted: []metadb.Channel{{ChannelID: "g1", ChannelType: 2, SubscriberMutationVersion: 10}},
+		upserted:    []metadb.Channel{{ChannelID: "g1", ChannelType: 2, SubscriberMutationVersion: 10}},
 		subscribers: map[string][]string{"g1": {"u1"}},
 	}
 	store := newDeliveryMetaStore(node)
@@ -6827,6 +6827,13 @@ func (n *recordingDeliveryMetaNode) AddChannelSubscribers(_ context.Context, cha
 	return nil
 }
 
+func (n *recordingDeliveryMetaNode) AddChannelSubscribersCounted(ctx context.Context, channelID string, channelType int64, uids []string, version uint64) (metadb.SubscriberMutationResult, error) {
+	if err := n.AddChannelSubscribers(ctx, channelID, channelType, uids, version); err != nil {
+		return metadb.SubscriberMutationResult{}, err
+	}
+	return metadb.SubscriberMutationResult{RequestedCount: len(uids), ChangedCount: len(uids), Version: version}, nil
+}
+
 func (n *recordingDeliveryMetaNode) RemoveChannelSubscribers(_ context.Context, channelID string, channelType int64, uids []string, version uint64) error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -6837,6 +6844,13 @@ func (n *recordingDeliveryMetaNode) RemoveChannelSubscribers(_ context.Context, 
 		version:     version,
 	})
 	return nil
+}
+
+func (n *recordingDeliveryMetaNode) RemoveChannelSubscribersCounted(ctx context.Context, channelID string, channelType int64, uids []string, version uint64) (metadb.SubscriberMutationResult, error) {
+	if err := n.RemoveChannelSubscribers(ctx, channelID, channelType, uids, version); err != nil {
+		return metadb.SubscriberMutationResult{}, err
+	}
+	return metadb.SubscriberMutationResult{RequestedCount: len(uids), ChangedCount: len(uids), Version: version}, nil
 }
 
 func (n *recordingDeliveryMetaNode) ListChannelSubscribersPage(_ context.Context, channelID string, _ int64, afterUID string, limit int) ([]string, string, bool, error) {

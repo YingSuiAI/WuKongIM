@@ -335,11 +335,16 @@ func (a *App) MutateSubscribersCounted(ctx context.Context, cmd SubscriberComman
 	if err != nil {
 		return metadb.SubscriberMutationResult{}, err
 	}
+	if result.Version == 0 {
+		// A legacy Slot leader cannot return the exact version chosen for
+		// this commit. Projecting a guessed version could reopen history.
+		return result, metadb.ErrStaleMeta
+	}
 	if a.membershipIndex != nil {
 		if add {
-			err = a.membershipIndex.UpsertChannelMemberships(ctx, cmd.ChannelID, int64(cmd.ChannelType), cmd.Subscribers, committedTail, version, a.now().UnixNano())
+			err = a.membershipIndex.UpsertChannelMemberships(ctx, cmd.ChannelID, int64(cmd.ChannelType), cmd.Subscribers, committedTail, result.Version, a.now().UnixNano())
 		} else {
-			err = a.membershipIndex.TombstoneChannelMemberships(ctx, cmd.ChannelID, int64(cmd.ChannelType), cmd.Subscribers, version, a.now().UnixNano())
+			err = a.membershipIndex.TombstoneChannelMemberships(ctx, cmd.ChannelID, int64(cmd.ChannelType), cmd.Subscribers, result.Version, a.now().UnixNano())
 		}
 		if err != nil {
 			return result, err
@@ -680,18 +685,26 @@ func (a *App) removeAllOrdinarySubscribersFor(ctx context.Context, channelID str
 }
 
 func (a *App) addOrdinarySubscribersChunked(ctx context.Context, channelID string, channelType int64, uids []string, subscriberMutationVersion uint64) error {
+	store, ok := a.store.(countedSubscriberStore)
+	if !ok {
+		return ErrStoreRequired
+	}
 	committedTail, err := a.readCommittedTail(ctx, channelID, channelType)
 	if err != nil {
 		return err
 	}
 	return a.forEachSubscriberChunk(uids, func(chunk []string) error {
-		if err := a.store.AddChannelSubscribers(ctx, channelID, channelType, chunk, subscriberMutationVersion); err != nil {
+		result, err := store.AddChannelSubscribersCounted(ctx, channelID, channelType, chunk, subscriberMutationVersion)
+		if err != nil {
 			return err
+		}
+		if result.Version == 0 {
+			return metadb.ErrStaleMeta
 		}
 		if a.membershipIndex == nil {
 			return nil
 		}
-		return a.membershipIndex.UpsertChannelMemberships(ctx, channelID, channelType, chunk, committedTail, subscriberMutationVersion, a.now().UnixNano())
+		return a.membershipIndex.UpsertChannelMemberships(ctx, channelID, channelType, chunk, committedTail, result.Version, a.now().UnixNano())
 	})
 }
 
@@ -702,14 +715,22 @@ func (a *App) addSubscribersChunked(ctx context.Context, channelID string, chann
 }
 
 func (a *App) removeOrdinarySubscribersChunked(ctx context.Context, channelID string, channelType int64, uids []string, subscriberMutationVersion uint64) error {
+	store, ok := a.store.(countedSubscriberStore)
+	if !ok {
+		return ErrStoreRequired
+	}
 	return a.forEachSubscriberChunk(uids, func(chunk []string) error {
-		if err := a.store.RemoveChannelSubscribers(ctx, channelID, channelType, chunk, subscriberMutationVersion); err != nil {
+		result, err := store.RemoveChannelSubscribersCounted(ctx, channelID, channelType, chunk, subscriberMutationVersion)
+		if err != nil {
 			return err
+		}
+		if result.Version == 0 {
+			return metadb.ErrStaleMeta
 		}
 		if a.membershipIndex == nil {
 			return nil
 		}
-		return a.membershipIndex.TombstoneChannelMemberships(ctx, channelID, channelType, chunk, subscriberMutationVersion, a.now().UnixNano())
+		return a.membershipIndex.TombstoneChannelMemberships(ctx, channelID, channelType, chunk, result.Version, a.now().UnixNano())
 	})
 }
 

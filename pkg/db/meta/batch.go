@@ -128,6 +128,9 @@ func (b *Batch) UpsertChannel(hashSlot HashSlot, channel Channel) error {
 		}
 		if err == nil && exists {
 			next.SubscriberCount = existing.SubscriberCount
+			if existing.SubscriberMutationVersion > next.SubscriberMutationVersion {
+				next.SubscriberMutationVersion = existing.SubscriberMutationVersion
+			}
 			if existing.DirectoryProjectionState > next.DirectoryProjectionState {
 				next.DirectoryProjectionState = existing.DirectoryProjectionState
 			}

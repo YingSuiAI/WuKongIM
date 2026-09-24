@@ -181,7 +181,7 @@ func TestWriteBatchSubscriberMutationsReportExactChangedCount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AddSubscribersCounted(): %v", err)
 	}
-	removeResult, err := batch.RemoveSubscribersCounted(5, channel.ChannelID, channel.ChannelType, []string{"missing", "existing", "missing"}, 3)
+	removeResult, err := batch.RemoveSubscribersCounted(5, channel.ChannelID, channel.ChannelType, []string{"missing", "existing", "missing"}, 2)
 	if err != nil {
 		t.Fatalf("RemoveSubscribersCounted(): %v", err)
 	}
@@ -189,11 +189,11 @@ func TestWriteBatchSubscriberMutationsReportExactChangedCount(t *testing.T) {
 		t.Fatalf("Commit(): %v", err)
 	}
 
-	if addResult.RequestedCount != 2 || addResult.ChangedCount != 1 {
-		t.Fatalf("add result = %#v, want requested=2 changed=1", addResult)
+	if addResult.RequestedCount != 2 || addResult.ChangedCount != 1 || addResult.Version != 2 {
+		t.Fatalf("add result = %#v, want requested=2 changed=1 version=2", addResult)
 	}
-	if removeResult.RequestedCount != 2 || removeResult.ChangedCount != 1 {
-		t.Fatalf("remove result = %#v, want requested=2 changed=1", removeResult)
+	if removeResult.RequestedCount != 2 || removeResult.ChangedCount != 1 || removeResult.Version != 3 {
+		t.Fatalf("remove result = %#v, want requested=2 changed=1 version=3", removeResult)
 	}
 }
 

@@ -132,7 +132,7 @@ func TestWriteBatchConditionalChannelCreateAndFlagPatch(t *testing.T) {
 	if got.Ban != 0 || got.Disband != 1 || got.SendBan != 1 {
 		t.Fatalf("patched flags = %+v", got)
 	}
-	if got.AllowStranger != 1 || got.Large != 1 || got.SubscriberMutationVersion != 9 || got.SubscriberCount != 2 {
+	if got.AllowStranger != 1 || got.Large != 1 || got.SubscriberMutationVersion != 10 || got.SubscriberCount != 2 {
 		t.Fatalf("patch replaced unrelated metadata: %+v", got)
 	}
 	if err := db.ForHashSlot(7).UpsertChannel(ctx, Channel{ChannelID: "managed", ChannelType: 2}); err != nil {
@@ -295,6 +295,41 @@ func TestChannelUpdatePreservesSubscriberCount(t *testing.T) {
 	}
 	if got.Ban != 1 || got.SubscriberCount != 2 {
 		t.Fatalf("channel after update = %+v, want ban=1 subscriber_count=2", got)
+	}
+}
+
+func TestChannelUpsertsCannotRollBackSubscriberMutationVersion(t *testing.T) {
+	store := openTestMetaStore(t)
+	defer store.close(t)
+	ctx := context.Background()
+	shard := store.db.HashSlot(45)
+	channel := Channel{ChannelID: "version-monotonic", ChannelType: 2, Ban: 1}
+	if err := shard.CreateChannel(ctx, channel); err != nil {
+		t.Fatal(err)
+	}
+	if err := shard.AddSubscribers(ctx, channel.ChannelID, channel.ChannelType, []string{"u1"}, 7); err != nil {
+		t.Fatal(err)
+	}
+	stale := Channel{ChannelID: channel.ChannelID, ChannelType: channel.ChannelType, Ban: 1, SendBan: 1, SubscriberMutationVersion: 2}
+	batch := (&DB{meta: store.db, engine: store.engine}).NewWriteBatch()
+	defer batch.Close()
+	if err := batch.UpsertChannel(45, stale); err != nil {
+		t.Fatal(err)
+	}
+	if err := batch.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := shard.GetChannel(ctx, channel.ChannelID, channel.ChannelType)
+	if err != nil || !ok || got.SubscriberMutationVersion != 7 || got.SubscriberCount != 1 || got.Ban != 1 || got.SendBan != 1 {
+		t.Fatalf("batch upsert rolled back subscriber metadata or flags: got=%+v ok=%v err=%v", got, ok, err)
+	}
+	stale.SendBan = 0
+	if err := shard.UpsertChannel(ctx, stale); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err = shard.GetChannel(ctx, channel.ChannelID, channel.ChannelType)
+	if err != nil || !ok || got.SubscriberMutationVersion != 7 || got.SubscriberCount != 1 || got.Ban != 1 || got.SendBan != 0 {
+		t.Fatalf("direct upsert rolled back subscriber metadata or flags: got=%+v ok=%v err=%v", got, ok, err)
 	}
 }
 
