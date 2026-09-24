@@ -232,6 +232,32 @@ func TestThreeNodeSubscriberChunksInvalidateRemoteFanoutSnapshot(t *testing.T) {
 	}
 }
 
+func TestThreeNodeDenylistCheckReadsCurrentSlotAuthority(t *testing.T) {
+	apps, _ := startThreeNodeAuthApps(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer cancel()
+	command := channelusecase.MemberCommand{
+		ChannelKey: channelusecase.ChannelKey{ChannelID: "group-denylist-check-three", ChannelType: 2},
+		UIDs:       []string{"u1"},
+	}
+	if err := apps[0].channels.SetDenylist(ctx, command); err != nil {
+		t.Fatal(err)
+	}
+	check := func(wantDenied, wantAllowed string) {
+		t.Helper()
+		denied, allowed, err := apps[1].Messages().CheckChannelDenylist(ctx, command.ChannelID, command.ChannelType, []string{"u1", "u2"})
+		if err != nil || len(denied) != 1 || denied[0] != wantDenied || len(allowed) != 1 || allowed[0] != wantAllowed {
+			t.Fatalf("remote denylist check denied=%v allowed=%v err=%v", denied, allowed, err)
+		}
+	}
+	check("u1", "u2")
+	command.UIDs = []string{"u2"}
+	if err := apps[0].channels.SetDenylist(ctx, command); err != nil {
+		t.Fatal(err)
+	}
+	check("u2", "u1")
+}
+
 func TestThreeNodeServiceRejoinFailedUIDCompensatesThenRecovers(t *testing.T) {
 	apps, nodes := startThreeNodeAuthApps(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)

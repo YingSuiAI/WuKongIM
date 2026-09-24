@@ -403,7 +403,43 @@ func (a *App) AddDenylist(ctx context.Context, cmd MemberCommand) error {
 
 // SetDenylist replaces every member in the denylist.
 func (a *App) SetDenylist(ctx context.Context, cmd MemberCommand) error {
-	return a.setMemberList(ctx, denyListKind, cmd.ChannelKey, cmd.UIDs)
+	if err := a.requireStore(); err != nil {
+		return err
+	}
+	// Deny before releasing an old denial. A remove-all followed by add creates
+	// a window where muted members can send, and an add failure can leave them
+	// allowed until the caller retries.
+	if err := a.addMemberList(ctx, denyListKind, cmd.ChannelKey, cmd.UIDs); err != nil {
+		return err
+	}
+	want := make(map[string]struct{}, len(cmd.UIDs))
+	for _, uid := range cmd.UIDs {
+		want[uid] = struct{}{}
+	}
+	listID := namespacedListChannelID(denyListKind, cmd.ChannelKey)
+	cursor := ""
+	for {
+		page, nextCursor, done, err := a.store.ListChannelSubscribers(ctx, listID, int64(cmd.ChannelType), cursor, a.subscriberPageLimit)
+		if err != nil {
+			return err
+		}
+		stale := make([]string, 0, len(page))
+		for _, uid := range page {
+			if _, keep := want[uid]; !keep {
+				stale = append(stale, uid)
+			}
+		}
+		if err := a.removeMemberList(ctx, denyListKind, cmd.ChannelKey, stale); err != nil {
+			return err
+		}
+		if done {
+			return nil
+		}
+		if nextCursor == "" || nextCursor == cursor {
+			return metadb.ErrCorruptValue
+		}
+		cursor = nextCursor
+	}
 }
 
 // RemoveDenylist removes selected members from the denylist.
