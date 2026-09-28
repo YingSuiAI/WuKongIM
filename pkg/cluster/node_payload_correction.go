@@ -150,7 +150,7 @@ func (n *Node) createPayloadCorrectionLocal(ctx context.Context, correction meta
 			release()
 		}
 	}()
-	route, err := n.payloadCorrectionSlotLeaderRoute(ctx, correction.ChannelID)
+	route, err := n.payloadCorrectionSlotLeaderRoute(ctx, correction.ChannelID, true)
 	if err != nil {
 		return 0, err
 	}
@@ -266,7 +266,7 @@ func (n *Node) readPayloadCorrectionsLocal(ctx context.Context, keys []metadb.Me
 	rows := make([]metadb.MessagePayloadCorrection, 0, len(keys))
 	barriers := make(map[uint32]multiraft.ReadBarrierResult)
 	for _, key := range keys {
-		route, err := n.payloadCorrectionSlotLeaderRoute(ctx, key.ChannelID)
+		route, err := n.payloadCorrectionSlotLeaderRoute(ctx, key.ChannelID, false)
 		if err != nil {
 			return nil, err
 		}
@@ -291,7 +291,7 @@ func (n *Node) readPayloadCorrectionsLocal(ctx context.Context, keys []metadb.Me
 		if found {
 			rows = append(rows, row)
 		}
-		current, err := n.payloadCorrectionSlotLeaderRoute(ctx, key.ChannelID)
+		current, err := n.payloadCorrectionSlotLeaderRoute(ctx, key.ChannelID, false)
 		if err != nil {
 			return nil, err
 		}
@@ -302,7 +302,7 @@ func (n *Node) readPayloadCorrectionsLocal(ctx context.Context, keys []metadb.Me
 	return rows, nil
 }
 
-func (n *Node) payloadCorrectionSlotLeaderRoute(ctx context.Context, channelID string) (Route, error) {
+func (n *Node) payloadCorrectionSlotLeaderRoute(ctx context.Context, channelID string, requireApplied bool) (Route, error) {
 	if err := ctxErr(ctx); err != nil {
 		return Route{}, err
 	}
@@ -317,8 +317,16 @@ func (n *Node) payloadCorrectionSlotLeaderRoute(ctx context.Context, channelID s
 	if err != nil {
 		return Route{}, err
 	}
-	if err := payloadCorrectionReadAuthority(status, n.NodeID()); err != nil {
-		return Route{}, err
+	// Reads wait for durable apply at SlotReadBarrier. Rejecting a transient
+	// apply lag here would bypass that wait; checking a later commit after the
+	// barrier would also reject a read whose quorum index is already applied.
+	if status.Role != multiraft.RoleLeader || uint64(status.LeaderID) != n.NodeID() {
+		return Route{}, ErrNotLeader
+	}
+	if requireApplied {
+		if err := payloadCorrectionReadAuthority(status, n.NodeID()); err != nil {
+			return Route{}, err
+		}
 	}
 	route.Leader = uint64(status.LeaderID)
 	route.LeaderTerm = status.Term
