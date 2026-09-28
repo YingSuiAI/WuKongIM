@@ -259,3 +259,66 @@ func TestPayloadCorrectionCanceledBeforeProposalDoesNotWaitForMaintenanceLock(t 
 		t.Fatal("correction acquired outer admission before the proposal owner; nested readers can deadlock behind maintenance")
 	}
 }
+
+func TestPayloadCorrectionReadWaitsForCommittedApply(t *testing.T) {
+	node := newDefaultSingleNode(t)
+	node.cfg.Slots.HashSlotCount = 256
+	startNode(t, node)
+	t.Cleanup(func() { stopNodes(t, node) })
+	waitNodeWriteReady(t, node)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	id := ch.ChannelID{ID: "history-during-correction-apply", Type: 2}
+	original := []byte("original")
+	corrected := []byte("corrected")
+	sent, err := node.AppendChannel(ctx, ch.AppendRequest{ChannelID: id, CommitMode: ch.CommitModeQuorum, Message: ch.Message{MessageID: 9301, FromUID: "human", ClientMsgNo: "send", Payload: original}})
+	require.NoError(t, err)
+	raw, found, err := node.ReadChannelCommittedMessage(ctx, id, sent.MessageID, sent.MessageSeq)
+	require.NoError(t, err)
+	require.True(t, found)
+	gate := &payloadCorrectionApplyGate{started: make(chan struct{}), proceed: make(chan struct{}), applied: make(chan struct{})}
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(gate.proceed) }) }
+	t.Cleanup(release)
+	correction := metadb.MessagePayloadCorrection{ChannelID: id.ID, ChannelType: 2, MessageID: sent.MessageID, MessageSeq: sent.MessageSeq, FromUID: "human", ClientMsgNo: "send", OperationID: "history-read", OriginalPayloadSHA256: payloadSHA256(original), CorrectedPayloadSHA256: payloadSHA256(corrected), CorrectedPayload: corrected}
+	writer := make(chan error, 1)
+	go func() {
+		_, err := node.CorrectMessagePayload(multiraft.WithProposalStageObserver(ctx, gate), correction)
+		writer <- err
+	}()
+	select {
+	case <-gate.started:
+	case <-ctx.Done():
+		t.Fatal("correction did not reach committed pre-apply gate")
+	}
+	readCtx, readCancel := context.WithTimeout(ctx, 100*time.Millisecond)
+	defer readCancel()
+	current, err := node.ApplyMessagePayloadCorrections(readCtx, []ch.Message{raw})
+	require.ErrorIs(t, err, context.DeadlineExceeded, "a pending durable apply must wait at the quorum read barrier")
+	require.Nil(t, current, "timed-out authority must never expose original bytes")
+	canceledCtx, cancelRead := context.WithCancel(ctx)
+	cancelRead()
+	current, err = node.ApplyMessagePayloadCorrections(canceledCtx, []ch.Message{raw})
+	require.ErrorIs(t, err, context.Canceled)
+	require.Nil(t, current)
+	type readResult struct {
+		messages []ch.Message
+		err      error
+	}
+	reader := make(chan readResult, 1)
+	go func() {
+		messages, err := node.ApplyMessagePayloadCorrections(ctx, []ch.Message{raw})
+		reader <- readResult{messages, err}
+	}()
+	select {
+	case result := <-reader:
+		t.Fatalf("current-body read finished before durable apply: %v", result.err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	release()
+	require.NoError(t, <-writer)
+	result := <-reader
+	require.NoError(t, result.err)
+	require.Equal(t, corrected, result.messages[0].Payload)
+	require.Equal(t, original, raw.Payload)
+}
