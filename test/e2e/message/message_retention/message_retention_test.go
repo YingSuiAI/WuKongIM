@@ -72,6 +72,62 @@ func TestThreeNodeManagerRetentionForwardsAndSurvivesLeaderRestart(t *testing.T)
 	}
 }
 
+// TestThreeNodeManagerRetentionTrimsIdleChannelOnAllReplicas proves an idle channel (no loaded runtime on any
+// node, as after the idle eviction window) is trimmed logically through the manager API and physically on the
+// leader and both followers.
+func TestThreeNodeManagerRetentionTrimsIdleChannelOnAllReplicas(t *testing.T) {
+	s := suite.New(t)
+	cluster := s.StartThreeNodeCluster(
+		suite.WithManagerHTTP(),
+		retentionGCConfig(1),
+		retentionGCConfig(2),
+		retentionGCConfig(3),
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	require.NoError(t, cluster.WaitClusterReady(ctx), cluster.DumpDiagnostics())
+
+	const (
+		channelID   = "e2e-message-retention-idle-group"
+		channelType = frame.ChannelTypeGroup
+	)
+	messages := appendGroupMessages(t, cluster.MustNode(1), channelID, channelType, 3)
+	seqs := sentMessageSeqs(messages)
+	for _, node := range cluster.Nodes {
+		requireManagerMessageSeqsEventually(t, cluster, node, channelID, channelType, []uint64{seqs[2], seqs[1], seqs[0]})
+	}
+	meta := requireRuntimeMetaEventually(t, cluster.MustNode(1), channelID, channelType)
+
+	// A process restart leaves no Channel runtime loaded anywhere, which is the idle state after eviction.
+	for _, node := range cluster.Nodes {
+		restartNodeWithInspection(t, cluster, node.Spec.ID, nil)
+	}
+
+	origin := firstNonLeaderNode(t, cluster, meta.Leader)
+	retention := advanceMessageRetentionEventually(t, cluster, origin, channelID, channelType, seqs[1])
+	require.Equal(t, "advanced", retention.Status, cluster.DumpDiagnostics())
+	require.Equal(t, seqs[1], retention.AdvancedThroughSeq, cluster.DumpDiagnostics())
+	for _, node := range cluster.Nodes {
+		requireManagerMessageSeqsEventually(t, cluster, node, channelID, channelType, []uint64{seqs[2]})
+	}
+
+	// Physical cleanup runs from each node's own GC loop; inspect every replica's store while it is stopped.
+	time.Sleep(3 * time.Second)
+	for _, node := range cluster.Nodes {
+		restartNodeWithInspection(t, cluster, node.Spec.ID, func(stopped suite.StartedNode) {
+			requirePhysicalRetentionApplied(t, stopped, channelID, channelType, messages[:2], messages[2])
+		})
+	}
+	recovered := requireChannelWritableEventually(t, cluster, cluster.MustNode(1), channelID, channelType, meta.LeaderEpoch, 45*time.Second)
+	t.Logf("post-trim channel writable: leader=%d leader_epoch=%d", recovered.Leader, recovered.LeaderEpoch)
+	after := appendGroupMessages(t, cluster.MustNode(1), channelID, channelType, 1)[0]
+	require.Greater(t, after.Seq, seqs[2], cluster.DumpDiagnostics())
+	for _, node := range cluster.Nodes {
+		requireManagerMessageSeqsEventually(t, cluster, node, channelID, channelType, []uint64{after.Seq, seqs[2]})
+	}
+}
+
 func retentionGCConfig(nodeID uint64) suite.Option {
 	return suite.WithNodeConfigOverrides(nodeID, map[string]string{
 		"WK_CHANNEL_MESSAGE_RETENTION_PHYSICAL_GC_ENABLE": "true",

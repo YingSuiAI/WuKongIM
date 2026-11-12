@@ -97,7 +97,7 @@ func (r *Reactor) handleApplyRetentionBoundary(event Event) {
 		event.Future.Complete(Result{RetentionApply: retentionNoopResult(rc.state, req)})
 		return
 	}
-	trimAllowed, blockedReason := retentionTrimDecision(rc.state, req.ThroughSeq)
+	trimAllowed, blockedReason := retentionTrimDecision(rc.state, req.ThroughSeq, r.cfg.QuorumLog != nil)
 	opID := event.OpID
 	if opID == 0 {
 		opID = r.nextOpID()
@@ -242,7 +242,10 @@ func retentionViewFromChannel(rc *runtimeChannel) ch.RetentionView {
 	}
 }
 
-func retentionTrimDecision(state *machine.ChannelState, throughSeq uint64) (bool, string) {
+// retentionTrimDecision reports whether the local store may physically trim through throughSeq. quorumLog
+// channels never receive follower Progress on the leader runtime; their boundary is only advanced after the
+// manager proved every voter's durable frontier, so the leader-side min-ISR rule applies to legacy replication only.
+func retentionTrimDecision(state *machine.ChannelState, throughSeq uint64, quorumLog bool) (bool, string) {
 	if state == nil || throughSeq == 0 {
 		return false, ch.RetentionBlockedLEOLag
 	}
@@ -258,7 +261,7 @@ func retentionTrimDecision(state *machine.ChannelState, throughSeq uint64) (bool
 	if throughSeq > state.LEO {
 		return false, ch.RetentionBlockedLEOLag
 	}
-	if state.Role == ch.RoleLeader && throughSeq > minISRMatchOffset(state) {
+	if !quorumLog && state.Role == ch.RoleLeader && throughSeq > minISRMatchOffset(state) {
 		return false, ch.RetentionBlockedMinISRLag
 	}
 	return true, ""

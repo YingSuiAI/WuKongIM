@@ -221,3 +221,21 @@ func awaitRetentionResult(t *testing.T, future *Future) ch.RetentionApplyResult 
 	require.NoError(t, err)
 	return result.RetentionApply
 }
+
+func TestRetentionTrimDecisionQuorumLeaderIgnoresAbsentFollowerProgress(t *testing.T) {
+	state := &machine.ChannelState{
+		Role: ch.RoleLeader, LocalNode: 1, ISR: []ch.NodeID{1, 2, 3},
+		LEO: 5, HW: 5, CheckpointHW: 5,
+	}
+
+	allowed, reason := retentionTrimDecision(state, 4, true)
+	require.True(t, allowed, reason)
+
+	allowed, reason = retentionTrimDecision(state, 4, false)
+	require.False(t, allowed)
+	require.Equal(t, ch.RetentionBlockedMinISRLag, reason)
+
+	allowed, reason = retentionTrimDecision(state, 6, true)
+	require.False(t, allowed)
+	require.Equal(t, ch.RetentionBlockedHWLag, reason)
+}

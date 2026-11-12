@@ -55,10 +55,10 @@ delivery/presence integration, and cluster-backed operational capabilities.
 - Configured application ACK identity and server timestamp come from that
   verified committed row through an injected metadata reader, without
   reinterpreting the persisted payload hash as an original pre-admission hash.
-- Manager message retention needs the Channel leader runtime's HW and ISR
-  progress. An idle-evicted runtime whose active Slot metadata still exists is
-  reloaded on the leader once before the view is read; missing metadata stays
-  not found and follower progress still bounds the advanced boundary.
+- Manager message retention on durable quorum channels proves every ISR voter's
+  committed frontier with replica probes (no Channel runtime, so idle channels
+  work and `dry_run` never loads or writes anything); an unreachable or lagging
+  voter blocks the advance, and the probes are bounded by the request context.
 
 ## Read First
 

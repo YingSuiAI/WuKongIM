@@ -53,6 +53,25 @@ func TestChannelRetentionGCOnceAppliesCommittedBoundary(t *testing.T) {
 	}
 }
 
+func TestChannelRetentionGCOnceLoadsEvictedChannelUpToCap(t *testing.T) {
+	node, runtime := newChannelRetentionGCNode(t)
+	node.cfg.ChannelRetention.MaxActivationsPerPass = 1
+	first := channelruntime.ChannelID{ID: "retention-idle-a", Type: 1}
+	second := channelruntime.ChannelID{ID: "retention-idle-b", Type: 1}
+	seedChannelRetentionCatalogAndMeta(t, node, first, 1, 3, 2)
+	seedChannelRetentionCatalogAndMeta(t, node, second, 4, 3, 2)
+	runtime.evicted = map[channelruntime.ChannelID]bool{first: true, second: true}
+
+	result, err := node.RunChannelRetentionGCOnce(context.Background())
+	if err != nil {
+		t.Fatalf("RunChannelRetentionGCOnce() error = %v", err)
+	}
+	// One evicted channel is loaded and applied; the other exceeds the per-pass cap and waits for the next pass.
+	if result.ActivatedChannels != 1 || result.AppliedChannels != 1 || result.Errors != 1 || len(runtime.appliedMeta) != 1 {
+		t.Fatalf("result = %#v appliedMeta=%d, want one activation, one applied and one deferred", result, len(runtime.appliedMeta))
+	}
+}
+
 func TestChannelRetentionGCOnceContinuesAfterChannelError(t *testing.T) {
 	node, runtime := newChannelRetentionGCNode(t)
 	first := channelruntime.ChannelID{ID: "retention-error-a", Type: 1}
@@ -211,6 +230,16 @@ type recordingRetentionChannelService struct {
 
 	lastApply  channelruntime.RetentionApplyRequest
 	applyCalls int
+
+	// evicted makes ApplyRetentionBoundary fail with ErrChannelNotFound until ApplyMeta loads the channel.
+	evicted     map[channelruntime.ChannelID]bool
+	appliedMeta []channelruntime.Meta
+}
+
+func (s *recordingRetentionChannelService) ApplyMeta(meta channelruntime.Meta) error {
+	s.appliedMeta = append(s.appliedMeta, meta)
+	delete(s.evicted, meta.ID)
+	return nil
 }
 
 func (s *recordingRetentionChannelService) Append(context.Context, channelruntime.AppendRequest) (channelruntime.AppendResult, error) {
@@ -258,6 +287,9 @@ func (s *recordingRetentionChannelService) RetentionView(context.Context, channe
 func (s *recordingRetentionChannelService) ApplyRetentionBoundary(_ context.Context, req channelruntime.RetentionApplyRequest) (channelruntime.RetentionApplyResult, error) {
 	s.applyCalls++
 	s.lastApply = req
+	if s.evicted[req.ChannelID] {
+		return channelruntime.RetentionApplyResult{}, channelruntime.ErrChannelNotFound
+	}
 	if err := s.applyErrs[req.ChannelID]; err != nil {
 		return channelruntime.RetentionApplyResult{}, err
 	}

@@ -82,48 +82,79 @@ func TestManagementMessageRetentionOperatorDryRunDoesNotAdvance(t *testing.T) {
 	}
 }
 
-func TestManagementMessageRetentionOperatorActivatesEvictedLeaderRuntime(t *testing.T) {
-	newNode := func() *recordingRetentionNode {
-		return &recordingRetentionNode{
-			nodeID:     7,
-			evicted:    true,
-			meta:       localRetentionMeta("room-1", 2, 7),
-			readResult: channelstore.ReadCommittedResult{Messages: []channelruntime.Message{{MessageSeq: 3}}},
-		}
+// probingRetentionNode serves per-voter durable frontiers like the real Node and has no loaded runtime at all.
+type probingRetentionNode struct {
+	recordingRetentionNode
+	committed map[uint64]uint64
+	down      map[uint64]bool
+}
+
+func (n *probingRetentionNode) ProbeChannelReplica(ctx context.Context, nodeID uint64, _ metadb.ChannelRuntimeMeta) (channelruntime.RuntimeProbeChannel, error) {
+	if err := ctx.Err(); err != nil {
+		return channelruntime.RuntimeProbeChannel{}, err
 	}
-	req := managementusecase.AdvanceMessageRetentionRequest{ChannelID: "room-1", ChannelType: 2, ThroughSeq: 2}
+	if n.down[nodeID] {
+		return channelruntime.RuntimeProbeChannel{}, errors.New("voter unreachable")
+	}
+	return channelruntime.RuntimeProbeChannel{HW: n.committed[nodeID]}, nil
+}
+
+func TestManagementMessageRetentionOperatorQuorumBoundaryNeedsEveryVoterWithoutRuntime(t *testing.T) {
+	newNode := func() *probingRetentionNode {
+		node := &probingRetentionNode{
+			recordingRetentionNode: recordingRetentionNode{
+				nodeID:     7,
+				evicted:    true, // idle channel: a runtime view would 404, voter probes must not need one
+				meta:       localRetentionMeta("room-1", 2, 7),
+				readResult: channelstore.ReadCommittedResult{Messages: []channelruntime.Message{{MessageSeq: 5}}},
+			},
+			committed: map[uint64]uint64{7: 5, 8: 5, 9: 5},
+			down:      map[uint64]bool{},
+		}
+		node.meta.Replicas = []uint64{7, 8, 9}
+		node.meta.ISR = []uint64{7, 8, 9}
+		node.meta.MinISR = 2
+		return node
+	}
+	req := managementusecase.AdvanceMessageRetentionRequest{ChannelID: "room-1", ChannelType: 2, ThroughSeq: 4}
+	run := func(node *probingRetentionNode, req managementusecase.AdvanceMessageRetentionRequest) (managementusecase.AdvanceMessageRetentionResponse, error) {
+		return NewManagementMessageRetentionOperator(node).AdvanceMessageRetention(context.Background(), req)
+	}
+
+	node := newNode()
+	got, err := run(node, req)
+	if err != nil || got.Status != managementusecase.MessageRetentionStatusAdvanced || got.AdvancedThroughSeq != 4 || node.retentionViewCalled {
+		t.Fatalf("all voters ahead = %+v err=%v viewCalled=%v, want advanced through 4 without a runtime view", got, err, node.retentionViewCalled)
+	}
 
 	dry := newNode()
-	req.DryRun = true
-	got, err := NewManagementMessageRetentionOperator(dry).AdvanceMessageRetention(context.Background(), req)
-	if err != nil || got.Status != managementusecase.MessageRetentionStatusWouldAdvance || dry.activated != 1 || dry.advanceCalled {
-		t.Fatalf("dry run = %+v err=%v activated=%d advanced=%v, want would_advance after one activation and no write", got, err, dry.activated, dry.advanceCalled)
+	dryReq := req
+	dryReq.DryRun = true
+	got, err = run(dry, dryReq)
+	if err != nil || got.Status != managementusecase.MessageRetentionStatusWouldAdvance || dry.advanceCalled || dry.retentionViewCalled {
+		t.Fatalf("dry run = %+v err=%v advanced=%v viewCalled=%v, want would_advance with no write or runtime view", got, err, dry.advanceCalled, dry.retentionViewCalled)
 	}
 
-	real := newNode()
-	req.DryRun = false
-	got, err = NewManagementMessageRetentionOperator(real).AdvanceMessageRetention(context.Background(), req)
-	if err != nil || got.Status != managementusecase.MessageRetentionStatusAdvanced || real.activated != 1 || !real.advanceCalled {
-		t.Fatalf("real = %+v err=%v activated=%d advanced=%v, want advanced after one activation", got, err, real.activated, real.advanceCalled)
-	}
-
-	// A follower that has not reported progress still bounds the boundary after activation.
 	lagging := newNode()
-	lagging.retentionView = channelruntime.RetentionView{HW: 3, CheckpointHW: 3, MinISRMatchOffset: 1}
-	operator := NewManagementMessageRetentionOperator(lagging)
-	now := time.Unix(0, 0)
-	operator.now = func() time.Time { now = now.Add(time.Second); return now }
-	got, err = operator.AdvanceMessageRetention(context.Background(), req)
-	if err != nil || got.Status != managementusecase.MessageRetentionStatusBlocked || lagging.advanceCalled {
-		t.Fatalf("lagging = %+v err=%v advanced=%v, want blocked without write", got, err, lagging.advanceCalled)
+	lagging.committed[9] = 2
+	got, err = run(lagging, req)
+	if err != nil || got.Status != managementusecase.MessageRetentionStatusBlocked || got.AdvancedThroughSeq != 2 ||
+		got.BlockedReason != managementusecase.MessageRetentionBlockedReasonMinISRMatchOffset || lagging.advanceCalled {
+		t.Fatalf("lagging voter = %+v err=%v advanced=%v, want blocked at 2", got, err, lagging.advanceCalled)
 	}
 
-	// Truly missing metadata stays not found without activating anything.
-	missing := newNode()
-	missing.metaErr = metadb.ErrNotFound
-	_, err = NewManagementMessageRetentionOperator(missing).AdvanceMessageRetention(context.Background(), req)
-	if !errors.Is(err, metadb.ErrNotFound) || missing.activated != 0 {
-		t.Fatalf("missing meta err=%v activated=%d, want ErrNotFound without activation", err, missing.activated)
+	unreachable := newNode()
+	unreachable.down[8] = true
+	got, err = run(unreachable, req)
+	if err != nil || got.Status != managementusecase.MessageRetentionStatusBlocked || unreachable.advanceCalled {
+		t.Fatalf("unreachable voter = %+v err=%v advanced=%v, want blocked without write", got, err, unreachable.advanceCalled)
+	}
+
+	canceled := newNode()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err = NewManagementMessageRetentionOperator(canceled).AdvanceMessageRetention(ctx, req); !errors.Is(err, context.Canceled) || canceled.advanceCalled {
+		t.Fatalf("canceled request err=%v advanced=%v, want context.Canceled without write", err, canceled.advanceCalled)
 	}
 }
 
@@ -374,8 +405,6 @@ func TestMessageRetentionForwardedLeaderUsesFreshRetentionView(t *testing.T) {
 type recordingRetentionNode struct {
 	nodeID              uint64
 	evicted             bool
-	activated           int
-	activateErr         error
 	meta                metadb.ChannelRuntimeMeta
 	metaErr             error
 	retentionView       channelruntime.RetentionView
@@ -396,18 +425,6 @@ func (n *recordingRetentionNode) NodeID() uint64 {
 
 func (n *recordingRetentionNode) GetChannelRuntimeMeta(context.Context, string, int64) (metadb.ChannelRuntimeMeta, error) {
 	return n.meta, n.metaErr
-}
-
-// ApplyChannelMeta mimics loading an evicted leader runtime from Slot metadata.
-func (n *recordingRetentionNode) ApplyChannelMeta(_ context.Context, nodeID uint64, meta metadb.ChannelRuntimeMeta) error {
-	if nodeID != n.nodeID || meta.ChannelID != n.meta.ChannelID {
-		return errors.New("unexpected activation target")
-	}
-	n.activated++
-	if n.activateErr == nil {
-		n.evicted = false
-	}
-	return n.activateErr
 }
 
 func (n *recordingRetentionNode) ChannelRetentionView(context.Context, channelruntime.ChannelID) (channelruntime.RetentionView, error) {

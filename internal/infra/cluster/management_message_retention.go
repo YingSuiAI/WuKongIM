@@ -14,11 +14,8 @@ import (
 	metadb "github.com/WuKongIM/WuKongIM/pkg/db/meta"
 )
 
-const (
-	// retentionActivationSettle bounds how long a freshly activated leader waits for follower progress.
-	retentionActivationSettle = 2 * time.Second
-	retentionActivationPoll   = 100 * time.Millisecond
-)
+// retentionProbeTimeout bounds the per-request voter frontier probes so a degraded quorum cannot hang the handler.
+const retentionProbeTimeout = 5 * time.Second
 
 // MessageRetentionNode is the cluster surface required to advance message log compaction boundaries.
 type MessageRetentionNode interface {
@@ -29,9 +26,9 @@ type MessageRetentionNode interface {
 	AdvanceChannelRetentionThroughSeq(context.Context, metadb.ChannelRetentionAdvance) error
 }
 
-// messageRetentionRuntimeActivator loads the leader Channel runtime from authoritative Slot metadata.
-type messageRetentionRuntimeActivator interface {
-	ApplyChannelMeta(ctx context.Context, nodeID uint64, meta metadb.ChannelRuntimeMeta) error
+// messageRetentionReplicaProber reads the exact durable frontier of one voter without loading a Channel runtime.
+type messageRetentionReplicaProber interface {
+	ProbeChannelReplica(ctx context.Context, nodeID uint64, meta metadb.ChannelRuntimeMeta) (channelruntime.RuntimeProbeChannel, error)
 }
 
 type messageRetentionRPCNode interface {
@@ -87,13 +84,26 @@ func (o *ManagementMessageRetentionOperator) AdvanceMessageRetention(ctx context
 	}
 
 	channelID := channelruntime.ChannelID{ID: req.ChannelID, Type: uint8(req.ChannelType)}
-	view, err := o.retentionView(ctx, channelID, meta, req.ThroughSeq)
-	if err != nil {
-		return managementusecase.AdvanceMessageRetentionResponse{}, mapMessageRetentionError(err)
+	var view channelruntime.RetentionView
+	prober, quorumMode := o.node.(messageRetentionReplicaProber)
+	if !quorumMode {
+		view, err = o.node.ChannelRetentionView(ctx, channelID)
+		if err != nil {
+			return managementusecase.AdvanceMessageRetentionResponse{}, mapMessageRetentionError(err)
+		}
 	}
 	latestSeq, err := o.latestCommittedSeq(ctx, req, current)
 	if err != nil {
 		return managementusecase.AdvanceMessageRetentionResponse{}, err
+	}
+	if quorumMode {
+		// Durable quorum channels do not report follower progress to the leader runtime. The leader proves
+		// every voter's durable frontier directly, which also works for an idle (unloaded) channel and never
+		// activates a runtime, so dry_run stays read-only.
+		view, err = o.voterRetentionView(ctx, prober, meta, latestSeq)
+		if err != nil {
+			return managementusecase.AdvanceMessageRetentionResponse{}, mapMessageRetentionError(err)
+		}
 	}
 	safeSeq, blockedReason := retentionSafeBoundary(req.ThroughSeq, latestSeq, view)
 	if safeSeq < req.ThroughSeq {
@@ -125,36 +135,30 @@ func (o *ManagementMessageRetentionOperator) AdvanceMessageRetention(ctx context
 	return retentionResponse(req, safeSeq, managementusecase.MessageRetentionStatusAdvanced, managementusecase.MessageRetentionBlockedReasonNone), nil
 }
 
-// retentionView reads the leader runtime's replica progress. Idle runtimes are evicted, so an unloaded
-// channel whose Slot metadata exists is activated on this leader and read once more. The safe boundary
-// still comes from the loaded runtime's HW and ISR progress, never from the stored boundary alone.
-func (o *ManagementMessageRetentionOperator) retentionView(ctx context.Context, id channelruntime.ChannelID, meta metadb.ChannelRuntimeMeta, throughSeq uint64) (channelruntime.RetentionView, error) {
-	view, err := o.node.ChannelRetentionView(ctx, id)
-	if err == nil || !channelruntime.ErrorMatches(err, channelruntime.ErrChannelNotFound) {
-		return view, err
+// voterRetentionView builds a retention view from the durable committed frontier of every ISR voter. A voter
+// that cannot be probed contributes zero so the boundary is blocked instead of passing what it may lack.
+func (o *ManagementMessageRetentionOperator) voterRetentionView(ctx context.Context, prober messageRetentionReplicaProber, meta metadb.ChannelRuntimeMeta, latestSeq uint64) (channelruntime.RetentionView, error) {
+	voters := meta.ISR
+	if len(voters) == 0 {
+		voters = meta.Replicas
 	}
-	activator, ok := o.node.(messageRetentionRuntimeActivator)
-	if !ok || channelruntime.Status(meta.Status) != channelruntime.StatusActive {
-		return view, err
-	}
-	if err := activator.ApplyChannelMeta(ctx, o.node.NodeID(), meta); err != nil {
-		return channelruntime.RetentionView{}, err
-	}
-	deadline := o.currentTime().Add(retentionActivationSettle)
-	for {
-		view, err = o.node.ChannelRetentionView(ctx, id)
-		if err != nil || (view.HW >= throughSeq && view.MinISRMatchOffset >= throughSeq) || !o.currentTime().Before(deadline) {
-			return view, err
+	probeCtx, cancel := context.WithTimeout(ctx, retentionProbeTimeout)
+	defer cancel()
+	view := channelruntime.RetentionView{HW: latestSeq, CheckpointHW: latestSeq, MinISRMatchOffset: maxUint64()}
+	for _, voter := range voters {
+		probe, err := prober.ProbeChannelReplica(probeCtx, voter, meta)
+		if err != nil {
+			if cause := ctx.Err(); cause != nil {
+				return channelruntime.RetentionView{}, cause
+			}
+			view.MinISRMatchOffset = 0
+			continue
 		}
-		// A freshly loaded leader has no follower progress yet; give ISR followers a short window to report it.
-		timer := time.NewTimer(retentionActivationPoll)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return channelruntime.RetentionView{}, ctx.Err()
-		case <-timer.C:
+		if probe.HW < view.MinISRMatchOffset {
+			view.MinISRMatchOffset = probe.HW
 		}
 	}
+	return view, nil
 }
 
 func (o *ManagementMessageRetentionOperator) latestCommittedSeq(ctx context.Context, req managementusecase.AdvanceMessageRetentionRequest, current uint64) (uint64, error) {

@@ -254,6 +254,9 @@ type ChannelRetentionConfig struct {
 	MaxTrimMessages int
 	// MaxTrimBytes caps payload bytes deleted per channel apply attempt. Zero means unlimited by bytes.
 	MaxTrimBytes int
+	// MaxActivationsPerPass caps idle Channel runtimes loaded per cleanup pass to physically trim a channel
+	// whose stored boundary is ahead of its local physical progress. Zero uses the default bound.
+	MaxActivationsPerPass int
 }
 
 // HealthReportConfig controls low-frequency node health reporting to Controller.
@@ -493,6 +496,9 @@ func (c *Config) applyChannelRetentionDefaults() {
 	}
 	if c.ChannelRetention.MaxTrimMessages == 0 {
 		c.ChannelRetention.MaxTrimMessages = 1000
+	}
+	if c.ChannelRetention.MaxActivationsPerPass == 0 {
+		c.ChannelRetention.MaxActivationsPerPass = 4
 	}
 }
 

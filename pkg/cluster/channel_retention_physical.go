@@ -4,6 +4,8 @@ import (
 	"context"
 
 	channelruntime "github.com/WuKongIM/WuKongIM/pkg/channel"
+	channelstore "github.com/WuKongIM/WuKongIM/pkg/channel/store"
+	metadb "github.com/WuKongIM/WuKongIM/pkg/db/meta"
 )
 
 // ChannelRetentionGCResult summarizes one bounded local physical retention pass.
@@ -22,6 +24,8 @@ type ChannelRetentionGCResult struct {
 	More bool
 	// Errors counts per-channel failures after the catalog page was read.
 	Errors int
+	// ActivatedChannels is the number of idle Channel runtimes loaded to apply a lagging physical boundary.
+	ActivatedChannels int
 }
 
 // ChannelRetentionView returns local Channel retention state.
@@ -89,7 +93,19 @@ func (n *Node) RunChannelRetentionGCOnce(ctx context.Context) (ChannelRetentionG
 		if meta.RetentionThroughSeq == 0 {
 			continue
 		}
+		if n.channelPhysicalRetentionSettled(ctx, entry, meta.RetentionThroughSeq) {
+			continue
+		}
 		applied, err := n.ApplyChannelRetentionBoundary(ctx, entry.ID, meta.RetentionThroughSeq, opts)
+		if err != nil && channelruntime.ErrorMatches(err, channelruntime.ErrChannelNotFound) &&
+			result.ActivatedChannels < n.cfg.ChannelRetention.MaxActivationsPerPass && n.canActivateForRetention(meta) {
+			// An idle-evicted runtime cannot apply the boundary. Load it once from authoritative Slot metadata
+			// (leader or follower role as the meta says); the cap bounds recovery probes and load per pass.
+			result.ActivatedChannels++
+			if err = n.applyChannelMigrationLocalRuntimeMeta(ctx, meta); err == nil {
+				applied, err = n.ApplyChannelRetentionBoundary(ctx, entry.ID, meta.RetentionThroughSeq, opts)
+			}
+		}
 		if err != nil {
 			result.Errors++
 			continue
@@ -109,4 +125,22 @@ func (n *Node) RunChannelRetentionGCOnce(ctx context.Context) (ChannelRetentionG
 		n.channelRetentionCursor = ""
 	}
 	return result, nil
+}
+
+// canActivateForRetention reports whether this node may load a runtime for meta: active metadata of a
+// replica hosted here. Deleting or creating channels keep their lifecycle owners.
+func (n *Node) canActivateForRetention(meta metadb.ChannelRuntimeMeta) bool {
+	return channelruntime.Status(meta.Status) == channelruntime.StatusActive && containsNodeID(meta.Replicas, n.cfg.NodeID)
+}
+
+// channelPhysicalRetentionSettled reports whether the local store already physically reached the boundary,
+// read without loading a Channel runtime so a settled idle channel never costs an activation.
+func (n *Node) channelPhysicalRetentionSettled(ctx context.Context, entry channelstore.ChannelCatalogEntry, boundary uint64) bool {
+	store, err := n.defaultChannelStore.ChannelStore(entry.Key, entry.ID)
+	if err != nil || store == nil {
+		return false
+	}
+	defer func() { _ = store.Close() }()
+	state, err := store.LoadRetentionState(ctx)
+	return err == nil && state.PhysicalRetentionThroughSeq >= boundary
 }
