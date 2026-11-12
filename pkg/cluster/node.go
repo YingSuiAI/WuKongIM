@@ -189,6 +189,7 @@ type Node struct {
 	channelRetentionWG              sync.WaitGroup
 	channelRetentionGCMu            sync.Mutex
 	channelRetentionCursor          channelruntime.ChannelKey
+	channelRetentionDeferred        []channelstore.ChannelCatalogEntry
 	channelMigrationMu              sync.Mutex
 	channelMigrationCancel          context.CancelFunc
 	channelMigrationWG              sync.WaitGroup

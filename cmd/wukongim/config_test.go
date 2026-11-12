@@ -74,14 +74,16 @@ func TestLoadConfigDefaultValues(t *testing.T) {
 		cfg.ChannelMessageRetention.ScanInterval != time.Minute ||
 		cfg.ChannelMessageRetention.ChannelBatchSize != 128 ||
 		cfg.ChannelMessageRetention.MaxTrimMessages != 1000 ||
-		cfg.ChannelMessageRetention.MaxTrimBytes != 0 {
+		cfg.ChannelMessageRetention.MaxTrimBytes != 0 ||
+		cfg.ChannelMessageRetention.MaxActivationsPerPass != 4 {
 		t.Fatalf("ChannelMessageRetention defaults = %#v", cfg.ChannelMessageRetention)
 	}
 	if cfg.Cluster.ChannelRetention.PhysicalGCEnabled ||
 		cfg.Cluster.ChannelRetention.ScanInterval != time.Minute ||
 		cfg.Cluster.ChannelRetention.ChannelBatchSize != 128 ||
 		cfg.Cluster.ChannelRetention.MaxTrimMessages != 1000 ||
-		cfg.Cluster.ChannelRetention.MaxTrimBytes != 0 {
+		cfg.Cluster.ChannelRetention.MaxTrimBytes != 0 ||
+		cfg.Cluster.ChannelRetention.MaxActivationsPerPass != 4 {
 		t.Fatalf("Cluster.ChannelRetention defaults = %#v", cfg.Cluster.ChannelRetention)
 	}
 }
@@ -620,6 +622,7 @@ func TestChannelMessageRetentionConfigEnvOverrides(t *testing.T) {
 	t.Setenv("WK_CHANNEL_MESSAGE_RETENTION_CHANNEL_BATCH_SIZE", "64")
 	t.Setenv("WK_CHANNEL_MESSAGE_RETENTION_MAX_TRIM_MESSAGES", "250")
 	t.Setenv("WK_CHANNEL_MESSAGE_RETENTION_MAX_TRIM_BYTES", "1048576")
+	t.Setenv("WK_CHANNEL_MESSAGE_RETENTION_MAX_ACTIVATIONS_PER_PASS", "9")
 
 	cfg, err := loadConfig([]string{"-config", path})
 	if err != nil {
@@ -627,11 +630,12 @@ func TestChannelMessageRetentionConfigEnvOverrides(t *testing.T) {
 	}
 
 	want := app.ChannelMessageRetentionConfig{
-		PhysicalGCEnabled: true,
-		ScanInterval:      2 * time.Minute,
-		ChannelBatchSize:  64,
-		MaxTrimMessages:   250,
-		MaxTrimBytes:      1048576,
+		PhysicalGCEnabled:     true,
+		ScanInterval:          2 * time.Minute,
+		ChannelBatchSize:      64,
+		MaxTrimMessages:       250,
+		MaxTrimBytes:          1048576,
+		MaxActivationsPerPass: 9,
 	}
 	if cfg.ChannelMessageRetention != want {
 		t.Fatalf("ChannelMessageRetention = %#v, want %#v", cfg.ChannelMessageRetention, want)
@@ -640,7 +644,8 @@ func TestChannelMessageRetentionConfigEnvOverrides(t *testing.T) {
 		cfg.Cluster.ChannelRetention.ScanInterval != want.ScanInterval ||
 		cfg.Cluster.ChannelRetention.ChannelBatchSize != want.ChannelBatchSize ||
 		cfg.Cluster.ChannelRetention.MaxTrimMessages != want.MaxTrimMessages ||
-		cfg.Cluster.ChannelRetention.MaxTrimBytes != want.MaxTrimBytes {
+		cfg.Cluster.ChannelRetention.MaxTrimBytes != want.MaxTrimBytes ||
+		cfg.Cluster.ChannelRetention.MaxActivationsPerPass != want.MaxActivationsPerPass {
 		t.Fatalf("Cluster.ChannelRetention = %#v, want mapped from %#v", cfg.Cluster.ChannelRetention, want)
 	}
 }

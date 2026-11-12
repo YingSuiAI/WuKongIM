@@ -90,6 +90,20 @@ func (r *Reactor) handleApplyRetentionBoundary(event Event) {
 		event.Future.Complete(Result{Err: ch.ErrStaleMeta})
 		return
 	}
+	if req.ThroughSeq > rc.state.LEO {
+		// A replica that has not yet received the data behind the boundary must not adopt it: the store adopt
+		// raises RetainedMaxSeq to the boundary, which makes the local frontier unrecoverable (no durable
+		// proposal ends there) and drops the replica out of quorum writes. Report the lag and leave the store
+		// untouched; the replica applies the boundary after it caught up.
+		event.Future.Complete(Result{RetentionApply: ch.RetentionApplyResult{
+			ChannelID:                   req.ChannelID,
+			ThroughSeq:                  req.ThroughSeq,
+			LocalRetentionThroughSeq:    rc.state.LocalRetentionThroughSeq,
+			PhysicalRetentionThroughSeq: rc.state.PhysicalRetentionThroughSeq,
+			BlockedReason:               ch.RetentionBlockedLEOLag,
+		}})
+		return
+	}
 	if req.ThroughSeq > rc.state.RetentionThroughSeq {
 		rc.state.RetentionThroughSeq = req.ThroughSeq
 	}

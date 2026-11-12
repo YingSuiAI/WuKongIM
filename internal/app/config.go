@@ -308,6 +308,9 @@ type ChannelMessageRetentionConfig struct {
 	MaxTrimMessages int
 	// MaxTrimBytes caps payload bytes deleted per channel cleanup attempt. Zero means unlimited by bytes.
 	MaxTrimBytes int
+	// MaxActivationsPerPass caps idle channel runtimes loaded per cleanup pass to physically trim channels whose
+	// runtime was evicted. Zero uses the default bound.
+	MaxActivationsPerPass int
 }
 
 // ChannelConfig contains channel management settings.
@@ -537,6 +540,9 @@ func defaultChannelMessageRetentionConfig(cfg ChannelMessageRetentionConfig) Cha
 	}
 	if cfg.MaxTrimMessages == 0 {
 		cfg.MaxTrimMessages = 1000
+	}
+	if cfg.MaxActivationsPerPass == 0 {
+		cfg.MaxActivationsPerPass = 4
 	}
 	return cfg
 }
@@ -870,6 +876,9 @@ func validateChannelMessageRetentionConfig(cfg ChannelMessageRetentionConfig) er
 	}
 	if cfg.MaxTrimBytes < 0 {
 		return fmt.Errorf("%w: channel message retention max trim bytes must be non-negative", ErrInvalidConfig)
+	}
+	if cfg.MaxActivationsPerPass < 0 {
+		return fmt.Errorf("%w: channel message retention max activations per pass must be non-negative", ErrInvalidConfig)
 	}
 	return nil
 }

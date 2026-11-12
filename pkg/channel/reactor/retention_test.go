@@ -132,6 +132,47 @@ func TestApplyRetentionBoundaryBlocksTrimWhenCheckpointLags(t *testing.T) {
 	require.Equal(t, 2, applied.Deleted)
 }
 
+func TestApplyRetentionBoundaryAboveLocalLEODoesNotAdoptUntilCaughtUp(t *testing.T) {
+	factory := store.NewMemoryFactory()
+	meta := testMeta("retention-leo-lag", 1, 1)
+	seedRetentionRecords(t, factory, meta, 2, 2)
+	sink := captureCompletionSink{results: make(chan worker.Result, 8)}
+	pools := newDirectTestPools(t, factory, sink)
+	defer pools.Close()
+	r := NewReactor(ReactorConfig{ID: 0, LocalNode: 1, Store: factory, Pools: pools, MailboxSize: 16})
+	require.NoError(t, applyMetaDirect(t, r, meta))
+	apply := func(through uint64) *Future {
+		future := NewFuture()
+		r.handleApplyRetentionBoundary(Event{
+			Kind:           EventApplyRetentionBoundary,
+			Key:            meta.Key,
+			Future:         future,
+			RetentionApply: ch.RetentionApplyRequest{ChannelID: meta.ID, ThroughSeq: through},
+		})
+		return future
+	}
+
+	// The replica holds only seq 1..2; a boundary at 5 must be reported as lag without touching the store.
+	applied := awaitRetentionResult(t, apply(5))
+	require.Equal(t, ch.RetentionBlockedLEOLag, applied.BlockedReason)
+	require.Zero(t, applied.LocalRetentionThroughSeq)
+	state, err := retentionStore(t, factory, meta).LoadRetentionState(context.Background())
+	require.NoError(t, err)
+	require.Zero(t, state.LocalRetentionThroughSeq)
+	require.Zero(t, state.RetainedMaxSeq)
+
+	// After catch-up the same boundary applies normally.
+	seedMoreRecords(t, factory, meta, 3, 3, 5)
+	rc := r.channels[meta.Key]
+	rc.state.LEO, rc.state.HW, rc.state.CheckpointHW = 5, 5, 5
+	future := apply(5)
+	r.handleWorkerResult(Event{Kind: EventWorkerResult, Worker: sink.awaitResultKind(t, worker.TaskStoreRetention)})
+	applied = awaitRetentionResult(t, future)
+	require.Empty(t, applied.BlockedReason)
+	require.Equal(t, uint64(5), applied.LocalRetentionThroughSeq)
+	require.Equal(t, uint64(5), applied.PhysicalRetentionThroughSeq)
+}
+
 func TestLeaderRetentionTrimBlocksWhenMinISRLags(t *testing.T) {
 	factory := store.NewMemoryFactory()
 	meta := testMeta("retention-min-isr-lag", 1, 1)
@@ -238,4 +279,17 @@ func TestRetentionTrimDecisionQuorumLeaderIgnoresAbsentFollowerProgress(t *testi
 	allowed, reason = retentionTrimDecision(state, 6, true)
 	require.False(t, allowed)
 	require.Equal(t, ch.RetentionBlockedHWLag, reason)
+}
+
+func seedMoreRecords(t *testing.T, factory store.Factory, meta ch.Meta, start uint64, records int, checkpoint uint64) {
+	t.Helper()
+	cs := retentionStore(t, factory, meta)
+	items := make([]ch.Record, 0, records)
+	for i := 0; i < records; i++ {
+		id := start + uint64(i)
+		items = append(items, ch.Record{ID: id, Payload: []byte{byte(id)}, SizeBytes: 1})
+	}
+	_, err := cs.AppendLeader(context.Background(), store.AppendLeaderRequest{Records: items})
+	require.NoError(t, err)
+	require.NoError(t, cs.StoreCheckpoint(context.Background(), ch.Checkpoint{HW: checkpoint}))
 }

@@ -67,8 +67,61 @@ func TestChannelRetentionGCOnceLoadsEvictedChannelUpToCap(t *testing.T) {
 		t.Fatalf("RunChannelRetentionGCOnce() error = %v", err)
 	}
 	// One evicted channel is loaded and applied; the other exceeds the per-pass cap and waits for the next pass.
-	if result.ActivatedChannels != 1 || result.AppliedChannels != 1 || result.Errors != 1 || len(runtime.appliedMeta) != 1 {
+	if result.ActivatedChannels != 1 || result.AppliedChannels != 1 || result.DeferredChannels != 1 || result.Errors != 0 || len(runtime.appliedMeta) != 1 {
 		t.Fatalf("result = %#v appliedMeta=%d, want one activation, one applied and one deferred", result, len(runtime.appliedMeta))
+	}
+}
+
+func TestChannelRetentionGCOnceRetriesDeferredChannelsFirst(t *testing.T) {
+	node, runtime := newChannelRetentionGCNode(t)
+	node.cfg.ChannelRetention.MaxActivationsPerPass = 1
+	node.cfg.ChannelRetention.ChannelBatchSize = 2
+	ids := []channelruntime.ChannelID{{ID: "retention-defer-a", Type: 1}, {ID: "retention-defer-b", Type: 1}, {ID: "retention-defer-c", Type: 1}}
+	runtime.evicted = map[channelruntime.ChannelID]bool{}
+	for i, id := range ids {
+		seedChannelRetentionCatalogAndMeta(t, node, id, uint64(i*3+1), 3, 2)
+		runtime.evicted[id] = true
+	}
+	first, err := node.RunChannelRetentionGCOnce(context.Background())
+	if err != nil || first.DeferredChannels != 1 || !first.More {
+		t.Fatalf("first pass = %#v err=%v, want one deferred and more pages", first, err)
+	}
+	// The second pass carries the deferred channel ahead of the new page, so it is loaded before the third channel.
+	second, err := node.RunChannelRetentionGCOnce(context.Background())
+	if err != nil || second.ActivatedChannels != 1 {
+		t.Fatalf("second pass = %#v err=%v, want one activation", second, err)
+	}
+	if len(runtime.appliedMeta) != 2 || runtime.appliedMeta[1].ID.ID != "retention-defer-b" {
+		t.Fatalf("applied meta = %#v, want the deferred channel b loaded on the second pass", runtime.appliedMeta)
+	}
+}
+
+func TestChannelRetentionGCOnceSkipsSettledChannelWithoutLoadingIt(t *testing.T) {
+	node, runtime := newChannelRetentionGCNode(t)
+	id := channelruntime.ChannelID{ID: "retention-settled", Type: 1}
+	seedChannelRetentionCatalogAndMeta(t, node, id, 1, 3, 2)
+	cs, err := node.defaultChannelStore.ChannelStore(channelruntime.ChannelKeyForID(id), id)
+	if err != nil {
+		t.Fatalf("ChannelStore() error = %v", err)
+	}
+	defer func() { _ = cs.Close() }()
+	if _, err := cs.AdoptRetentionBoundary(context.Background(), 2, "committed"); err != nil {
+		t.Fatalf("AdoptRetentionBoundary() error = %v", err)
+	}
+	if _, err := cs.TrimMessagesThrough(context.Background(), 2, channelstore.RetentionTrimOptions{}); err != nil {
+		t.Fatalf("TrimMessagesThrough() error = %v", err)
+	}
+	runtime.evicted = map[channelruntime.ChannelID]bool{id: true}
+
+	result, err := node.RunChannelRetentionGCOnce(context.Background())
+	if err != nil {
+		t.Fatalf("RunChannelRetentionGCOnce() error = %v", err)
+	}
+	if result.ScannedChannels != 1 || result.ActivatedChannels != 0 || result.DeferredChannels != 0 || result.Errors != 0 {
+		t.Fatalf("result = %#v, want the settled channel skipped", result)
+	}
+	if runtime.applyCalls != 0 || len(runtime.appliedMeta) != 0 {
+		t.Fatalf("apply calls = %d appliedMeta = %d, want the settled channel never loaded", runtime.applyCalls, len(runtime.appliedMeta))
 	}
 }
 

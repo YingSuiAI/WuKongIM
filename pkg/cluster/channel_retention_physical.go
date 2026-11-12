@@ -26,6 +26,8 @@ type ChannelRetentionGCResult struct {
 	Errors int
 	// ActivatedChannels is the number of idle Channel runtimes loaded to apply a lagging physical boundary.
 	ActivatedChannels int
+	// DeferredChannels is the number of idle channels over the activation cap; they are retried first on the next pass.
+	DeferredChannels int
 }
 
 // ChannelRetentionView returns local Channel retention state.
@@ -75,10 +77,15 @@ func (n *Node) RunChannelRetentionGCOnce(ctx context.Context) (ChannelRetentionG
 	n.channelRetentionGCMu.Lock()
 	defer n.channelRetentionGCMu.Unlock()
 
-	entries, cursor, more, err := n.defaultChannelStore.ListChannelsPage(ctx, n.channelRetentionCursor, n.cfg.ChannelRetention.ChannelBatchSize)
+	page, cursor, more, err := n.defaultChannelStore.ListChannelsPage(ctx, n.channelRetentionCursor, n.cfg.ChannelRetention.ChannelBatchSize)
 	if err != nil {
 		return ChannelRetentionGCResult{}, err
 	}
+	// Channels deferred by the activation cap on the previous pass go first so a backlog drains at the cap per
+	// pass instead of waiting a full catalog cycle; the carried list is bounded by the batch size.
+	entries := append(append([]channelstore.ChannelCatalogEntry(nil), n.channelRetentionDeferred...), page...)
+	n.channelRetentionDeferred = nil
+	deferredSeen := make(map[channelruntime.ChannelKey]bool)
 	result := ChannelRetentionGCResult{ScannedChannels: len(entries), More: more}
 	opts := channelruntime.RetentionApplyOptions{
 		MaxTrimMessages: n.cfg.ChannelRetention.MaxTrimMessages,
@@ -97,8 +104,16 @@ func (n *Node) RunChannelRetentionGCOnce(ctx context.Context) (ChannelRetentionG
 			continue
 		}
 		applied, err := n.ApplyChannelRetentionBoundary(ctx, entry.ID, meta.RetentionThroughSeq, opts)
-		if err != nil && channelruntime.ErrorMatches(err, channelruntime.ErrChannelNotFound) &&
-			result.ActivatedChannels < n.cfg.ChannelRetention.MaxActivationsPerPass && n.canActivateForRetention(meta) {
+		if err != nil && channelruntime.ErrorMatches(err, channelruntime.ErrChannelNotFound) && n.canActivateForRetention(meta) {
+			if result.ActivatedChannels >= n.cfg.ChannelRetention.MaxActivationsPerPass {
+				// Over the cap: not a failure, retry first on the next pass.
+				result.DeferredChannels++
+				if len(n.channelRetentionDeferred) < n.cfg.ChannelRetention.ChannelBatchSize && !deferredSeen[entry.Key] {
+					deferredSeen[entry.Key] = true
+					n.channelRetentionDeferred = append(n.channelRetentionDeferred, entry)
+				}
+				continue
+			}
 			// An idle-evicted runtime cannot apply the boundary. Load it once from authoritative Slot metadata
 			// (leader or follower role as the meta says); the cap bounds recovery probes and load per pass.
 			result.ActivatedChannels++

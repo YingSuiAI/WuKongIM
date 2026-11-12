@@ -140,6 +140,7 @@ func TestChannelMessageRetentionConfigDefaults(t *testing.T) {
 	require.Equal(t, 128, app.cfg.ChannelMessageRetention.ChannelBatchSize)
 	require.Equal(t, 1000, app.cfg.ChannelMessageRetention.MaxTrimMessages)
 	require.Equal(t, 0, app.cfg.ChannelMessageRetention.MaxTrimBytes)
+	require.Equal(t, 4, app.cfg.ChannelMessageRetention.MaxActivationsPerPass)
 
 	cluster := defaultClusterConfig(app.cfg)
 	require.Equal(t, app.cfg.ChannelMessageRetention.PhysicalGCEnabled, cluster.ChannelRetention.PhysicalGCEnabled)
@@ -147,6 +148,7 @@ func TestChannelMessageRetentionConfigDefaults(t *testing.T) {
 	require.Equal(t, app.cfg.ChannelMessageRetention.ChannelBatchSize, cluster.ChannelRetention.ChannelBatchSize)
 	require.Equal(t, app.cfg.ChannelMessageRetention.MaxTrimMessages, cluster.ChannelRetention.MaxTrimMessages)
 	require.Equal(t, app.cfg.ChannelMessageRetention.MaxTrimBytes, cluster.ChannelRetention.MaxTrimBytes)
+	require.Equal(t, app.cfg.ChannelMessageRetention.MaxActivationsPerPass, cluster.ChannelRetention.MaxActivationsPerPass)
 }
 
 func TestChannelMessageRetentionConfigValidationRejectsInvalidBounds(t *testing.T) {
@@ -155,6 +157,7 @@ func TestChannelMessageRetentionConfigValidationRejectsInvalidBounds(t *testing.
 		{ChannelBatchSize: -1},
 		{MaxTrimMessages: -1},
 		{MaxTrimBytes: -1},
+		{MaxActivationsPerPass: -1},
 	}
 	for _, cfg := range cases {
 		app := &App{cfg: Config{DataDir: t.TempDir(), ChannelMessageRetention: cfg}}

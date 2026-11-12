@@ -54,6 +54,8 @@ message_retention_scan_interval = "1m"
 message_retention_channel_batch_size = 128
 message_retention_max_trim_messages = 1000
 message_retention_max_trim_bytes = 0
+# Idle channel runtimes loaded per cleanup pass to physically trim evicted channels (0 = default 4).
+message_retention_max_activations_per_pass = 4
 large_group_subscriber_threshold = 500
 
 [api]

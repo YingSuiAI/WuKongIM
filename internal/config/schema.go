@@ -134,6 +134,7 @@ var schemaFields = []fieldSpec{
 	{TOMLPath: "channel.message_retention_channel_batch_size", EnvKey: "WK_CHANNEL_MESSAGE_RETENTION_CHANNEL_BATCH_SIZE", Kind: kindInt, Group: "channel", Label: "Message retention channel batch size"},
 	{TOMLPath: "channel.message_retention_max_trim_messages", EnvKey: "WK_CHANNEL_MESSAGE_RETENTION_MAX_TRIM_MESSAGES", Kind: kindInt, Group: "channel", Label: "Message retention max trim messages"},
 	{TOMLPath: "channel.message_retention_max_trim_bytes", EnvKey: "WK_CHANNEL_MESSAGE_RETENTION_MAX_TRIM_BYTES", Kind: kindInt, Group: "channel", Label: "Message retention max trim bytes"},
+	{TOMLPath: "channel.message_retention_max_activations_per_pass", EnvKey: "WK_CHANNEL_MESSAGE_RETENTION_MAX_ACTIVATIONS_PER_PASS", Kind: kindInt, Group: "channel", Label: "Message retention max activations per pass"},
 	{TOMLPath: "channel.large_group_subscriber_threshold", EnvKey: "WK_CHANNEL_LARGE_GROUP_SUBSCRIBER_THRESHOLD", Kind: kindInt, Group: "channel", Label: "Large group subscriber threshold"},
 
 	{TOMLPath: "api.listen_addr", EnvKey: "WK_API_LISTEN_ADDR", Kind: kindString, Group: "api", Label: "API listen address"},
@@ -315,6 +316,7 @@ func supportedConfigKeysForBuilder() []string {
 		"WK_CHANNEL_MESSAGE_RETENTION_CHANNEL_BATCH_SIZE",
 		"WK_CHANNEL_MESSAGE_RETENTION_MAX_TRIM_MESSAGES",
 		"WK_CHANNEL_MESSAGE_RETENTION_MAX_TRIM_BYTES",
+		"WK_CHANNEL_MESSAGE_RETENTION_MAX_ACTIVATIONS_PER_PASS",
 		"WK_CLUSTER_COMMIT_COORDINATOR_SYNC",
 		"WK_CLUSTER_COMMIT_COORDINATOR_FLUSH_WINDOW",
 		"WK_CLUSTER_COMMIT_COORDINATOR_MAX_REQUESTS",

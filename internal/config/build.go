@@ -60,9 +60,10 @@ func buildConfig(values map[string]string) (app.Config, error) {
 			SystemDeviceID: "____device",
 		},
 		ChannelMessageRetention: app.ChannelMessageRetentionConfig{
-			ScanInterval:     time.Minute,
-			ChannelBatchSize: 128,
-			MaxTrimMessages:  1000,
+			ScanInterval:          time.Minute,
+			ChannelBatchSize:      128,
+			MaxTrimMessages:       1000,
+			MaxActivationsPerPass: 4,
 		},
 		Delivery: app.DeliveryConfig{
 			Enabled:                    true,
@@ -480,6 +481,16 @@ func buildConfig(values map[string]string) (app.Config, error) {
 			return app.Config{}, fmt.Errorf("parse WK_CHANNEL_MESSAGE_RETENTION_MAX_TRIM_BYTES: value must be >= 0")
 		}
 		cfg.ChannelMessageRetention.MaxTrimBytes = maxBytes
+	}
+	if raw := configValue(values, "WK_CHANNEL_MESSAGE_RETENTION_MAX_ACTIVATIONS_PER_PASS"); raw != "" {
+		maxActivations, err := parseInt("WK_CHANNEL_MESSAGE_RETENTION_MAX_ACTIVATIONS_PER_PASS", raw)
+		if err != nil {
+			return app.Config{}, err
+		}
+		if maxActivations < 0 {
+			return app.Config{}, fmt.Errorf("parse WK_CHANNEL_MESSAGE_RETENTION_MAX_ACTIVATIONS_PER_PASS: value must be >= 0")
+		}
+		cfg.ChannelMessageRetention.MaxActivationsPerPass = maxActivations
 	}
 	if raw := configValue(values, "WK_CLUSTER_COMMIT_COORDINATOR_SYNC"); raw != "" {
 		syncCommit, err := parseBool("WK_CLUSTER_COMMIT_COORDINATOR_SYNC", raw)
@@ -1262,11 +1273,12 @@ func buildConfig(values map[string]string) (app.Config, error) {
 	cfg.Plugin.SetEnableExplicit(pluginEnableSet)
 	cfg.Plugin.SetExplicitFlags(configValue(values, "WK_PLUGIN_HOT_RELOAD") != "")
 	cfg.Cluster.ChannelRetention = cluster.ChannelRetentionConfig{
-		PhysicalGCEnabled: cfg.ChannelMessageRetention.PhysicalGCEnabled,
-		ScanInterval:      cfg.ChannelMessageRetention.ScanInterval,
-		ChannelBatchSize:  cfg.ChannelMessageRetention.ChannelBatchSize,
-		MaxTrimMessages:   cfg.ChannelMessageRetention.MaxTrimMessages,
-		MaxTrimBytes:      cfg.ChannelMessageRetention.MaxTrimBytes,
+		PhysicalGCEnabled:     cfg.ChannelMessageRetention.PhysicalGCEnabled,
+		ScanInterval:          cfg.ChannelMessageRetention.ScanInterval,
+		ChannelBatchSize:      cfg.ChannelMessageRetention.ChannelBatchSize,
+		MaxTrimMessages:       cfg.ChannelMessageRetention.MaxTrimMessages,
+		MaxTrimBytes:          cfg.ChannelMessageRetention.MaxTrimBytes,
+		MaxActivationsPerPass: cfg.ChannelMessageRetention.MaxActivationsPerPass,
 	}
 	return cfg, nil
 }
