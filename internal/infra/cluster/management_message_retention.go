@@ -14,6 +14,12 @@ import (
 	metadb "github.com/WuKongIM/WuKongIM/pkg/db/meta"
 )
 
+const (
+	// retentionActivationSettle bounds how long a freshly activated leader waits for follower progress.
+	retentionActivationSettle = 2 * time.Second
+	retentionActivationPoll   = 100 * time.Millisecond
+)
+
 // MessageRetentionNode is the cluster surface required to advance message log compaction boundaries.
 type MessageRetentionNode interface {
 	NodeID() uint64
@@ -21,6 +27,11 @@ type MessageRetentionNode interface {
 	ChannelRetentionView(context.Context, channelruntime.ChannelID) (channelruntime.RetentionView, error)
 	ReadChannelCommitted(context.Context, channelruntime.ChannelID, channelstore.ReadCommittedRequest) (channelstore.ReadCommittedResult, error)
 	AdvanceChannelRetentionThroughSeq(context.Context, metadb.ChannelRetentionAdvance) error
+}
+
+// messageRetentionRuntimeActivator loads the leader Channel runtime from authoritative Slot metadata.
+type messageRetentionRuntimeActivator interface {
+	ApplyChannelMeta(ctx context.Context, nodeID uint64, meta metadb.ChannelRuntimeMeta) error
 }
 
 type messageRetentionRPCNode interface {
@@ -76,7 +87,7 @@ func (o *ManagementMessageRetentionOperator) AdvanceMessageRetention(ctx context
 	}
 
 	channelID := channelruntime.ChannelID{ID: req.ChannelID, Type: uint8(req.ChannelType)}
-	view, err := o.node.ChannelRetentionView(ctx, channelID)
+	view, err := o.retentionView(ctx, channelID, meta, req.ThroughSeq)
 	if err != nil {
 		return managementusecase.AdvanceMessageRetentionResponse{}, mapMessageRetentionError(err)
 	}
@@ -112,6 +123,38 @@ func (o *ManagementMessageRetentionOperator) AdvanceMessageRetention(ctx context
 		return managementusecase.AdvanceMessageRetentionResponse{}, mapMessageRetentionError(err)
 	}
 	return retentionResponse(req, safeSeq, managementusecase.MessageRetentionStatusAdvanced, managementusecase.MessageRetentionBlockedReasonNone), nil
+}
+
+// retentionView reads the leader runtime's replica progress. Idle runtimes are evicted, so an unloaded
+// channel whose Slot metadata exists is activated on this leader and read once more. The safe boundary
+// still comes from the loaded runtime's HW and ISR progress, never from the stored boundary alone.
+func (o *ManagementMessageRetentionOperator) retentionView(ctx context.Context, id channelruntime.ChannelID, meta metadb.ChannelRuntimeMeta, throughSeq uint64) (channelruntime.RetentionView, error) {
+	view, err := o.node.ChannelRetentionView(ctx, id)
+	if err == nil || !channelruntime.ErrorMatches(err, channelruntime.ErrChannelNotFound) {
+		return view, err
+	}
+	activator, ok := o.node.(messageRetentionRuntimeActivator)
+	if !ok || channelruntime.Status(meta.Status) != channelruntime.StatusActive {
+		return view, err
+	}
+	if err := activator.ApplyChannelMeta(ctx, o.node.NodeID(), meta); err != nil {
+		return channelruntime.RetentionView{}, err
+	}
+	deadline := o.currentTime().Add(retentionActivationSettle)
+	for {
+		view, err = o.node.ChannelRetentionView(ctx, id)
+		if err != nil || (view.HW >= throughSeq && view.MinISRMatchOffset >= throughSeq) || !o.currentTime().Before(deadline) {
+			return view, err
+		}
+		// A freshly loaded leader has no follower progress yet; give ISR followers a short window to report it.
+		timer := time.NewTimer(retentionActivationPoll)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return channelruntime.RetentionView{}, ctx.Err()
+		case <-timer.C:
+		}
+	}
 }
 
 func (o *ManagementMessageRetentionOperator) latestCommittedSeq(ctx context.Context, req managementusecase.AdvanceMessageRetentionRequest, current uint64) (uint64, error) {
