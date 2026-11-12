@@ -108,6 +108,8 @@ func postJSONBytesWithClient(ctx context.Context, client *http.Client, url strin
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	// The public API requires the service bearer token the suite configures on every node.
+	req.Header.Set("Authorization", "Bearer "+defaultE2EServiceToken)
 
 	resp, err := client.Do(req)
 	if err != nil {

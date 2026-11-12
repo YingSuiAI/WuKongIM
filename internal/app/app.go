@@ -519,11 +519,12 @@ func defaultClusterConfig(cfg Config) cluster.Config {
 		clusterCfg.DataDir = cfg.DataDir
 	}
 	clusterCfg.ChannelRetention = cluster.ChannelRetentionConfig{
-		PhysicalGCEnabled: cfg.ChannelMessageRetention.PhysicalGCEnabled,
-		ScanInterval:      cfg.ChannelMessageRetention.ScanInterval,
-		ChannelBatchSize:  cfg.ChannelMessageRetention.ChannelBatchSize,
-		MaxTrimMessages:   cfg.ChannelMessageRetention.MaxTrimMessages,
-		MaxTrimBytes:      cfg.ChannelMessageRetention.MaxTrimBytes,
+		PhysicalGCEnabled:     cfg.ChannelMessageRetention.PhysicalGCEnabled,
+		ScanInterval:          cfg.ChannelMessageRetention.ScanInterval,
+		ChannelBatchSize:      cfg.ChannelMessageRetention.ChannelBatchSize,
+		MaxTrimMessages:       cfg.ChannelMessageRetention.MaxTrimMessages,
+		MaxTrimBytes:          cfg.ChannelMessageRetention.MaxTrimBytes,
+		MaxActivationsPerPass: cfg.ChannelMessageRetention.MaxActivationsPerPass,
 	}
 	return clusterCfg
 }

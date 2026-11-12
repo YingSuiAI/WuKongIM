@@ -90,6 +90,20 @@ func (r *Reactor) handleApplyRetentionBoundary(event Event) {
 		event.Future.Complete(Result{Err: ch.ErrStaleMeta})
 		return
 	}
+	if req.ThroughSeq > rc.state.LEO {
+		// A replica that has not yet received the data behind the boundary must not adopt it: the store adopt
+		// raises RetainedMaxSeq to the boundary, which makes the local frontier unrecoverable (no durable
+		// proposal ends there) and drops the replica out of quorum writes. Report the lag and leave the store
+		// untouched; the replica applies the boundary after it caught up.
+		event.Future.Complete(Result{RetentionApply: ch.RetentionApplyResult{
+			ChannelID:                   req.ChannelID,
+			ThroughSeq:                  req.ThroughSeq,
+			LocalRetentionThroughSeq:    rc.state.LocalRetentionThroughSeq,
+			PhysicalRetentionThroughSeq: rc.state.PhysicalRetentionThroughSeq,
+			BlockedReason:               ch.RetentionBlockedLEOLag,
+		}})
+		return
+	}
 	if req.ThroughSeq > rc.state.RetentionThroughSeq {
 		rc.state.RetentionThroughSeq = req.ThroughSeq
 	}
@@ -97,7 +111,7 @@ func (r *Reactor) handleApplyRetentionBoundary(event Event) {
 		event.Future.Complete(Result{RetentionApply: retentionNoopResult(rc.state, req)})
 		return
 	}
-	trimAllowed, blockedReason := retentionTrimDecision(rc.state, req.ThroughSeq)
+	trimAllowed, blockedReason := retentionTrimDecision(rc.state, req.ThroughSeq, r.cfg.QuorumLog != nil)
 	opID := event.OpID
 	if opID == 0 {
 		opID = r.nextOpID()
@@ -242,7 +256,10 @@ func retentionViewFromChannel(rc *runtimeChannel) ch.RetentionView {
 	}
 }
 
-func retentionTrimDecision(state *machine.ChannelState, throughSeq uint64) (bool, string) {
+// retentionTrimDecision reports whether the local store may physically trim through throughSeq. quorumLog
+// channels never receive follower Progress on the leader runtime; their boundary is only advanced after the
+// manager proved every voter's durable frontier, so the leader-side min-ISR rule applies to legacy replication only.
+func retentionTrimDecision(state *machine.ChannelState, throughSeq uint64, quorumLog bool) (bool, string) {
 	if state == nil || throughSeq == 0 {
 		return false, ch.RetentionBlockedLEOLag
 	}
@@ -258,7 +275,7 @@ func retentionTrimDecision(state *machine.ChannelState, throughSeq uint64) (bool
 	if throughSeq > state.LEO {
 		return false, ch.RetentionBlockedLEOLag
 	}
-	if state.Role == ch.RoleLeader && throughSeq > minISRMatchOffset(state) {
+	if !quorumLog && state.Role == ch.RoleLeader && throughSeq > minISRMatchOffset(state) {
 		return false, ch.RetentionBlockedMinISRLag
 	}
 	return true, ""

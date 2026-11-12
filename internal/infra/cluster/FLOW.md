@@ -55,6 +55,10 @@ delivery/presence integration, and cluster-backed operational capabilities.
 - Configured application ACK identity and server timestamp come from that
   verified committed row through an injected metadata reader, without
   reinterpreting the persisted payload hash as an original pre-admission hash.
+- Manager message retention on durable quorum channels proves every ISR voter's
+  committed frontier with replica probes (no Channel runtime, so idle channels
+  work and `dry_run` never loads or writes anything); an unreachable or lagging
+  voter blocks the advance, and the probes are bounded by the request context.
 
 ## Read First
 

@@ -14,6 +14,9 @@ import (
 	metadb "github.com/WuKongIM/WuKongIM/pkg/db/meta"
 )
 
+// retentionProbeTimeout bounds the per-request voter frontier probes so a degraded quorum cannot hang the handler.
+const retentionProbeTimeout = 5 * time.Second
+
 // MessageRetentionNode is the cluster surface required to advance message log compaction boundaries.
 type MessageRetentionNode interface {
 	NodeID() uint64
@@ -21,6 +24,11 @@ type MessageRetentionNode interface {
 	ChannelRetentionView(context.Context, channelruntime.ChannelID) (channelruntime.RetentionView, error)
 	ReadChannelCommitted(context.Context, channelruntime.ChannelID, channelstore.ReadCommittedRequest) (channelstore.ReadCommittedResult, error)
 	AdvanceChannelRetentionThroughSeq(context.Context, metadb.ChannelRetentionAdvance) error
+}
+
+// messageRetentionReplicaProber reads the exact durable frontier of one voter without loading a Channel runtime.
+type messageRetentionReplicaProber interface {
+	ProbeChannelReplica(ctx context.Context, nodeID uint64, meta metadb.ChannelRuntimeMeta) (channelruntime.RuntimeProbeChannel, error)
 }
 
 type messageRetentionRPCNode interface {
@@ -76,13 +84,26 @@ func (o *ManagementMessageRetentionOperator) AdvanceMessageRetention(ctx context
 	}
 
 	channelID := channelruntime.ChannelID{ID: req.ChannelID, Type: uint8(req.ChannelType)}
-	view, err := o.node.ChannelRetentionView(ctx, channelID)
-	if err != nil {
-		return managementusecase.AdvanceMessageRetentionResponse{}, mapMessageRetentionError(err)
+	var view channelruntime.RetentionView
+	prober, quorumMode := o.node.(messageRetentionReplicaProber)
+	if !quorumMode {
+		view, err = o.node.ChannelRetentionView(ctx, channelID)
+		if err != nil {
+			return managementusecase.AdvanceMessageRetentionResponse{}, mapMessageRetentionError(err)
+		}
 	}
 	latestSeq, err := o.latestCommittedSeq(ctx, req, current)
 	if err != nil {
 		return managementusecase.AdvanceMessageRetentionResponse{}, err
+	}
+	if quorumMode {
+		// Durable quorum channels do not report follower progress to the leader runtime. The leader proves
+		// every voter's durable frontier directly, which also works for an idle (unloaded) channel and never
+		// activates a runtime, so dry_run stays read-only.
+		view, err = o.voterRetentionView(ctx, prober, meta, latestSeq)
+		if err != nil {
+			return managementusecase.AdvanceMessageRetentionResponse{}, mapMessageRetentionError(err)
+		}
 	}
 	safeSeq, blockedReason := retentionSafeBoundary(req.ThroughSeq, latestSeq, view)
 	if safeSeq < req.ThroughSeq {
@@ -112,6 +133,32 @@ func (o *ManagementMessageRetentionOperator) AdvanceMessageRetention(ctx context
 		return managementusecase.AdvanceMessageRetentionResponse{}, mapMessageRetentionError(err)
 	}
 	return retentionResponse(req, safeSeq, managementusecase.MessageRetentionStatusAdvanced, managementusecase.MessageRetentionBlockedReasonNone), nil
+}
+
+// voterRetentionView builds a retention view from the durable committed frontier of every ISR voter. A voter
+// that cannot be probed contributes zero so the boundary is blocked instead of passing what it may lack.
+func (o *ManagementMessageRetentionOperator) voterRetentionView(ctx context.Context, prober messageRetentionReplicaProber, meta metadb.ChannelRuntimeMeta, latestSeq uint64) (channelruntime.RetentionView, error) {
+	voters := meta.ISR
+	if len(voters) == 0 {
+		voters = meta.Replicas
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, retentionProbeTimeout)
+	defer cancel()
+	view := channelruntime.RetentionView{HW: latestSeq, CheckpointHW: latestSeq, MinISRMatchOffset: maxUint64()}
+	for _, voter := range voters {
+		probe, err := prober.ProbeChannelReplica(probeCtx, voter, meta)
+		if err != nil {
+			if cause := ctx.Err(); cause != nil {
+				return channelruntime.RetentionView{}, cause
+			}
+			view.MinISRMatchOffset = 0
+			continue
+		}
+		if probe.HW < view.MinISRMatchOffset {
+			view.MinISRMatchOffset = probe.HW
+		}
+	}
+	return view, nil
 }
 
 func (o *ManagementMessageRetentionOperator) latestCommittedSeq(ctx context.Context, req managementusecase.AdvanceMessageRetentionRequest, current uint64) (uint64, error) {
